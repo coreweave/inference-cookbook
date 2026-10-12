@@ -1,0 +1,145 @@
+# SPDX-FileCopyrightText: 2026 CoreWeave, Inc.
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-PackageName: inference-cookbook
+
+---
+name: hotload E2E
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  authorize:
+    if: >-
+      github.event.issue.pull_request &&
+      github.event.comment.body == '/hotload-e2e'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.pr.outputs.sha }}
+    steps:
+      - name: Check commenter permission and resolve trusted PR commit
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          COMMENTER: ${{ github.event.comment.user.login }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          permission=$(gh api "repos/$REPOSITORY/collaborators/$COMMENTER/permission" --jq '.permission')
+          case "$permission" in
+            admin|maintain|write) ;;
+            *) echo 'The commenter must have write access to run hotload E2E.'; exit 1 ;;
+          esac
+          pr=$(gh api "repos/$REPOSITORY/pulls/$PR_NUMBER")
+          if ! jq -e --arg repository "$REPOSITORY" \
+            '.state == "open" and .head.repo.full_name == $repository' <<< "$pr" > /dev/null; then
+            echo 'Only open pull requests from this repository can run hotload E2E.'
+            exit 1
+          fi
+          sha=$(jq -r '.head.sha' <<< "$pr")
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]]
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Testing PR #$PR_NUMBER at $sha" >> "$GITHUB_STEP_SUMMARY"
+
+  hotload:
+    needs: authorize
+    name: hotload E2E (PR ${{ github.event.issue.number }})
+    concurrency:
+      group: hotload-e2e
+      cancel-in-progress: false
+    environment: hotload-e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 105
+    defaults:
+      run:
+        working-directory: libs/cwtrain
+    env:
+      CWTRAIN_E2E_BUCKET: ${{ vars.CWTRAIN_E2E_BUCKET }}
+      AWS_EC2_METADATA_DISABLED: "true"
+      CW_S3_ENDPOINT: https://cwobject.com
+      AWS_REGION: ${{ vars.CWTRAIN_E2E_ZONE || 'us-west-04a' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.authorize.outputs.sha }}
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          python-version: "3.12"
+          activate-environment: true
+      - name: Install CWIC v1.44.0 and configure temporary storage credentials
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          export AWS_CONFIG_FILE="$RUNNER_TEMP/e2e-aws-config"
+          {
+            echo "AWS_CONFIG_FILE=$AWS_CONFIG_FILE"
+            echo "CWIC_CACHE_DIR=$RUNNER_TEMP/cwic-cache"
+            echo "AWS_REGION=${AWS_REGION^^}"
+          } >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/cwic-bin"
+          gh release download v1.44.0 --repo coreweave/cwic \
+            --pattern cwic_Linux_x86_64.tar.gz --dir "$RUNNER_TEMP/cwic-bin"
+          cd "$RUNNER_TEMP/cwic-bin"
+          echo 'a6d41b550df3b2e4a223c775e574519d5d0f25855f26d036af8c2f629949131d  cwic_Linux_x86_64.tar.gz' | sha256sum -c -
+          tar -xzf cwic_Linux_x86_64.tar.gz cwic
+          echo "$RUNNER_TEMP/cwic-bin" >> "$GITHUB_PATH"
+          printf '[default]\ncredential_process = cwic auth accesskey api-token\n' > "$AWS_CONFIG_FILE"
+      - name: Install client and model downloader
+        run: uv pip install -e . 'huggingface_hub>=0.26,<2'
+
+      - name: Create resources and verify hot-load
+        timeout-minutes: 75
+        env:
+          COREWEAVE_API_TOKEN: ${{ secrets.CWTRAIN_E2E_API_TOKEN }}
+          CWTRAIN_E2E_ZONE: ${{ vars.CWTRAIN_E2E_ZONE || 'us-west-04a' }}
+          CWTRAIN_E2E_DEPLOYMENT_JSON: ${{ secrets.CWTRAIN_E2E_DEPLOYMENT_JSON }}
+          CWTRAIN_E2E_RUNTIME_VERSION: ${{ vars.CWTRAIN_E2E_RUNTIME_VERSION || '0.30.0+crwv.5' }}
+          CWTRAIN_E2E_HF_MODEL: ${{ vars.CWTRAIN_E2E_HF_MODEL || 'Qwen/Qwen3-0.6B' }}
+          CWTRAIN_E2E_HF_REVISION: ${{ vars.CWTRAIN_E2E_HF_REVISION }}
+          HF_TOKEN: ${{ secrets.CWTRAIN_E2E_HF_TOKEN }}
+        run: python -m e2e.hotload --state "$RUNNER_TEMP/hotload-e2e.json"
+      - name: Ensure deployment, gateway, and run objects are deleted
+        if: ${{ always() }}
+        timeout-minutes: 23
+        env:
+          COREWEAVE_API_TOKEN: ${{ secrets.CWTRAIN_E2E_API_TOKEN }}
+        run: python -m e2e.hotload --state "$RUNNER_TEMP/hotload-e2e.json" --cleanup-only
+
+  report:
+    name: Report E2E result on PR
+    needs: [authorize, hotload]
+    if: ${{ always() && needs.authorize.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Post result and run link
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+          TEST_SHA: ${{ needs.authorize.outputs.sha }}
+          RESULT: ${{ needs.hotload.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
+        run: |
+          case "$RESULT" in
+            success) summary='Passed (including cleanup)' ;;
+            failure) summary='Failed — see the run for test or cleanup errors' ;;
+            cancelled) summary='Cancelled, possibly before it started — see the run for cleanup status' ;;
+            *) summary='Skipped — no completed E2E result' ;;
+          esac
+          {
+            printf '### Hot-load E2E: %s\n\n' "$summary"
+            printf 'Tested commit: `%s`\n\n' "$TEST_SHA"
+            printf '[View workflow run and logs](%s)\n' "$RUN_URL"
+          } > "$RUNNER_TEMP/hotload-e2e-result.md"
+          gh pr comment "$PR_NUMBER" --repo "$REPOSITORY" \
+            --body-file "$RUNNER_TEMP/hotload-e2e-result.md"

@@ -1,0 +1,26 @@
+# SPDX-FileCopyrightText: 2026 CoreWeave, Inc.
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-PackageName: inference-cookbook
+
+---
+name: Feature or recipe request
+description: Suggest a library feature, a new recipe, or an improvement to an existing one.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do
+      description: The workflow or framework you want to use, and what is missing or hard today.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would help
+      description: The change you have in mind, if any.
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else
+      description: Links to the framework, related issues, or alternatives you considered.

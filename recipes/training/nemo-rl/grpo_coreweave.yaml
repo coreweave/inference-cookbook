@@ -1,0 +1,123 @@
+# SPDX-FileCopyrightText: 2026 CoreWeave, Inc.
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-PackageName: inference-cookbook
+#
+# GRPO on a CoreWeave hot-load deployment: the NeMo-RL example config plus the coreweave backend.
+# All other settings come from the example in the NeMo-RL container.
+defaults: "/opt/nemo-rl/examples/configs/grpo_math_1B.yaml"
+
+grpo:
+  num_prompts_per_step: 8
+  num_generations_per_prompt: 4
+  max_num_steps: 6
+  val_period: 0            # validation off; otherwise NeMo-RL needs a validation split
+  val_at_start: false
+  val_at_end: false
+
+loss_fn:
+  reference_policy_kl_penalty: 0.0
+  use_importance_sampling_correction: false
+
+checkpointing:
+  enabled: false        # the synchronizer exports the weights; enable to resume training
+
+policy:
+  model_name: "/work/models/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16"      # the deployment's base checkpoint, byte for byte
+  tokenizer:
+    name: ${policy.model_name}
+    chat_template_kwargs: {enable_thinking: false}
+  train_global_batch_size: 32
+  train_micro_batch_size: 1
+  logprob_batch_size: 1
+  max_total_sequence_length: 3072
+  precision: "bfloat16"
+  dtensor_cfg:
+    _v2: true
+    enabled: true
+    tensor_parallel_size: 1
+    context_parallel_size: 1
+    expert_parallel_size: 8
+    activation_checkpointing: true
+    moe_parallelizer:
+      ignore_router_for_ac: true
+    automodel_kwargs:
+      backend:
+        _target_: nemo_automodel.components.models.common.utils.BackendConfig
+        attn: te
+        linear: te
+        rms_norm: torch_fp32
+        experts: gmm
+        dispatcher: deepep
+        rope_fusion: false
+        enable_hf_state_dict_adapter: true
+    # puts cwtrain's worker extension on the worker venv's path (launch.py unpacks it there)
+    env_vars:
+      PYTHONPATH: "/work/py"
+  hf_config_overrides:
+    router_aux_loss_coef: 0.0
+  sequence_packing:
+    enabled: false
+  megatron_cfg:
+    enabled: false
+  # adds the export_hf_checkpoint RPC the weight synchronizer calls
+  worker_extension_cls_fqn: "cwtrain.integrations.nemo_rl.worker.CoreWeaveDTensorPolicyWorker"
+  optimizer:
+    name: "torch.optim.AdamW"
+    kwargs:
+      lr: 1.0e-6
+      weight_decay: 0.1
+      betas: [0.9, 0.98]
+      eps: 1e-8
+  generation:
+    backend: "coreweave"
+    max_new_tokens: 2048
+    temperature: 1.0
+    top_p: 1.0
+    top_k: null
+    stop_token_ids: null
+    stop_strings: null
+    colocated:
+      enabled: false      # the deployment does inference; no inference cluster is created
+      resources:
+        gpus_per_node: null
+        num_nodes: null
+    coreweave_cfg:
+      # the deployment's OpenAI-compatible endpoint (its gateway, /v1) and served model name
+      base_url: ${oc.env:CWTRAIN_ROLLOUT_BASE_URL}
+      model: ${oc.env:CWTRAIN_ROLLOUT_MODEL}
+      api_key_file: ${oc.env:CWTRAIN_ROLLOUT_API_KEY_FILE,null}
+      max_model_len: ${policy.max_total_sequence_length}
+      concurrency: ${oc.env:CWTRAIN_ROLLOUT_CONCURRENCY,32}  # requests in flight
+      # require sampled-token log-probs when the importance-sampling correction uses them
+      require_logprobs: ${loss_fn.use_importance_sampling_correction}
+      # hot-load: deployment, identity prefix, full snapshot every N refits, exports/deltas dir
+      deployment_id: ${oc.env:CWTRAIN_HOTLOAD_DEPLOYMENT_ID}
+      run_id: ${oc.env:CWTRAIN_HOTLOAD_RUN_ID}
+      full_every: ${oc.env:CWTRAIN_HOTLOAD_FULL_EVERY,null}  # null: cwtrain's default, 20
+      state_dir: "/work/hotload"
+
+data:
+  train:
+    dataset_name: DAPOMath17K
+    split_validation_size: 0.0
+  default:
+    prompt_file: null
+    system_prompt_file: null
+    processor: "math_hf_data_processor"
+    env_name: "math"
+
+env:
+  should_use_nemo_gym: false  # true selects the Gym DAPO math preset and training rollout path
+  math:
+    num_workers: 8
+    math_verify_impl: "hf_math_verify"
+
+logger:
+  log_dir: "/work/logs"
+  wandb_enabled: false
+  tensorboard_enabled: false
+  monitor_gpus: false
+
+cluster:
+  gpus_per_node: 8
+  num_nodes: 1

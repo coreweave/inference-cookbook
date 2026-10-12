@@ -1,0 +1,27 @@
+CoreWeave Inference Cookbook patch for slime (https://github.com/THUDM/slime)
+Base: commit 8ee9c1e1c8871ccd6dc8ec812edfaefa3dd1156b
+Purpose: when a sample has no rollout log-probs, shape slime's zero KL from the response lengths
+  instead of from an empty list.
+License: Apache-2.0. Upstream code by Zhipu AI; changes by CoreWeave, Inc. (see REUSE.toml).
+Applied by recipes/training/slime/launch.py with `git apply`, which skips this header.
+
+diff --git a/slime/backends/megatron_utils/loss.py b/slime/backends/megatron_utils/loss.py
+index bbc1b7a..983de21 100644
+--- a/slime/backends/megatron_utils/loss.py
++++ b/slime/backends/megatron_utils/loss.py
+@@ -749,7 +749,14 @@ def compute_advantages_and_returns(args: Namespace, rollout_data: RolloutBatch)
+     if args.kl_coef == 0 or not log_probs:
+         # when kl_coef is 0, we won't compute ref_log_prob
+         xs = log_probs or rollout_log_probs or values
+-        kl = [torch.zeros_like(x, dtype=torch.float32, device=x.device) for x in xs]
++        if not xs:
++            # An external rollout engine may return no per-token log-probs, and the actor's are
++            # computed later inside the loss; shape the zero KL from the response lengths instead.
++            # `not xs` also covers an empty list, which would otherwise yield an empty KL.
++            device = torch.cuda.current_device()
++            kl = [torch.zeros(length, dtype=torch.float32, device=device) for length in response_lengths]
++        else:
++            kl = [torch.zeros_like(x, dtype=torch.float32, device=x.device) for x in xs]
+     else:
+         kl = [
+             compute_approx_kl(

@@ -1,0 +1,45 @@
+# Byte-compiled / optimized files
+__pycache__/
+*.py[codz]
+*$py.class
+*.so
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Unit test / coverage
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+coverage.xml
+
+# Environments
+.env
+.envrc
+.venv/
+
+# Type checkers
+.mypy_cache/
+
+# Linting
+.ruff_cache/
+
+# IDE
+.idea/
+.vscode/
+
+# Claude Code local settings
+CLAUDE.local.md
+.claude/settings.local.json
+
+# Training artefacts
+wandb/
+logs/
+
+# Filled-in local copies of the recipe templates (contain deployment ids, endpoints, headers)
+recipes/**/k8s/run.env
+recipes/**/k8s/*.run.json

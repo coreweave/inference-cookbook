@@ -1,0 +1,29 @@
+{
+  "runtime": {
+    "engine": "vllm",
+    "version": "0.30.0+crwv.5",
+    "engineConfig": {
+      "max-model-len": "4096",
+      "gpu-memory-utilization": "0.9",
+      "max-num-seqs": "8",
+      "reasoning-parser": "nemotron_v3"
+    }
+  },
+  "resources": {
+    "instanceType": "<H100 80GB instance type available in the gateway zone>",
+    "gpuCount": 1
+  },
+  "model": {
+    "name": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16",
+    "bucket": "<existing bucket readable by the inference service>",
+    "path": "<path to Nemotron 3.5 Lightning BF16 checkpoint and tokenizer files>"
+  },
+  "autoscaling": {
+    "min": 1,
+    "max": 1,
+    "concurrency": 8
+  },
+  "traffic": {
+    "weight": 100
+  }
+}

@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: 2026 CoreWeave, Inc.
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-PackageName: inference-cookbook
+
+---
+# Weekly updates for the GitHub Actions that the workflows pin by commit SHA. There are no pip/uv
+# updates: cwtrain has only lower-bound dependency ranges and no lock file. Vulnerability alerts
+# come from the dependency graph and need no configuration here.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    # Wait a week before proposing a new release, to lower the risk of a compromised or withdrawn
+    # one. This delays version updates only, not security updates.
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    groups:
+      github-actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: ci
+    ignore:
+      # Internal action of the assisted-review workflow, to be replaced before the repository
+      # goes public. Dependabot names an action in a subdirectory by its full path
+      # (owner/repo/path), and matches ignore names exactly unless they contain `*`. So both
+      # forms are listed.
+      - dependency-name: coreweave/actions
+      - dependency-name: coreweave/actions/*

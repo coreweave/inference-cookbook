@@ -1,0 +1,56 @@
+# SPDX-FileCopyrightText: 2026 CoreWeave, Inc.
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-PackageName: inference-cookbook
+
+---
+name: Bug report
+description: Something in cwtrain or a recipe does not work as documented.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Thanks for the report. Do not include API tokens, access keys, deployment or
+        organization IDs, or bucket names. Use placeholders instead.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Where
+      options:
+        - cwtrain library or CLI
+        - miles recipe
+        - slime recipe
+        - NeMo-RL recipe
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you ran, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce
+      description: The smallest set of commands, configuration or code that shows the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or error output
+      description: Paste the relevant part, with secrets removed.
+      render: text
+  - type: textarea
+    id: versions
+    attributes:
+      label: Versions
+      description: >-
+        cwtrain version or commit, Python version, and for recipes the framework version or commit
+        and the trainer image.
+    validations:
+      required: true

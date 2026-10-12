@@ -1,0 +1,50 @@
+{
+  "policy": {
+    "version": "v1alpha1",
+    "name": "cwtrain-trainer",
+    "statements": [
+      {
+        "name": "exchange-oidc-token",
+        "effect": "Allow",
+        "actions": [
+          "cwobject:CreateAccessKeyOIDC"
+        ],
+        "resources": [
+          "*"
+        ],
+        "principals": [
+          "role/[OIDC-ISSUER-URL]:system:serviceaccount:[NAMESPACE]:[SERVICE-ACCOUNT]"
+        ]
+      },
+      {
+        "name": "trainer-read",
+        "effect": "Allow",
+        "actions": [
+          "s3:ListBucket",
+          "s3:GetObject"
+        ],
+        "resources": [
+          "[BUCKET-NAME]",
+          "[BUCKET-NAME]/*"
+        ],
+        "principals": [
+          "role/[OIDC-ISSUER-URL]:system:serviceaccount:[NAMESPACE]:[SERVICE-ACCOUNT]"
+        ]
+      },
+      {
+        "name": "trainer-write-snapshots",
+        "effect": "Allow",
+        "actions": [
+          "s3:PutObject",
+          "s3:AbortMultipartUpload"
+        ],
+        "resources": [
+          "[BUCKET-NAME]/[HOT-LOAD-PREFIX]/*"
+        ],
+        "principals": [
+          "role/[OIDC-ISSUER-URL]:system:serviceaccount:[NAMESPACE]:[SERVICE-ACCOUNT]"
+        ]
+      }
+    ]
+  }
+}

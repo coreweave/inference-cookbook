@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: 2026 CoreWeave, Inc.
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-PackageName: inference-cookbook
+
+---
+blank_issues_enabled: false
+contact_links:
+  - name: RL Rollouts documentation
+    url: https://docs.coreweave.com/products/inference/rl-rollouts
+    about: How checkpoint hot-load works on CoreWeave Dedicated Inference, its prerequisites and limits.
+  - name: CoreWeave support
+    url: https://docs.coreweave.com/support
+    about: Account access, enabling RL Rollouts for your organization, quota, and problems with a deployment itself.
+  - name: Report a security vulnerability
+    url: https://github.com/coreweave/inference-cookbook/security/advisories/new
+    about: Report vulnerabilities privately, not in a public issue. See SECURITY.md.

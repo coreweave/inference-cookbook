@@ -1,0 +1,167 @@
+# SPDX-FileCopyrightText: 2026 CoreWeave, Inc.
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-PackageName: inference-cookbook
+
+---
+name: cwtrain
+
+on:
+  merge_group:
+    types: [checks_requested]
+  pull_request:
+    paths:
+      - "libs/cwtrain/**"
+      - ".github/workflows/cwtrain.yaml"
+  push:
+    branches: [main]
+    tags: ["v*.*.*"]
+    paths:
+      - "libs/cwtrain/**"
+      - ".github/workflows/cwtrain.yaml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cwtrain-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  test:
+    name: lint and test (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.13", "3.14"]
+    defaults:
+      run:
+        working-directory: libs/cwtrain
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # nothing here pushes, so the token is not left in .git/config for later steps
+          persist-credentials: false
+      # zizmor cannot evaluate the enable-cache expression below, which turns the cache off on tags
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0 # zizmor: ignore[cache-poisoning]
+        with:
+          python-version: ${{ matrix.python }}
+          activate-environment: true
+          # A tag build produces the released distributions, so it must not restore a cache.
+          enable-cache: ${{ !startsWith(github.ref, 'refs/tags/') }}
+      # Prevent publishing a package version different from the release tag. It needs only
+      # pyproject.toml and runs before Install, so every leg stops within seconds on a wrong tag.
+      - name: Verify release version
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        shell: python
+        run: |
+          import os
+          import re
+          import tomllib  # Standard library since Python 3.11; CI uses 3.12+.
+          from pathlib import Path
+
+          lib = Path(os.environ["GITHUB_WORKSPACE"], "libs", "cwtrain")
+          version = tomllib.loads((lib / "pyproject.toml").read_text())["project"]["version"]
+          # A package that still spells out its own __version__ must agree with pyproject.toml.
+          init = (lib / "cwtrain" / "__init__.py").read_text()
+          literal = re.search(r"^__version__\s*=\s*[\"']([^\"']+)[\"']", init, re.M)
+          if literal and literal.group(1) != version:
+              raise SystemExit(
+                  f"cwtrain/__init__.py says {literal.group(1)!r}; pyproject.toml says {version!r}"
+              )
+          expected = f"v{version}"
+          actual = os.environ["RELEASE_TAG"]
+          if not re.fullmatch(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", actual):
+              raise SystemExit("Release tags must use stable SemVer: vMAJOR.MINOR.PATCH")
+          if actual != expected:
+              raise SystemExit(f"Release tag {actual!r} must match {expected!r}")
+      - name: Install
+        # A CPU build of torch lets the NeMo-RL integration tests run instead of being skipped.
+        run: |
+          uv pip install torch --index-url https://download.pytorch.org/whl/cpu
+          uv pip install -e '.[dev,nemo-rl]'
+      - name: Lint
+        run: |
+          ruff check .
+          ruff format --check .
+      - name: Test
+        run: pytest -q
+      - name: Build distributions
+        run: uv build
+      - name: Store release distributions
+        if: startsWith(github.ref, 'refs/tags/v') && matrix.python == '3.12'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cwtrain-distributions
+          path: libs/cwtrain/dist/*
+          if-no-files-found: error
+          # "Re-run all jobs" uploads again into the same workflow run
+          overwrite: true
+
+  release:
+    name: Create GitHub release
+    if: startsWith(github.ref, 'refs/tags/v')
+    # after the reviewed PyPI upload, so a wrong tag creates nothing public before approval
+    needs: [test, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download release distributions
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: cwtrain-distributions
+          path: dist/
+      - name: Create release with distribution assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          # The notes link to the library at the tag. Generated notes would list every commit in
+          # the repository on the first release, not only cwtrain's.
+          notes=$(mktemp)
+          link="https://github.com/$GH_REPO/tree/$RELEASE_TAG/libs/cwtrain"
+          fallback="See the [cwtrain release notes]($link)."
+          echo "$fallback" > "$notes"
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            # A rerun after a failed asset upload completes the release. It replaces the notes
+            # only while they are still the default link, so it keeps notes edited by hand.
+            echo "Release $RELEASE_TAG already exists; uploading its assets again."
+            gh release upload "$RELEASE_TAG" dist/* --clobber
+            if [ "$(gh release view "$RELEASE_TAG" --json body -q .body)" = "$fallback" ]; then
+              gh release edit "$RELEASE_TAG" --notes-file "$notes"
+            fi
+          else
+            gh release create "$RELEASE_TAG" dist/* --verify-tag --notes-file "$notes" --title "$RELEASE_TAG"
+          fi
+
+  publish:
+    name: Publish cwtrain to PyPI
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/cwtrain/
+    permissions:
+      id-token: write
+    steps:
+      - name: Download release distributions
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: cwtrain-distributions
+          path: dist/
+      # setup-uv is on the repository's allowed-actions list; pypa/gh-action-pypi-publish is not.
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          # the interpreter the released distributions were built with
+          python-version: "3.12"
+          # nothing to restore for an upload, and a publishing job should not read caches
+          enable-cache: false
+      - name: Publish to PyPI
+        # Trusted Publishing: uv trades this job's OIDC token for a short-lived PyPI upload token,
+        # so no API token is stored anywhere. The GitHub release then carries these same files.
+        run: uv publish --trusted-publishing always dist/*

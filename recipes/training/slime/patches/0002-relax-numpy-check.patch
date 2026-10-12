@@ -1,0 +1,33 @@
+CoreWeave Inference Cookbook patch for slime (https://github.com/THUDM/slime)
+Base: commit 8ee9c1e1c8871ccd6dc8ec812edfaefa3dd1156b
+Purpose: let SLIME_RELAX_NUMPY_CHECK=1 skip slime's numpy 1 assertion on images whose Megatron-LM
+  works with numpy 2, such as the arm64 miles image; the check is unchanged otherwise.
+License: Apache-2.0. Upstream code by Zhipu AI; changes by CoreWeave, Inc. (see REUSE.toml).
+Applied by recipes/training/slime/launch.py with `git apply`, which skips this header.
+
+diff --git a/slime/backends/megatron_utils/initialize.py b/slime/backends/megatron_utils/initialize.py
+index 36872bd..c2cfb68 100644
+--- a/slime/backends/megatron_utils/initialize.py
++++ b/slime/backends/megatron_utils/initialize.py
+@@ -1,6 +1,8 @@
+ import logging
+ import random
+ 
++import os
++
+ import numpy as np
+ import torch
+ from megatron.core import mpu, tensor_parallel
+@@ -63,7 +65,11 @@ def init(args):
+     _initialize_distributed(args)
+ 
+     # https://github.com/NVIDIA/Megatron-LM/issues/1563
+-    assert np.__version__.startswith("1."), "Megatron does not support numpy 2.x"
++    if not np.__version__.startswith("1."):
++        # Images whose Megatron-LM build is known to work with numpy 2 (for example the miles
++        # arm64 images) set SLIME_RELAX_NUMPY_CHECK=1; everything else keeps the hard check.
++        assert os.environ.get("SLIME_RELAX_NUMPY_CHECK") == "1", "Megatron does not support numpy 2.x"
++        logger.warning("numpy %s with SLIME_RELAX_NUMPY_CHECK=1; Megatron numpy-1 check skipped", np.__version__)
+ 
+     # Random seeds for reproducibility.
+     if args.rank == 0:

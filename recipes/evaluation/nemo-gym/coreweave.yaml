@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: 2026 CoreWeave, Inc.
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-PackageName: inference-cookbook
+
+# Gym's vllm_model is an HTTP adapter, not a local inference engine.
+# Load alongside resources_servers/mcqa/configs/mcqa.yaml from Gym v0.6.0.
+policy_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${oc.env:CWTRAIN_ROLLOUT_BASE_URL}
+      api_key: ${oc.env:CWTRAIN_ROLLOUT_API_KEY}
+      model: ${oc.env:CWTRAIN_ROLLOUT_MODEL}
+      # Evaluation needs text and rewards, not training token IDs/log-probs.
+      return_token_id_information: false
+      is_responses_native: false
+      uses_reasoning_parser: true
+      uses_interleaved_reasoning: false
+      # Use Nemotron non-thinking mode for the short MCQA smoke test.
+      chat_template_kwargs:
+        enable_thinking: false
+      extra_body:
+        max_tokens: 512
+        temperature: 0.0

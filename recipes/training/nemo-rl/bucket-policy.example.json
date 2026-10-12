@@ -1,0 +1,79 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AllowInference",
+      "Effect": "Allow",
+      "Principal": {
+        "CW": [
+          "arn:aws:iam::cw4637:coreweave/uvAGGQSxxXeeQBJzcGsD9"
+        ]
+      },
+      "Action": [
+        "s3:ListBucket",
+        "s3:GetObject"
+      ],
+      "Resource": [
+        "arn:aws:s3:::[BUCKET-NAME]",
+        "arn:aws:s3:::[BUCKET-NAME]/*"
+      ]
+    },
+    {
+      "Sid": "AllowOrgUsers",
+      "Effect": "Allow",
+      "Principal": "*",
+      "Action": [
+        "s3:ListBucket",
+        "s3:GetObject"
+      ],
+      "Resource": [
+        "arn:aws:s3:::[BUCKET-NAME]",
+        "arn:aws:s3:::[BUCKET-NAME]/*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "cw:PrincipalOrgID": [
+            "[ORG-ID]"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "AllowTrainer",
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": [
+          "arn:aws:iam::[ORG-ID]:role/[OIDC-ISSUER-URL]:system:serviceaccount:[NAMESPACE]:[SERVICE-ACCOUNT]"
+        ]
+      },
+      "Action": [
+        "s3:PutObject",
+        "s3:AbortMultipartUpload"
+      ],
+      "Resource": [
+        "arn:aws:s3:::[BUCKET-NAME]/[HOT-LOAD-PREFIX]/*"
+      ]
+    },
+    {
+      "Sid": "AllowAdmin",
+      "Effect": "Allow",
+      "Principal": {
+        "CW": [
+          "arn:aws:iam::[ORG-ID]:coreweave/[ADMIN-USER-ID]"
+        ]
+      },
+      "Action": [
+        "s3:PutObject",
+        "s3:DeleteObject",
+        "s3:AbortMultipartUpload",
+        "s3:ListBucketMultipartUploads",
+        "s3:ListMultipartUploadParts",
+        "s3:GetBucketPolicy"
+      ],
+      "Resource": [
+        "arn:aws:s3:::[BUCKET-NAME]",
+        "arn:aws:s3:::[BUCKET-NAME]/*"
+      ]
+    }
+  ]
+}

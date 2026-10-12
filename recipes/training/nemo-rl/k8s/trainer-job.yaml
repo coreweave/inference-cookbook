@@ -1,0 +1,98 @@
+# SPDX-FileCopyrightText: 2026 CoreWeave, Inc.
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-PackageName: inference-cookbook
+#
+# NeMo-RL GRPO trainer whose rollouts come from a CoreWeave hot-load deployment.
+# Render with: ./render.sh run.env trainer-job.yaml | kubectl apply -f -
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: cwtrain-${JOB_NAME}
+  namespace: ${NAMESPACE}
+  labels: {app.kubernetes.io/part-of: cwtrain-recipe}
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 172800
+  template:
+    metadata:
+      labels: {app.kubernetes.io/part-of: cwtrain-recipe, app.kubernetes.io/component: trainer}
+    spec:
+      restartPolicy: Never
+      # The trainer's own principal: with Workload Identity Federation, its object storage
+      # credentials come from this service account (README, "What you need"). Empty: "default".
+      serviceAccountName: "${TRAINER_SERVICE_ACCOUNT}"
+      nodeSelector: {node.kubernetes.io/instance-type: "${INSTANCE_TYPE}"}
+      tolerations:
+      - {key: is_gpu, operator: Exists}
+      containers:
+      - name: trainer
+        image: ${TRAINER_IMAGE}
+        command: ["bash", "/opt/cwtrain/run-trainer.sh"]
+        env:
+        # what to train
+        - {name: MODEL_SLUG, value: "${MODEL_SLUG}"}
+        - {name: BASE_S3_URI, value: "${BASE_S3_URI}"}
+        - {name: NUM_STEPS, value: "${NUM_STEPS}"}
+        - {name: ACTOR_GPUS, value: "${ACTOR_GPUS}"}
+        # extra hydra-style overrides for run_grpo.py, e.g. grpo.num_prompts_per_step=16
+        - name: EXTRA_OVERRIDES
+          value: |-
+            ${EXTRA_OVERRIDES}
+        # rollouts from the deployment
+        - {name: CWTRAIN_ROLLOUT_BASE_URL, value: "${ROLLOUT_BASE_URL}"}
+        - {name: CWTRAIN_ROLLOUT_MODEL, value: "${ROLLOUT_MODEL}"}
+        - {name: CWTRAIN_ROLLOUT_API_KEY_FILE, value: /secrets/inference/api_key}
+        - {name: CWTRAIN_ROLLOUT_CONCURRENCY, value: "${ROLLOUT_CONCURRENCY}"}
+        # hot-load hook
+        - {name: CWTRAIN_HOTLOAD_DEPLOYMENT_ID, value: "${DEPLOYMENT_ID}"}
+        - {name: CWTRAIN_HOTLOAD_RUN_ID, value: "${RUN_ID}"}
+        - {name: CWTRAIN_HOTLOAD_WAIT, value: "${HOTLOAD_WAIT}"}
+        - {name: CWTRAIN_HOTLOAD_TIMEOUT, value: "${HOTLOAD_TIMEOUT}"}
+        - {name: CWTRAIN_HOTLOAD_VERIFY, value: "${HOTLOAD_VERIFY}"}
+        # empty: the launcher picks the policy for its loop
+        - {name: CWTRAIN_HOTLOAD_PROMPT_CACHE_POLICY, value: "${HOTLOAD_PROMPT_CACHE_POLICY}"}
+        # every N-th refit is a full snapshot; the others are deltas against the previous export
+        - {name: CWTRAIN_HOTLOAD_FULL_EVERY, value: "${FULL_EVERY}"}
+        - {name: CWTRAIN_ROLLOUT_TOKEN_IDS, value: "1"}
+        - {name: COREWEAVE_API_URL, value: "${COREWEAVE_API_URL}"}
+        # the API token stays in a Secret, never in the Job spec; the pod does not start without it
+        - name: COREWEAVE_API_TOKEN
+          valueFrom: {secretKeyRef: {name: "${API_TOKEN_SECRET}", key: token}}
+        - {name: CWTRAIN_API_HEADERS, value: '${CWTRAIN_API_HEADERS}'}
+        - {name: CWTRAIN_API_INSECURE, value: "${CWTRAIN_API_INSECURE}"}
+        # object storage for snapshots
+        - {name: CW_S3_ENDPOINT, value: "${CW_S3_ENDPOINT}"}
+        - {name: AWS_CONFIG_FILE, value: /aws/config}
+        - {name: AWS_SHARED_CREDENTIALS_FILE, value: /aws/credentials}
+        - {name: AWS_EC2_METADATA_DISABLED, value: "true"}
+        # Workload Identity Federation: when STORAGE_SECRET holds no key, boto3 exchanges the
+        # service account's token for temporary credentials here. A key in the Secret wins.
+        - {name: AWS_CONTAINER_CREDENTIALS_FULL_URI, value: "https://api.coreweave.com/v1/cwobject/temporary-credentials/oidc/${ORG_ID}"}
+        - {name: AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE, value: /var/run/secrets/caios/token}
+        - {name: HF_HUB_ENABLE_HF_TRANSFER, value: "0"}
+        - {name: PYTHONUNBUFFERED, value: "1"}
+        volumeMounts:
+        - {name: kit, mountPath: /opt/cwtrain, readOnly: true}
+        - {name: aws, mountPath: /aws, readOnly: true}
+        - {name: caios-token, mountPath: /var/run/secrets/caios, readOnly: true}
+        - {name: inference-key, mountPath: /secrets/inference, readOnly: true}
+        - {name: work, mountPath: /work}
+        - {name: dshm, mountPath: /dev/shm}
+        resources:
+          requests: {nvidia.com/gpu: ${ACTOR_GPUS}, cpu: "32", memory: 768Gi}
+          limits: {nvidia.com/gpu: ${ACTOR_GPUS}, cpu: "64", memory: 1Ti}
+      volumes:
+      - name: kit
+        configMap: {name: ${KIT_NAME}}
+      - name: aws
+        secret: {secretName: ${STORAGE_SECRET}}
+      - name: caios-token
+        projected:
+          sources:
+          - serviceAccountToken: {audience: "https://coreweave.com/iam", expirationSeconds: 3600, path: token}
+      - name: inference-key
+        secret: {secretName: ${INFERENCE_KEY_SECRET}}
+      - name: work
+        emptyDir: {sizeLimit: 600Gi}
+      - name: dshm
+        emptyDir: {medium: Memory, sizeLimit: 64Gi}

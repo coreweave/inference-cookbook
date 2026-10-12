@@ -1,0 +1,133 @@
+--- a/nemo_rl/algorithms/grpo.py
++++ b/nemo_rl/algorithms/grpo.py
+@@ -506,10 +506,15 @@
+                 node_id=ray_cur_node_id,
+                 soft=True,
+             )
++        actor_env = dict(os.environ)
++        if generation_config["backend"] == "coreweave":
++            from cwtrain.integrations.launch import is_secret_env_var
++
++            actor_env = {k: v for k, v in actor_env.items() if not is_secret_env_var(k)}
+         nemo_gym_opts["runtime_env"] = {
+             "py_executable": nemo_gym_py_exec,
+             "env_vars": {
+-                **os.environ,
++                **actor_env,
+                 "VIRTUAL_ENV": nemo_gym_py_exec,
+                 "UV_PROJECT_ENVIRONMENT": nemo_gym_py_exec,
+             },
+@@ -1219,6 +1224,12 @@
+             hf_checkpoint=policy_config["model_name"],
+         )
+         worker_init_timing_metrics["coreweave_init_time_s"] = time.perf_counter() - t0
++        if enable_nemo_gym:
++            nemo_gym_actor, gym_init_time = _spinup_nemo_gym(
++                [policy_generation.rollout_config.base_url],
++                policy_generation.rollout_config.model,
++            )
++            worker_init_timing_metrics["nemo_gym_init_time_s"] = gym_init_time
+         print(
+             f"  ✓ Using CoreWeave hot-load deployment for generation with {policy_config['model_name']}",
+             flush=True,
+@@ -1802,6 +1813,10 @@
+     should_use_nemo_gym = bool(env_config.get("should_use_nemo_gym"))
+     if not should_use_nemo_gym:
+         return should_use_nemo_gym
++
++    if master_config.policy["generation"]["backend"] == "coreweave":
++        # Gym makes async HTTP requests to the external generation service.
++        return True
+ 
+     # Validate the setup for training with NeMo-Gym
+     assert _should_use_async_rollouts(master_config), (
+--- a/nemo_rl/environments/nemo_gym.py
++++ b/nemo_rl/environments/nemo_gym.py
+@@ -183,6 +183,10 @@
+             "dummy_key"  # No key necessary for training.
+         )
+         initial_global_config_dict["policy_base_url"] = self.cfg["base_urls"]
++        if initial_global_config_dict.get("coreweave_training"):
++            from cwtrain.integrations.nemo_rl.gym import actor_config
++
++            initial_global_config_dict = actor_config(initial_global_config_dict)
+         # In multinode runs, Gym-managed service configs must advertise a real node IP
+         # rather than falling back to localhost, or remote workers will connect to
+         # their own loopback interface instead of the actor-hosted service.
+@@ -324,6 +328,10 @@
+         )
+ 
+         nemo_rl_message_log = []
++        if (self.cfg.get("initial_global_config_dict") or {}).get("coreweave_training"):
++            from cwtrain.integrations.nemo_rl.gym import validate_training_output
++
++            validate_training_output(nemo_gym_result)
+         seen_token_ids: List[int] = []
+         batch_decode_items = []
+         for output_item_dict in nemo_gym_result["response"]["output"]:
+@@ -478,8 +486,9 @@
+     generation_config = config.policy["generation"]
+ 
+     # Enable the http server. Requires both async engine and the expose_http_server flag
+-    generation_config["vllm_cfg"]["async_engine"] = True
+-    generation_config["vllm_cfg"]["expose_http_server"] = True
++    if generation_config["backend"] != "coreweave":
++        generation_config["vllm_cfg"]["async_engine"] = True
++        generation_config["vllm_cfg"]["expose_http_server"] = True
+ 
+     # Stop strings or token ids are not supported
+     generation_config["stop_strings"] = None
+--- a/nemo_rl/experience/rollouts.py
++++ b/nemo_rl/experience/rollouts.py
+@@ -1346,7 +1346,9 @@
+     assert max_rollout_turns is None, (
+         "`max_rollout_turns` is not supported in NeMo-Gym path!"
+     )
+-    if "vllm_cfg" in policy_generation.cfg:
++    if policy_generation.cfg.get("backend") == "coreweave":
++        engine_max_model_len = policy_generation.max_model_len
++    elif "vllm_cfg" in policy_generation.cfg:
+         engine_max_model_len = policy_generation.cfg["vllm_cfg"]["max_model_len"]
+     elif "mcore_generation_config" in policy_generation.cfg:
+         engine_max_model_len = policy_generation.cfg["mcore_generation_config"][
+@@ -1422,7 +1424,9 @@
+     # Prepare for the rollout metrics calculation below. Not strictly necessary here, but good to have parity with `run_async_multi_turn_rollout`
+     with timer.time(f"{timer_prefix}/prepare_for_metrics_calculation"):
+         batch_size = len(nemo_gym_rows)
+-        if "vllm_cfg" in policy_generation.cfg:
++        if policy_generation.cfg.get("backend") == "coreweave":
++            max_total_tokens_per_sample = policy_generation.max_model_len
++        elif "vllm_cfg" in policy_generation.cfg:
+             max_total_tokens_per_sample = policy_generation.cfg["vllm_cfg"][
+                 "max_model_len"
+             ]
+--- a/examples/run_grpo.py
++++ b/examples/run_grpo.py
+@@ -79,6 +79,14 @@
+         config = parse_hydra_overrides(config, overrides)
+ 
+     config = OmegaConf.to_container(config, resolve=True)
++    if config["policy"]["generation"]["backend"] == "coreweave" and config["env"].get("should_use_nemo_gym"):
++        import runpy
++
++        runpy.run_path(
++            os.path.join(os.path.dirname(__file__), "nemo_gym", "run_grpo_nemo_gym.py"),
++            run_name="__main__",
++        )
++        return
+     config = MasterConfig(**config)
+     print("Applied CLI overrides")
+ 
+--- a/examples/nemo_gym/run_grpo_nemo_gym.py
++++ b/examples/nemo_gym/run_grpo_nemo_gym.py
+@@ -134,6 +134,10 @@
+         config = parse_hydra_overrides(config, overrides)
+ 
+     config = OmegaConf.to_container(config, resolve=True)
++    if config["policy"]["generation"]["backend"] == "coreweave":
++        from cwtrain.integrations.nemo_rl.gym import prepare_config
++
++        config = prepare_config(config)
+     config = MasterConfig(**config)
+     print("Applied CLI overrides")
+ 
