@@ -2,13 +2,13 @@
 name = "cwtrain"
 # The only place the version is set. The package reads it from its installed metadata, and the
 # release workflow checks that the release tag matches it.
-version = "0.1.0"
+version = "0.1.1"
 description = "Train against CoreWeave Dedicated Inference: deployments, checkpoint hot-load and rollouts for RL training loops"
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 requires-python = ">=3.12"
-authors = [{ name = "CoreWeave Applied Training" }]
+authors = [{ name = "CoreWeave Applied Training" }, { name = "Fuyuan Bie", email = "fbie@coreweave.com"}]
 keywords = [
     "coreweave",
     "dedicated-inference",
