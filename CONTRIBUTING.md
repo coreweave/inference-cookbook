@@ -107,11 +107,10 @@ One-time setup for a repository and PyPI maintainer:
 1. Create the GitHub environment `pypi` in `coreweave/inference-cookbook` with required
    reviewers and a deployment rule that allows only `v*` tags. The reviewers are the only approval
    between a pushed tag and the upload. Without them, the next tag publishes immediately.
-2. Configure a [PyPI Trusted Publisher](https://docs.pypi.org/trusted-publishers/adding-a-publisher/)
-   for the `cwtrain` project with owner `coreweave`, repository `inference-cookbook`, workflow
-   filename `cwtrain.yaml`, and environment `pypi`. If the project does not exist yet, register
-   a pending publisher for `cwtrain` first. A pending publisher does not reserve the name; the
-   first upload does. You do not need a PyPI API token or a GitHub secret.
+2. An owner of the [`cwtrain` project on PyPI](https://pypi.org/project/cwtrain/) adds a
+   [Trusted Publisher](https://docs.pypi.org/trusted-publishers/adding-a-publisher/) with owner
+   `coreweave`, repository `inference-cookbook`, workflow filename `cwtrain.yaml`, and environment
+   `pypi`. You do not need a PyPI API token or a GitHub secret.
 3. Make sure the repository and organization policy lets the release job's `GITHUB_TOKEN` use
    `contents: write` to create GitHub releases.
 
