@@ -72,10 +72,10 @@ request and an example bucket policy.
 
 ## Quick start: create a deployment and hot-load a checkpoint
 
-Install the library and its CLI. Until `cwtrain` is on PyPI, install it from this repository:
+Install the library and its CLI from [PyPI](https://pypi.org/project/cwtrain/):
 
 ```bash
-pip install "cwtrain @ git+https://github.com/coreweave/inference-cookbook#subdirectory=libs/cwtrain"
+pip install cwtrain
 ```
 
 Point it at your account and bucket:

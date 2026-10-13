@@ -22,19 +22,26 @@ clean up a temporary deployment. `RolloutConfig` holds the endpoint credentials 
 
 ## Install
 
-Until `cwtrain` is on PyPI, install it from the repository:
+Install `cwtrain` from [PyPI](https://pypi.org/project/cwtrain/):
 
 ```bash
-pip install "cwtrain @ git+https://github.com/coreweave/inference-cookbook#subdirectory=libs/cwtrain"
+pip install cwtrain
 ```
 
 For the NeMo-RL integration, install the `nemo-rl` extra instead. It adds torch and safetensors:
 
 ```bash
-pip install "cwtrain[nemo-rl] @ git+https://github.com/coreweave/inference-cookbook#subdirectory=libs/cwtrain"
+pip install "cwtrain[nemo-rl]"
 ```
 
-Both commands also install the `cwtrain` CLI. Then point it at your account and bucket:
+Both commands also install the `cwtrain` CLI. To install the unreleased code on `main`, install
+from the repository instead:
+
+```bash
+pip install "cwtrain @ git+https://github.com/coreweave/inference-cookbook#subdirectory=libs/cwtrain"
+```
+
+Then point it at your account and bucket:
 
 ```bash
 export COREWEAVE_API_TOKEN=...        # CoreWeave API token with the Inference Admin role
