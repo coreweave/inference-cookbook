@@ -305,9 +305,10 @@ lists the Adler-32 of each tensor's bytes. The engine verifies each tensor on in
 and old bytes, so the header records opaque `U8` blobs of the compressed length. The header's
 `__metadata__` holds the Adler-32 of each tensor's *new* bytes. The engine checks these after it
 applies the delta, so a wrong base or a corrupt blob fails the hot-load. slime and miles number
-versions with their own counters (`000001`). As the platform requires, `upload_snapshot` changes
-`version` and `base_version` in the uploaded index to the snapshot identities. It does not change
-the shards:
+versions with their own counters (`000001`). The platform takes the delta's identity and its
+predecessor from the hot-load request, not from the index. `upload_snapshot` still changes
+`version` and `base_version` in the uploaded index to the snapshot identities, so the index names
+the same versions as the request. It does not change the shards:
 
 ```json
 {
