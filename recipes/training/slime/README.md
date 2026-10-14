@@ -184,8 +184,7 @@ slime's `train.py` is synchronous: each rollout round samples the weights that t
 hot-loaded. So, unless you set it, the launcher sets
 `CWTRAIN_HOTLOAD_PROMPT_CACHE_POLICY=reset_all`. This asks the platform to drop KV cache computed
 under the previous weights, instead of reusing cached prompt prefixes across the swap. Set
-`preserve` to keep the cache. The platform does not act on `reset_all` yet. Until it does, prompt
-prefixes cached under the previous weights can be reused after a swap.
+`preserve` to keep the cache.
 
 Snapshot identities are `<RUN_ID>-vNNNNNN`. The platform keys weight versions by identity, so never
 reuse a run ID for different weights.
@@ -462,19 +461,21 @@ resumed run with a fresh `CWTRAIN_HOTLOAD_RUN_ID`.
 - **Pick a verifier that can see the answer.** slime's `deepscaler` reward grades only the text
   after a `</think>` marker. So it returns 0 for every response when thinking is off, or when
   thinking is on but truncated. `--rm-type math` grades the boxed answer wherever it is.
-- **Delta manifests carry identities, not counters.** The platform validates a delta's index
-  `metadata.version` against the snapshot identity, and `metadata.base_version` against the
-  predecessor's identity. slime writes `000001` / `000000`, so `upload_snapshot` rewrites those two
-  fields during upload. It uploads the shards and their per-tensor checksums unchanged.
+- **The uploaded index names identities, not counters.** slime writes `000001` / `000000` as the
+  index's `metadata.version` and `metadata.base_version`. The platform takes the delta's identity
+  and its predecessor from the hot-load request, not from these fields. `upload_snapshot` still
+  rewrites them to the snapshot identities during upload, so the index in the bucket agrees with
+  the request. It uploads the shards and their per-tensor checksums unchanged.
 - **A sync that changes nothing publishes nothing.** slime still writes `weight_vNNNNNN/` with an
   index and no shards. The hook logs it and reports `hotload/skipped_empty`. The skipped version is
   byte-identical, so the hook chains the next delta onto the last version the deployment received.
-- **A replica broken by a failed replay needs CoreWeave to restart it.** After a rejected delta, a
-  replica can report weight version `unknown`. Later hot-loads then stall on it with `chain root
-  unresolved`. The deployment's pods run on CoreWeave's side, so send CoreWeave support the
-  deployment id and the hot-load's id. `cwtrain hotload status <id>` shows each replica's state and
-  error. A restarted replica boots on the deployment's published version, and the pending hot-load
-  completes.
+- **A replica that a failed replay left on `unknown` recovers on the next hot-load.** After a
+  rejected delta, a replica can report weight version `unknown`. It stays paused until a later
+  hot-load succeeds. Fix the cause, then create the hot-load again (see
+  [Failure handling](#failure-handling)). `cwtrain hotload status <id>` shows each replica's state
+  and error. If hot-loads still stall with `chain root unresolved`, the platform cannot tell which
+  version a replica serves. The deployment's pods run on CoreWeave's side, so send CoreWeave
+  support the deployment id and the hot-load's id.
 - **A missing bucket policy is the most common reason weights fail to load.** The model download at
   deployment start and every hot-load read the bucket as the inference service account.
 

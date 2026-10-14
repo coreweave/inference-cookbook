@@ -192,7 +192,7 @@ Kubernetes run, use `HOTLOAD_TIMEOUT` in `run.env`, next to `HOTLOAD_WAIT`, `HOT
 
 GRPO here is synchronous. So, unless you set it, the launcher sets
 `CWTRAIN_HOTLOAD_PROMPT_CACHE_POLICY=reset_all`: each rollout round then starts without KV cache
-from the previous weights. The platform does not act on `reset_all` yet.
+from the previous weights.
 
 The recipe runs the DTensor (Automodel) policy backend. The Megatron worker extension exists but is
 not tested on a live deployment.
