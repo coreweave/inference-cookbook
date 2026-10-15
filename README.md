@@ -94,7 +94,7 @@ Create the deployment from a request body like a recipe's
 `<placeholder>` filled in:
 
 ```bash
-cwtrain deployment create --file deployment.json --wait
+cwtrain deployment create --file deployment.run.json --wait
 ```
 
 The command waits until the deployment is READY, which takes several minutes. Then it prints the

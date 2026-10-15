@@ -48,8 +48,8 @@ uv build   # builds the wheel and source distribution
 The tests use an in-memory fake of the API. They need no credentials and no GPUs. The NeMo-RL
 integration tests need torch (a CPU build is enough) and safetensors, from the `nemo-rl-tests`
 dependency group. Without torch, pytest skips them. CI (`.github/workflows/cwtrain.yaml`) installs
-both and runs the same checks on Python 3.12 to 3.14 for every pull request that touches
-`libs/cwtrain`. It also builds a wheel and source distribution to catch packaging errors.
+both and runs the same checks on Python 3.12 to 3.14 for every pull request. It also builds a
+wheel and source distribution to catch packaging errors.
 
 ### Recipes
 
@@ -71,6 +71,34 @@ and the flow diagram. When you change one, copy it to every other training recip
 Put a new training recipe under `recipes/training/<framework>/`, with its own README and the
 shared files. Add a row for it to the table in the top-level [README](README.md).
 
+### Paths and links
+
+Pages outside this repository link some of its paths: the RL Rollouts page on docs.coreweave.com
+and the cwtrain README on PyPI. GitHub does not redirect a moved path, so these paths are listed
+in [`.github/externally-linked-paths.txt`](.github/externally-linked-paths.txt). To move or rename
+one, update the pages that link it first (for PyPI, release cwtrain with the new link): keep the
+old path, for example as a copy, until they point to the new one. Then remove its line in the
+pull request that removes the old path.
+
+`.github/scripts/check_repo_paths.py` runs on every pull request. It needs only git and Python
+3.11 or later:
+
+```bash
+python .github/scripts/check_repo_paths.py
+```
+
+It fails in any of these cases:
+
+- A path in `externally-linked-paths.txt` is missing.
+- A relative link in a Markdown file, or a link to this repository's `main` branch, points to a
+  path that does not exist.
+- The filled-in copy of a template (`*.env`, `*.run.json`) would not be git-ignored in a
+  directory that holds templates, a file named like a template (`*.example*`) has no known copy
+  name, or git ignores a tracked file.
+- A path in `REUSE.toml` matches no file, or a patch (`*.patch`, `*.diff`) falls back to the
+  default `**` annotation. A patch carries context lines from the project it modifies, so its
+  annotation also names that project's copyright holders.
+
 ### Live hot-load test
 
 The unit tests never call the CoreWeave API. An opt-in workflow does. To start it, a user with
@@ -82,12 +110,12 @@ configuration, trigger rules, cleanup, and how to run it from a workstation.
 ## Pull requests
 
 - Keep one logical change per pull request. Include tests with code changes. CI runs the checks
-  above on pull requests that touch `libs/cwtrain` or `recipes/`.
+  above, except the live hot-load test, on every pull request.
 - Commit messages and pull request titles follow
   [Conventional Commits](https://www.conventionalcommits.org/): `feat:`, `fix(launch):`, `ci:`,
   `docs:`, `chore:`.
 - Never commit deployment IDs, endpoints, tokens, or keys. For this reason, git ignores filled-in
-  copies of the recipe templates (`k8s/run.env`, `k8s/*.run.json`).
+  copies of the templates (`*.env`, `*.run.json`) in every directory.
 
 ## Releasing `cwtrain`
 

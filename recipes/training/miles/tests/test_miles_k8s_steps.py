@@ -357,7 +357,14 @@ def test_the_bucket_policy_command_applies_the_git_ignored_copy() -> None:
     text = (RECIPE / "README.md").read_text()
     assert "file://bucket-policy.json" not in text
     assert "file://k8s/bucket-policy.run.json" in text
-    assert "recipes/**/k8s/*.run.json" in (RECIPE.parents[2] / ".gitignore").read_text()
+    copy = "k8s/bucket-policy.run.json"
+    # git check-ignore exits 0 when git ignores the path; only the repository's own rules count
+    result = subprocess.run(
+        ["git", "-c", f"core.excludesFile={os.devnull}", "check-ignore", "-q", "--no-index", copy],
+        cwd=RECIPE,
+        check=False,
+    )
+    assert result.returncode == 0, f"git does not ignore {copy}"
 
 
 def test_make_kit_skips_an_empty_patches_directory(tmp_path: Path) -> None:

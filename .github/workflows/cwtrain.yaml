@@ -8,10 +8,9 @@ name: cwtrain
 on:
   merge_group:
     types: [checks_requested]
+  # No paths filter: a required check whose workflow a filter skips never reports, and the pull
+  # request waits for it forever.
   pull_request:
-    paths:
-      - "libs/cwtrain/**"
-      - ".github/workflows/cwtrain.yaml"
   push:
     branches: [main]
     tags: ["v*.*.*"]
@@ -165,3 +164,16 @@ jobs:
         # Trusted Publishing: uv trades this job's OIDC token for a short-lived PyPI upload token,
         # so no API token is stored anywhere. The GitHub release then carries these same files.
         run: uv publish --trusted-publishing always dist/*
+
+  # The one check from this workflow that main's ruleset requires, so the jobs above can change
+  # without a ruleset change. always(): a skipped required check would count as passing.
+  cwtrain:
+    name: cwtrain
+    needs: [test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every needed job succeeded
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: for r in $RESULTS; do [ "$r" = success ] || exit 1; done

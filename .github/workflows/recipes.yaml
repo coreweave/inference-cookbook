@@ -6,12 +6,11 @@
 name: recipes
 
 on:
+  merge_group:
+    types: [checks_requested]
+  # No paths filter: a required check whose workflow a filter skips never reports, and the pull
+  # request waits for it forever.
   pull_request:
-    paths:
-      - "recipes/**"
-      - "libs/cwtrain/cwtrain/integrations/launch.py"
-      - ".github/scripts/check_shared_recipe_files.py"
-      - ".github/workflows/recipes.yaml"
   push:
     branches: [main]
     paths:
@@ -20,6 +19,10 @@ on:
 
 permissions:
   contents: read
+
+concurrency:
+  group: recipes-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   shared-files:
@@ -52,3 +55,16 @@ jobs:
       - run: uv pip install -e 'libs/cwtrain[dev]'
       - run: pytest -q recipes/*/*/tests
 
+
+  # The one check from this workflow that main's ruleset requires, so the jobs above can change
+  # without a ruleset change. always(): a skipped required check would count as passing.
+  recipes:
+    name: recipes
+    needs: [shared-files, launchers]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every needed job succeeded
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: for r in $RESULTS; do [ "$r" = success ] || exit 1; done

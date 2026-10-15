@@ -1,0 +1,25 @@
+# Paths that pages outside this repository link to. GitHub does not redirect a moved or renamed
+# path, so .github/scripts/check_repo_paths.py fails while a listed path is missing. To move one,
+# update the pages that link it first: keep the old path (for example, as a copy) until they point
+# to the new one. Then remove its line in the pull request that removes the old path.
+
+# docs.coreweave.com, the RL Rollouts page of Dedicated Inference
+libs/cwtrain/README.md
+recipes/evaluation/nemo-gym
+recipes/training/miles
+recipes/training/miles/bucket-policy.example.json
+recipes/training/nemo-rl
+recipes/training/slime
+
+# pypi.org/project/cwtrain: each release's README, with its links and its git+ install URL. Only a
+# new release changes them, and only on its own page.
+CONTRIBUTING.md
+libs/cwtrain
+recipes/evaluation/nemo-gym/README.md
+recipes/training/miles/README.md
+recipes/training/miles/deployment.example.json
+recipes/training/nemo-rl/README.md
+recipes/training/slime/README.md
+
+# The repository's front page, which every link to the repository root shows
+README.md

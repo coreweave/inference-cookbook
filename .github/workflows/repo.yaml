@@ -1,0 +1,49 @@
+# SPDX-FileCopyrightText: 2026 CoreWeave, Inc.
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-PackageName: inference-cookbook
+
+---
+name: repository
+
+on:
+  merge_group:
+    types: [checks_requested]
+  # No paths filter: the check covers the whole repository, and a required check whose workflow a
+  # filter skips never reports.
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: repository-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  paths:
+    name: paths and links
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # nothing here pushes, so the token is not left in .git/config for later steps
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - run: python .github/scripts/check_repo_paths.py
+
+  # The one check from this workflow that main's ruleset requires, so the jobs above can change
+  # without a ruleset change. always(): a skipped required check would count as passing.
+  repository:
+    name: repository
+    needs: [paths]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every needed job succeeded
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: for r in $RESULTS; do [ "$r" = success ] || exit 1; done
