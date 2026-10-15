@@ -49,14 +49,17 @@ Documentation = "https://docs.coreweave.com/products/inference/rl-rollouts"
 Issues = "https://github.com/coreweave/inference-cookbook/issues"
 
 [project.optional-dependencies]
-# NeMo-RL generation backend and weight synchronizer (torch for tensors, safetensors for exports)
-nemo-rl = [
-    "torch>=2.4",
-    "safetensors>=0.4",
-]
 dev = [
     "pytest>=8",
     "ruff>=0.6",
+]
+
+[dependency-groups]
+# The NeMo-RL integration tests. The integration itself adds no dependencies: NeMo-RL's
+# environment provides torch and safetensors. Install a CPU build of torch first.
+nemo-rl-tests = [
+    "torch>=2.4",
+    "safetensors>=0.4",
 ]
 
 [project.scripts]

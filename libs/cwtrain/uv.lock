@@ -152,7 +152,9 @@ dev = [
     { name = "pytest" },
     { name = "ruff" },
 ]
-nemo-rl = [
+
+[package.dev-dependencies]
+nemo-rl-tests = [
     { name = "safetensors" },
     { name = "torch" },
 ]
@@ -164,11 +166,15 @@ requires-dist = [
     { name = "numpy", specifier = ">=1.24" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
-    { name = "safetensors", marker = "extra == 'nemo-rl'", specifier = ">=0.4" },
-    { name = "torch", marker = "extra == 'nemo-rl'", specifier = ">=2.4" },
     { name = "zstandard", specifier = ">=0.21" },
 ]
-provides-extras = ["nemo-rl", "dev"]
+provides-extras = ["dev"]
+
+[package.metadata.requires-dev]
+nemo-rl-tests = [
+    { name = "safetensors", specifier = ">=0.4" },
+    { name = "torch", specifier = ">=2.4" },
+]
 
 [[package]]
 name = "filelock"

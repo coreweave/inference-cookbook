@@ -35,9 +35,7 @@ import logging
 import os
 from typing import Any
 
-from nemo_rl.distributed.batched_data_dict import BatchedDataDict
-from nemo_rl.models.generation.interfaces import GenerationInterface
-
+from cwtrain.integrations.nemo_rl import _missing_dependency
 from cwtrain.integrations.rollout import (
     ENV_PREFIX,
     Completion,
@@ -49,6 +47,12 @@ from cwtrain.integrations.rollout import (
     omitted_stop_token,
     sample_prompt,
 )
+
+try:
+    from nemo_rl.distributed.batched_data_dict import BatchedDataDict
+    from nemo_rl.models.generation.interfaces import GenerationInterface
+except ModuleNotFoundError as exc:
+    raise _missing_dependency(exc) from exc
 
 log = logging.getLogger(__name__)
 

@@ -28,14 +28,10 @@ Install `cwtrain` from [PyPI](https://pypi.org/project/cwtrain/):
 pip install cwtrain
 ```
 
-For the NeMo-RL integration, install the `nemo-rl` extra instead. It adds torch and safetensors:
-
-```bash
-pip install "cwtrain[nemo-rl]"
-```
-
-Both commands also install the `cwtrain` CLI. To install the unreleased code on `main`, install
-from the repository instead:
+This also installs the `cwtrain` CLI. The framework integrations need no extras: install
+`cwtrain` into the framework's environment, which provides what they import (torch, and for
+NeMo-RL also safetensors). To install the unreleased code on `main`, install from the repository
+instead:
 
 ```bash
 pip install "cwtrain @ git+https://github.com/coreweave/inference-cookbook#subdirectory=libs/cwtrain"
@@ -352,11 +348,17 @@ the library raises derives from `cwtrain.errors.CWTrainError`.
 
 ## Integrations
 
-| Framework | Entry point | Recipe |
-| --- | --- | --- |
-| miles | `--custom-update-weight-post-write-path cwtrain.integrations.slime.hook` plus the recipe's rollout function | [`recipes/training/miles/`](https://github.com/coreweave/inference-cookbook/blob/main/recipes/training/miles/README.md) |
-| slime | same hook, `--update-weight-standalone-publish` (patch in the recipe) plus the recipe's rollout function | [`recipes/training/slime/`](https://github.com/coreweave/inference-cookbook/blob/main/recipes/training/slime/README.md) |
-| NeMo-RL | `policy.generation.backend: coreweave` (`cwtrain.integrations.nemo_rl.CoreWeaveGeneration`), `HotLoadWeightSynchronizer` attached to it, `CoreWeaveDTensorPolicyWorker` as `worker_extension_cls_fqn`; the recipe's patches register the backend and the optional NeMo Gym rollouts | [`recipes/training/nemo-rl/`](https://github.com/coreweave/inference-cookbook/blob/main/recipes/training/nemo-rl/README.md) |
+| Framework | Entry point | Tested with | Recipe |
+| --- | --- | --- | --- |
+| miles | `--custom-update-weight-post-write-path cwtrain.integrations.slime.hook` plus the recipe's rollout function | `radixark/miles:v0.1.1` | [`recipes/training/miles/`](https://github.com/coreweave/inference-cookbook/blob/main/recipes/training/miles/README.md) |
+| slime | same hook, `--update-weight-standalone-publish` (patch in the recipe) plus the recipe's rollout function | slime `8ee9c1e` | [`recipes/training/slime/`](https://github.com/coreweave/inference-cookbook/blob/main/recipes/training/slime/README.md) |
+| NeMo-RL | `policy.generation.backend: coreweave` (`cwtrain.integrations.nemo_rl.CoreWeaveGeneration`), `HotLoadWeightSynchronizer` attached to it, `CoreWeaveDTensorPolicyWorker` as `worker_extension_cls_fqn`; the recipe's patches register the backend and the optional NeMo Gym rollouts | NeMo-RL `v0.7.0` | [`recipes/training/nemo-rl/`](https://github.com/coreweave/inference-cookbook/blob/main/recipes/training/nemo-rl/README.md) |
+
+Install `cwtrain` into the framework's environment. The integrations add no dependencies of their
+own: the NeMo-RL recipe, for example, installs the plain wheel into NeMo-RL's virtual environment,
+and into its policy-worker environments without dependencies. Imported outside NeMo-RL's
+environment, `cwtrain.integrations.nemo_rl` fails with an error that names the missing module and
+the NeMo-RL version it is tested with.
 
 `cwtrain.integrations.slime.hook` publishes each `weight_vNNNNNN` directory that the trainer
 writes. In delta mode, it does the following:
@@ -378,8 +380,8 @@ concurrency) from `CWTRAIN_ROLLOUT_*` environment variables.
 
 `cwtrain.hotload.delta` has two functions that the NeMo-RL synchronizer uses to publish.
 `write_delta` turns two full HF checkpoints into the zstd XOR delta format that slime and miles
-write. `write_full_snapshot` copies a checkpoint into a checksummed full snapshot. Install the
-`nemo-rl` extra for torch and safetensors.
+write. `write_full_snapshot` copies a checkpoint into a checksummed full snapshot. Neither needs
+torch or the safetensors package.
 
 ## Configuration
 
