@@ -38,7 +38,7 @@ To sign off the commits already on your branch, run `git rebase --signoff main`.
 cd libs/cwtrain
 uv venv --python 3.12 && source .venv/bin/activate
 uv pip install torch --index-url https://download.pytorch.org/whl/cpu
-uv pip install -e '.[dev,nemo-rl]'
+uv pip install -e '.[dev]' --group nemo-rl-tests
 ruff check .
 ruff format --check .
 pytest
@@ -46,9 +46,9 @@ uv build   # builds the wheel and source distribution
 ```
 
 The tests use an in-memory fake of the API. They need no credentials and no GPUs. The NeMo-RL
-integration tests need torch (a CPU build is enough) and the `nemo-rl` extra, which adds
-safetensors. Without torch, pytest skips them. CI (`.github/workflows/cwtrain.yaml`) installs both
-and runs the same checks on Python 3.12 to 3.14 for every pull request that touches
+integration tests need torch (a CPU build is enough) and safetensors, from the `nemo-rl-tests`
+dependency group. Without torch, pytest skips them. CI (`.github/workflows/cwtrain.yaml`) installs
+both and runs the same checks on Python 3.12 to 3.14 for every pull request that touches
 `libs/cwtrain`. It also builds a wheel and source distribution to catch packaging errors.
 
 ### Recipes

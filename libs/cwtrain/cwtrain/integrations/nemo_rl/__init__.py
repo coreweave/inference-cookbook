@@ -13,6 +13,9 @@
   synchronizer calls. They import only torch and safetensors so they load in the worker venv.
 
 NeMo-RL needs a small patch to know the backend; see ``recipes/training/nemo-rl/patches``.
+
+The integration adds no dependencies: install ``cwtrain`` into NeMo-RL's environment, which
+provides NeMo-RL, torch and safetensors.
 """
 
 from __future__ import annotations
@@ -25,6 +28,19 @@ __all__ = [
     "CoreWeaveMegatronPolicyWorker",
     "HotLoadWeightSynchronizer",
 ]
+
+#: The NeMo-RL release that the integration and the recipe's patches are tested with.
+_TESTED_NEMO_RL = "v0.7.0"
+
+
+def _missing_dependency(exc: ModuleNotFoundError) -> ModuleNotFoundError:
+    """Explain a module that NeMo-RL's environment would have provided."""
+    return ModuleNotFoundError(
+        f"No module named {exc.name!r}. cwtrain's NeMo-RL integration runs in NeMo-RL's "
+        f"environment, which provides it: install cwtrain there (tested with NeMo-RL "
+        f"{_TESTED_NEMO_RL}).",
+        name=exc.name,
+    )
 
 
 def __getattr__(name: str) -> Any:

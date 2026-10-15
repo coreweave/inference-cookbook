@@ -35,7 +35,12 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-import torch
+from cwtrain.integrations.nemo_rl import _missing_dependency
+
+try:
+    import torch
+except ModuleNotFoundError as exc:
+    raise _missing_dependency(exc) from exc
 
 SHARD_BYTES = 4 * 2**30
 _SKIP_SUFFIXES = (".safetensors", ".safetensors.index.json")
@@ -82,7 +87,10 @@ class _ShardWriter:
     def _flush(self) -> None:
         if not self._pending:
             return
-        from safetensors.torch import save_file
+        try:
+            from safetensors.torch import save_file
+        except ModuleNotFoundError as exc:
+            raise _missing_dependency(exc) from exc
 
         fname = f"model-{len(self._shards):05d}.safetensors"
         save_file(self._pending, str(self.tmp / fname), metadata={"format": "pt"})

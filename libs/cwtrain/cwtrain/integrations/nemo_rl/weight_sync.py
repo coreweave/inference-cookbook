@@ -36,14 +36,18 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from nemo_rl.weight_sync.interfaces import WeightSynchronizer
-
 from cwtrain.errors import CWTrainError
 from cwtrain.hotload import HotLoader, ProgressEvent, inspect_snapshot
 from cwtrain.hotload.delta import checkpoint_checksums, write_delta, write_full_snapshot
 from cwtrain.hotload.mirror import tensor_locations
 from cwtrain.infra.client import InferenceClient
+from cwtrain.integrations.nemo_rl import _missing_dependency
 from cwtrain.integrations.slime import ENV_PREFIX, HookConfig
+
+try:
+    from nemo_rl.weight_sync.interfaces import WeightSynchronizer
+except ModuleNotFoundError as exc:
+    raise _missing_dependency(exc) from exc
 
 log = logging.getLogger(__name__)
 
