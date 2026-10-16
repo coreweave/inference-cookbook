@@ -234,7 +234,7 @@ not `.` or `..`). The name `initial` is reserved for the deployment's base weigh
 
 | Type | Contents |
 | --- | --- |
-| Full | A HuggingFace safetensors checkpoint: `config.json`, `model.safetensors.index.json`, `*.safetensors` shards |
+| Full | A HuggingFace safetensors checkpoint: `config.json`, `model.safetensors.index.json`, `*.safetensors` shards. A checkpoint saved as one `model.safetensors` without an index, as `save_pretrained` saves a model below its shard size, gets an index built from that file's header, which the upload adds. |
 | Delta (API type `INCREMENTAL`) | A zstd-compressed XOR delta with Adler-32 checksums against the previous snapshot: `model.safetensors.index.json` plus `*.safetensors` shards. slime writes this layout with `--update-weight-mode delta --update-weight-transport disk --update-weight-delta-encoding xor --update-weight-delta-checksum adler32`, and miles with `--update-weight-transfer-mode disk-delta --update-weight-delta-encoding xor --update-weight-delta-checksum adler32`. These flags select the format; each recipe lists the full set its framework needs, including slime's `--update-weight-standalone-publish` from the recipe's patch. |
 
 `inspect_snapshot` checks the layout before the upload. It tells the two types apart by the
@@ -244,7 +244,9 @@ not `.` or `..`). The name `initial` is reserved for the deployment's base weigh
 - the index is well formed;
 - every shard in the index is a `*.safetensors` file directly inside the directory (subdirectories
   are not uploaded);
-- a delta uses the one encoding, compression and checksum combination that the API accepts.
+- a delta uses the one encoding, compression and checksum combination that the API accepts;
+- the directory is not a LoRA adapter, which hot-load cannot serve: merge it into its base model
+  first.
 
 It does not read tensor contents, decode deltas, or verify checksums. So a snapshot that passes
 can still be refused by the engine, whose checks are described below. A delta that changes no
@@ -380,8 +382,8 @@ concurrency) from `CWTRAIN_ROLLOUT_*` environment variables.
 
 `cwtrain.hotload.delta` has two functions that the NeMo-RL synchronizer uses to publish.
 `write_delta` turns two full HF checkpoints into the zstd XOR delta format that slime and miles
-write. `write_full_snapshot` copies a checkpoint into a checksummed full snapshot. Neither needs
-torch or the safetensors package.
+write. `write_full_snapshot` copies a checkpoint into a checksummed full snapshot, optionally with
+only the named tensors. Neither needs torch or the safetensors package.
 
 ## Configuration
 

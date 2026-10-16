@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -22,11 +23,19 @@ from cwtrain.hotload import (
 from cwtrain.hotload.snapshot import (
     CONTENT_HASH_KEY,
     file_sha256,
+    generated_index,
     iter_slime_versions,
     slime_identity,
     validate_identity,
 )
-from tests.conftest import FakeS3, write_delta_checkpoint, write_full_checkpoint
+from tests.conftest import (
+    FakeS3,
+    make_weights,
+    write_delta_checkpoint,
+    write_full_checkpoint,
+    write_safetensors,
+    write_single_file_checkpoint,
+)
 
 
 def test_inspect_full_checkpoint(tmp_path: Path) -> None:
@@ -520,3 +529,146 @@ def test_validated_shardless_empty_delta_cannot_be_uploaded(tmp_path):
     with pytest.raises(SnapshotError, match="empty delta must be skipped"):
         upload_snapshot(info, bucket="b", identity="empty", s3=s3)
     assert not s3.uploads
+
+
+# -------------------------------------------------------------- single-file checkpoints
+
+
+def test_single_file_checkpoint_gets_an_index_from_the_header(tmp_path: Path) -> None:
+    from cwtrain.hotload.mirror import read_safetensors_header
+
+    root = write_single_file_checkpoint(tmp_path / "ckpt")
+    shard = root / "model.safetensors"
+    _header, data_start = read_safetensors_header(shard)
+    with shard.open("r+b") as f:
+        f.truncate(data_start)  # no tensor bytes left: only the header can be read
+    info = inspect_snapshot(root)
+    assert info.type is SnapshotType.FULL and info.index_generated
+    expected = {
+        "metadata": {"total_size": 128 + 30 + 16},
+        "weight_map": dict.fromkeys(make_weights(), "model.safetensors"),
+    }
+    assert json.loads(info.index_bytes) == expected
+    # formatted as save_pretrained writes an index, and the same bytes on every call
+    assert info.index_bytes == (json.dumps(expected, indent=2, sort_keys=True) + "\n").encode()
+    assert generated_index(root) == info.index_bytes
+    assert {p.name for p in info.files} == {
+        "config.json",
+        "model.safetensors",
+        "tokenizer_config.json",
+    }
+    assert not (root / "model.safetensors.index.json").exists()  # nothing is written
+
+
+def test_an_existing_index_is_used_as_it_is(tmp_path: Path) -> None:
+    root = write_single_file_checkpoint(tmp_path / "ckpt")
+    index = root / "model.safetensors.index.json"
+    body = b'{"weight_map": {"lm_head.bias": "model.safetensors"}}'
+    index.write_bytes(body)
+    assert generated_index(root) is None
+    info = inspect_snapshot(root)
+    assert info.index_bytes == body and not info.index_generated and index in info.files
+    s3 = FakeS3()
+    upload_snapshot(info, bucket="b", identity="s", s3=s3)
+    assert s3.bodies[("b", "s/model.safetensors.index.json")] == body == index.read_bytes()
+
+
+def test_upload_sends_a_generated_index_last_and_a_retry_verifies_it(tmp_path: Path) -> None:
+    root = write_single_file_checkpoint(tmp_path / "ckpt")
+    info = inspect_snapshot(root)
+    shard = root / "model.safetensors"
+    s3 = FakeS3()
+    # an earlier attempt uploaded the shard before it was interrupted
+    s3.seed(
+        "b",
+        "hl/sft-v000030/model.safetensors",
+        shard.read_bytes(),
+        {CONTENT_HASH_KEY: file_sha256(shard)},
+    )
+    seen: list[tuple[str, int]] = []
+    upload_snapshot(
+        info,
+        bucket="b",
+        path_prefix="hl",
+        identity="sft-v000030",
+        s3=s3,
+        on_file=lambda p, n: seen.append((p.name, n)),
+    )
+    assert s3.uploads[-1] == ("<bytes>", "b", "hl/sft-v000030/model.safetensors.index.json")
+    assert {key for _f, _b, key in s3.uploads[:-1]} == {
+        "hl/sft-v000030/config.json",
+        "hl/sft-v000030/tokenizer_config.json",
+    }
+    key = ("b", "hl/sft-v000030/model.safetensors.index.json")
+    assert s3.bodies[key] == info.index_bytes
+    assert s3.metadata[key] == {CONTENT_HASH_KEY: hashlib.sha256(info.index_bytes).hexdigest()}
+    assert seen[-1] == ("model.safetensors.index.json", len(info.index_bytes)) and len(seen) == 4
+
+    # a retry generates the same index, finds every object identical and writes nothing
+    s3.uploads.clear()
+    upload_snapshot(root, bucket="b", path_prefix="hl", identity="sft-v000030", s3=s3)
+    assert s3.uploads == []
+
+
+def test_a_different_index_under_the_identity_is_a_conflict(tmp_path: Path) -> None:
+    root = write_single_file_checkpoint(tmp_path / "ckpt")
+    s3 = FakeS3()
+    s3.seed("b", "sft-v000030/model.safetensors.index.json", b"{}", {CONTENT_HASH_KEY: "0" * 64})
+    with pytest.raises(SnapshotConflictError) as exc:
+        upload_snapshot(root, bucket="b", identity="sft-v000030", s3=s3)
+    assert exc.value.conflicts == ["model.safetensors.index.json"]  # compared, not stray
+    assert s3.uploads == []
+
+    # the same bytes without the hash metadata are verified by ETag and kept
+    s3 = FakeS3()
+    s3.seed("b", "sft-v000030/model.safetensors.index.json", inspect_snapshot(root).index_bytes)
+    upload_snapshot(root, bucket="b", identity="sft-v000030", s3=s3)
+    assert "sft-v000030/model.safetensors.index.json" not in [k for _f, _b, k in s3.uploads]
+
+
+@pytest.mark.parametrize("operation", ["inspect", "upload", "full_snapshot", "mirror"])
+def test_a_lora_adapter_is_refused_with_a_merge_hint(tmp_path: Path, operation: str) -> None:
+    from cwtrain.hotload import WeightMirror
+    from cwtrain.hotload.delta import write_full_snapshot
+
+    root = tmp_path / "checkpoint-30"  # what PEFT's save_pretrained writes for a LoRA run
+    root.mkdir()
+    lora_a = "base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight"
+    write_safetensors(root / "adapter_model.safetensors", {lora_a: ("F32", (2, 4), bytes(32))})
+    (root / "adapter_config.json").write_text(json.dumps({"peft_type": "LORA", "r": 2}))
+    s3 = FakeS3()
+    with pytest.raises(SnapshotError, match="is a LoRA adapter; .* merge it into its base model"):
+        if operation == "inspect":
+            inspect_snapshot(root)
+        elif operation == "upload":
+            upload_snapshot(root, bucket="b", identity="sft-v000030", s3=s3)
+        elif operation == "full_snapshot":
+            write_full_snapshot(root, tmp_path / "sft-v000030")
+        else:
+            WeightMirror.create(root, tmp_path / "mirror")
+    assert not s3.uploads
+    assert not (tmp_path / "sft-v000030").exists() and not (tmp_path / "mirror").exists()
+
+
+def _raw_safetensors(header: object) -> bytes:
+    body = json.dumps(header).encode()
+    return len(body).to_bytes(8, "little") + body
+
+
+@pytest.mark.parametrize(
+    "blob,message",
+    [
+        (b"abc", "is not a safetensors file"),
+        (_raw_safetensors({"__metadata__": {"format": "pt"}}), "holds no tensors"),
+        (_raw_safetensors({"w": {"dtype": "F32", "shape": [2]}}), "invalid safetensors header"),
+        (_raw_safetensors({"w": {"data_offsets": [0]}}), "invalid safetensors header"),
+        (_raw_safetensors({"w": [0, 8]}), "invalid safetensors header"),
+    ],
+)
+def test_a_single_file_with_a_bad_header_is_refused(tmp_path: Path, blob, message) -> None:
+    root = tmp_path / "ckpt"
+    root.mkdir()
+    (root / "model.safetensors").write_bytes(blob)
+    (root / "config.json").write_text("{}")
+    with pytest.raises(SnapshotError, match=message):
+        inspect_snapshot(root)

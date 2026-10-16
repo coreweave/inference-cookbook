@@ -6,7 +6,10 @@
 
 A hot-load snapshot is a directory of safetensors shards plus ``model.safetensors.index.json``.
 A full snapshot also has ``config.json``. :func:`inspect_snapshot` checks the local layout and
-index structure before upload. It does not verify tensor contents or delta checksums.
+index structure before upload. It does not verify tensor contents or delta checksums. A full
+checkpoint saved as one ``model.safetensors`` without an index, as ``save_pretrained`` saves a
+model below its shard size, gets an index generated from that file's header, which is uploaded
+with it.
 
 Incremental snapshots use the delta layout that slime and miles write in
 ``--update-weight-mode delta``. The index ``metadata`` names the ``base_version``,
@@ -40,6 +43,10 @@ log = logging.getLogger(__name__)
 INDEX_FILE = "model.safetensors.index.json"
 CONFIG_FILE = "config.json"
 SHARD_SUFFIX = ".safetensors"
+#: The one shard ``save_pretrained`` writes, without an index, for a model below its shard size.
+SINGLE_FILE = "model.safetensors"
+#: Marks a LoRA adapter directory (PEFT's ``save_pretrained``), which holds no full weights.
+ADAPTER_CONFIG = "adapter_config.json"
 #: User metadata key (``x-amz-meta-cwtrain-sha256``) carrying the SHA-256 of an uploaded object.
 CONTENT_HASH_KEY = "cwtrain-sha256"
 # boto3's default multipart_chunksize. Used to recompute the "<md5 of part md5s>-<parts>" ETag
@@ -94,10 +101,53 @@ class SnapshotInfo:
     empty_delta: bool = False
     incremental: IncrementalSnapshotMetadata | None = None
     index_metadata: dict[str, Any] = field(default_factory=dict, repr=False)
+    #: The directory has no index file, so ``index_bytes`` comes from :func:`generated_index`.
+    index_generated: bool = False
 
     @property
     def is_incremental(self) -> bool:
         return self.type is SnapshotType.INCREMENTAL
+
+
+def generated_index(root: Path) -> bytes | None:
+    """The index of a checkpoint saved as one ``model.safetensors`` without an index.
+
+    ``save_pretrained`` writes no index for a model below its shard size, but the platform
+    requires one for a full snapshot. This one is built from the shard's header alone, without
+    reading a tensor: ``total_size`` in its ``metadata`` is the bytes of all tensors, and the
+    ``weight_map`` maps each tensor to ``model.safetensors``. It is formatted the way
+    ``save_pretrained`` writes the index of a sharded model.
+
+    Returns:
+        The index as JSON, or ``None`` when ``root`` has an index or no ``model.safetensors``.
+
+    Raises:
+        SnapshotError: ``root`` is a LoRA adapter, or the shard's header names no tensors or is
+            invalid.
+    """
+    if (root / INDEX_FILE).exists():
+        return None
+    shard = root / SINGLE_FILE
+    if not shard.is_file():
+        if (root / ADAPTER_CONFIG).is_file():
+            raise SnapshotError(
+                f"{root} is a LoRA adapter; hot-load serves full checkpoints and deltas, so "
+                "merge it into its base model first"
+            )
+        return None
+    from cwtrain.hotload.mirror import read_safetensors_header  # mirror imports this module
+
+    header, _ = read_safetensors_header(shard)
+    tensors = {name: info for name, info in header.items() if name != "__metadata__"}
+    try:
+        total = sum(end - begin for begin, end in (t["data_offsets"] for t in tensors.values()))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise SnapshotError(f"{shard} has an invalid safetensors header") from exc
+    if not tensors:
+        raise SnapshotError(f"{shard} holds no tensors")
+    index = {"metadata": {"total_size": total}, "weight_map": dict.fromkeys(tensors, SINGLE_FILE)}
+    # The same bytes for the same header, so a retried upload can compare the index by content.
+    return (json.dumps(index, indent=2, sort_keys=True) + "\n").encode()
 
 
 def _read_index_bytes(root: Path) -> bytes:
@@ -161,7 +211,8 @@ def inspect_snapshot(
     """Validate a checkpoint directory and classify it as a full or incremental snapshot.
 
     The directory is incremental when its index ``metadata`` has a ``delta_encoding`` key (the
-    slime/miles delta layout).
+    slime/miles delta layout). A checkpoint saved as one ``model.safetensors`` without an index
+    gets the index from :func:`generated_index`, and the result has ``index_generated`` set.
 
     Args:
         path: The checkpoint directory.
@@ -174,8 +225,8 @@ def inspect_snapshot(
 
     Raises:
         SnapshotError: the index structure or a shard reference is invalid, a required file
-            is missing, no shard is present, or the delta uses an encoding, compression or
-            checksum the hot-load API does not accept.
+            is missing, no shard is present, the directory is a LoRA adapter, or the delta uses
+            an encoding, compression or checksum the hot-load API does not accept.
     """
     root = Path(path)
     if not root.is_dir():
@@ -183,9 +234,10 @@ def inspect_snapshot(
 
     files = tuple(sorted(p for p in root.iterdir() if p.is_file()))
     names = {p.name for p in files}
-    if INDEX_FILE not in names:
+    generated = generated_index(root)
+    if generated is None and INDEX_FILE not in names:
         raise SnapshotError(f"{root} is missing {INDEX_FILE}")
-    index_bytes = _read_index_bytes(root)
+    index_bytes = _read_index_bytes(root) if generated is None else generated
     index = load_index(root, body=index_bytes)
     metadata = index["metadata"]
     empty_delta = "delta_encoding" in metadata and not index["weight_map"]
@@ -203,7 +255,8 @@ def inspect_snapshot(
                 f"{root} is a full checkpoint; previous_identity only applies to deltas"
             )
 
-    missing = [n for n in REQUIRED_FILES[snapshot_type] if n not in names]
+    present = names | ({INDEX_FILE} if generated is not None else set())
+    missing = [n for n in REQUIRED_FILES[snapshot_type] if n not in present]
     if missing:
         raise SnapshotError(f"{root} is missing {', '.join(missing)}")
 
@@ -221,6 +274,7 @@ def inspect_snapshot(
         empty_delta=empty_delta,
         incremental=incremental,
         index_metadata=metadata,
+        index_generated=generated is not None,
     )
 
 
@@ -313,8 +367,8 @@ def upload_snapshot(
     you can retry an interrupted upload. Objects without the hash metadata are compared by ETag,
     which works for single-part and default boto3 multipart uploads.
 
-    Files are uploaded concurrently. The index file goes last, so a reader that sees the index
-    can rely on the shards being present.
+    Files are uploaded concurrently. The index goes last, also when :func:`inspect_snapshot`
+    generated it, so a reader that sees the index can rely on the shards being present.
 
     Args:
         snapshot: A :class:`SnapshotInfo`, or a directory to pass to :func:`inspect_snapshot`.
@@ -343,6 +397,7 @@ def upload_snapshot(
 
     # Shards and other files are uploaded as they are; a delta's index is rewritten.
     local: dict[str, Path] = {f"{prefix}/{p.name}": p for p in info.files}
+    local.setdefault(index_key, info.path / INDEX_FILE)  # a generated index has no local file
     index_body = delta_index_for_upload(info, identity) if info.is_incremental else info.index_bytes
     digests: dict[str, str] = {index_key: hashlib.sha256(index_body).hexdigest()}
 

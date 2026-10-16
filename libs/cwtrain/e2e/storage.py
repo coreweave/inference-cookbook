@@ -4,18 +4,14 @@
 
 """Run-owned prefixes in an existing CAIOS bucket. Credentials come from CWIC credential_process."""
 
-import json
 import os
 import re
 import time
 import uuid
 from datetime import UTC, datetime
-from pathlib import Path
 
 from botocore.exceptions import ClientError
 
-from cwtrain.hotload.errors import SnapshotError
-from cwtrain.hotload.mirror import tensor_locations
 from cwtrain.hotload.snapshot import inspect_snapshot, upload_snapshot
 from cwtrain.infra.storage import s3_client
 
@@ -46,26 +42,6 @@ def validate_location(bucket: str, prefix: str) -> None:
         raise ValueError("Refusing storage access outside the shared bucket's E2E run prefix")
 
 
-def ensure_model_index(directory: str) -> None:
-    """HF single-file models omit the index required by the hot-load uploader."""
-    root = Path(directory)
-    index = root / "model.safetensors.index.json"
-    if index.exists():
-        return
-    tensors = tensor_locations(root)
-    if not tensors:
-        raise SnapshotError("Model contains no tensors")
-    total_size = sum(loc.nbytes for loc in tensors.values())
-    index.write_text(
-        json.dumps(
-            {
-                "metadata": {"total_size": total_size},
-                "weight_map": {name: loc.path.name for name, loc in tensors.items()},
-            }
-        )
-    )
-
-
 def stage_model(bucket: str, prefix: str, directory: str) -> str:
     from huggingface_hub import snapshot_download
 
@@ -76,7 +52,6 @@ def stage_model(bucket: str, prefix: str, directory: str) -> str:
         local_dir=directory,
         ignore_patterns=["original/*", "*.pth", "*.gguf", "*.bin"],
     )
-    ensure_model_index(checkpoint)
     upload_snapshot(
         inspect_snapshot(checkpoint),
         bucket=bucket,

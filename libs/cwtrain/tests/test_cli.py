@@ -34,6 +34,7 @@ from tests.conftest import (
     hot_load_json,
     write_delta_checkpoint,
     write_full_checkpoint,
+    write_single_file_checkpoint,
 )
 
 
@@ -229,6 +230,21 @@ def test_publish_success_json(offline_api, monkeypatch, tmp_path, capsys):
     result = json.loads(capsys.readouterr().out)
     assert result["spec"]["identity"] == "step_1"
     assert result["status"]["state"] == "PENDING"
+
+
+def test_publish_single_file_checkpoint(offline_api, monkeypatch, tmp_path, capsys):
+    import cwtrain.hotload.runner as runner
+
+    s3 = FakeS3()
+    monkeypatch.setattr(runner, "s3_client", lambda: s3)
+    checkpoint = write_single_file_checkpoint(tmp_path / "checkpoint")
+    assert cli.main(["hotload", "inspect", str(checkpoint)]) == 0
+    assert json.loads(capsys.readouterr().out)["index_generated"] is True
+    argv = ["--deployment", DEPLOYMENT_ID, "--checkpoint", str(checkpoint), "--identity", "sft-v1"]
+    assert cli.main(["hotload", "publish", *argv, "--no-wait"]) == 0
+    assert s3.uploads[-1] == ("<bytes>", "ckpts", "runs/exp1/sft-v1/model.safetensors.index.json")
+    body = json.loads(next(r for r in offline_api.requests if r.method == "POST").content)
+    assert body["type"] == "SNAPSHOT_TYPE_FULL"
 
 
 @pytest.mark.parametrize("state,code", [("COMPLETED", 0), ("FAILED", 1)])
