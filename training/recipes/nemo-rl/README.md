@@ -14,8 +14,8 @@ The recipe's config trains on DAPO math, with NeMo-RL's math environment or thro
 [NeMo Gym](https://github.com/NVIDIA-NeMo/Gym). An example can bring its own Gym environment: its
 own config, data preparation and keys, which the recipe runs as they are. See
 [Training environment](#training-environment). The
-[NeMo Gym evaluation recipe](../../../evaluation/recipes/nemo-gym/README.md) scores the deployment's
-policy on BrowseComp.
+[web-search-agent case study](../../case-studies/web-search-agent/README.md#evaluation) also scores
+the deployment's policy on BrowseComp with NeMo Gym.
 
 ![One training step: the trainer exports weights, the cwtrain synchronizer uploads a full or delta snapshot to Object Storage, creates a hot-load and polls until every replica is READY; the next rollout batch samples fresh weights from the OpenAI-compatible endpoint.](../../../docs/hotload-flow.drawio.svg)
 

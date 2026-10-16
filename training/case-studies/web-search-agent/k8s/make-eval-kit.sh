@@ -3,15 +3,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-PackageName: inference-cookbook
 #
-# Bundle the cwtrain wheel, the Gym launcher, its configs and run-eval.sh into a ConfigMap
-# (default "cwtrain-gym-kit") mounted at /opt/cwtrain-gym by eval-job.yaml. Rebuild the wheel
+# Bundle the cwtrain wheel, the case study's Gym eval launcher (../eval), its configs and run-eval.sh
+# into a ConfigMap (default "cwtrain-gym-kit") mounted at /opt/cwtrain-gym by eval-job.yaml. Rebuild the wheel
 # first: (cd libs/cwtrain && uv build --wheel).
 #
-# Usage: make-kit.sh <kube-context> <namespace> [configmap name, default cwtrain-gym-kit]
+# Usage: make-eval-kit.sh <kube-context> <namespace> [configmap name, default cwtrain-gym-kit]
 set -euo pipefail
 CTX=${1:?kube context}; NS=${2:?namespace}; KIT=${3:-cwtrain-gym-kit}
 HERE=$(cd "$(dirname "$0")" && pwd)
-RECIPE=$(cd "$HERE/.." && pwd)
+RECIPE=$(cd "$HERE/../eval" && pwd)
 SHARED=$HERE/../../../../k8s
 # Use CWTRAIN_WHEEL, or else the newest wheel in libs/cwtrain/dist (by file time).
 # shellcheck source=SCRIPTDIR/../../../../k8s/find-wheel.sh

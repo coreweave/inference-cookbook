@@ -13,7 +13,7 @@ import pytest
 
 def load(name):
     spec = importlib.util.spec_from_file_location(
-        f"gym_recipe_{name}", Path(__file__).resolve().parents[1] / f"{name}.py"
+        f"gym_recipe_{name}", Path(__file__).resolve().parents[1] / "eval" / f"{name}.py"
     )
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
@@ -159,11 +159,11 @@ def test_collection_is_bounded_and_uses_shared_concurrency(tmp_path):
     assert "--no-serve" in cmd
 
 
-K8S = Path(launch.RECIPE) / "k8s"
+K8S = Path(launch.RECIPE).parent / "k8s"
 
 
 def test_the_kit_carries_every_file_the_launcher_reads():
-    kit = (K8S / "make-kit.sh").read_text()
+    kit = (K8S / "make-eval-kit.sh").read_text()
     for name in ("launch.py", "you_search.py", "coreweave.yaml", "browsecomp.yaml",
                  "exclude_domains.json", "run-eval.sh"):  # fmt: skip
         assert f"--from-file={name}=" in kit, name
@@ -171,7 +171,7 @@ def test_the_kit_carries_every_file_the_launcher_reads():
     assert "mcqa" not in kit and list(launch.BENCHMARKS) == ["browsecomp"]
 
 
-@pytest.mark.parametrize("script", ["make-kit.sh", "run-eval.sh"])
+@pytest.mark.parametrize("script", ["make-eval-kit.sh", "run-eval.sh"])
 def test_the_eval_scripts_parse(script):
     import subprocess
 
@@ -199,7 +199,7 @@ def test_the_eval_job_renders_from_a_filled_in_env(tmp_path):
     env = tmp_path / "eval.env"
     text = (K8S / "eval.env.example").read_text()
     env.write_text(re.sub(r"<[A-Za-z][A-Za-z0-9 _-]*>", "filled", text))
-    render = Path(launch.RECIPE).parents[2] / "k8s" / "render.sh"  # the shared k8s/, at the root
+    render = Path(launch.RECIPE).parents[3] / "k8s" / "render.sh"  # the shared k8s/, at the root
     out = subprocess.run(
         ["bash", str(render), str(env), str(K8S / "eval-job.yaml")],
         capture_output=True, text=True, check=True,

@@ -14,7 +14,7 @@ import pytest
 
 def load():
     spec = importlib.util.spec_from_file_location(
-        "you_search", Path(__file__).resolve().parents[1] / "you_search.py"
+        "you_search", Path(__file__).resolve().parents[1] / "eval" / "you_search.py"
     )
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module

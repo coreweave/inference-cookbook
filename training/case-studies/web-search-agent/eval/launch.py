@@ -2,9 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-PackageName: inference-cookbook
 
-"""Launch Gym against the NeMo-RL recipe's hot-load deployment, with cwtrain's shared settings.
+"""Evaluate the case study's policy with Gym on the NeMo-RL hot-load deployment, with cwtrain's
+shared settings.
 
-The recipe creates no inference resources: Gym runs on CPU and sends every request to the existing
+It creates no inference resources: Gym runs on CPU and sends every request to the existing
 hot-load deployment that ``CWTRAIN_ROLLOUT_BASE_URL`` names. ``--benchmark`` picks the evaluation
 (BrowseComp by default), ``--model`` the deployment's served model (Nemotron 3.5 Lightning, as
 ``nemotron-lightning-hotload``), and ``--judge-model`` / ``--judge-base-url`` the LLM judge (GLM-5.2
@@ -27,7 +28,7 @@ RECIPE = Path(__file__).resolve().parent
 
 
 def _you_search():
-    """This recipe's You.com client, ``you_search.py`` next to the launcher."""
+    """The You.com client, ``you_search.py`` next to the launcher."""
     import importlib.util
 
     spec = importlib.util.spec_from_file_location("you_search", RECIPE / "you_search.py")
@@ -38,7 +39,7 @@ DEFAULT_BENCHMARK = "browsecomp"
 # The served name of Nemotron 3.5 Lightning on the NeMo-RL recipe's hot-load deployment
 # (ROLLOUT_MODEL in its run.env).
 DEFAULT_MODEL = "nemotron-lightning-hotload"
-# The hot-load deployment's max-model-len (training/recipes/nemo-rl/deployment.nemotron.example.json).
+# The hot-load deployment's max-model-len (the case study's deployment.example.json).
 DEFAULT_MAX_CONTEXT_TOKENS = 32768
 # Tool-calling turns per BrowseComp task. Gym's benchmark allows 400; 50 bounds each task's time.
 DEFAULT_MAX_STEPS = 50
@@ -51,7 +52,7 @@ DEFAULT_JUDGE_BASE_URL = "https://api.inference.wandb.ai/v1"
 @dataclass(frozen=True)
 class Benchmark:
     gym_configs: tuple[str, ...]  # relative to the Gym checkout
-    recipe_config: str  # relative to this recipe
+    recipe_config: str  # relative to this directory
     agent: str
     input: str
     judge: bool = False

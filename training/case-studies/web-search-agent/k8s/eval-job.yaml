@@ -5,8 +5,8 @@
 # Gym evaluation on a CPU node, in the NeMo-RL trainer's namespace, against its hot-load deployment.
 # The pod runs the Gym servers (agent, tools, judge client) and the collector, then prints the scores.
 # Render with: ../../../../k8s/render.sh eval.env eval-job.yaml | kubectl apply -f -
-# Requires: the kit ConfigMap from make-kit.sh (EVAL_KIT_NAME) and the NeMo-RL recipe's inference
-# key, judge key and You.com key Secrets.
+# Requires: the kit ConfigMap from make-eval-kit.sh (EVAL_KIT_NAME) and the case study's inference key
+# Secret and GYM_SECRET (judge and You.com keys), from its run.env.
 apiVersion: batch/v1
 kind: Job
 metadata:

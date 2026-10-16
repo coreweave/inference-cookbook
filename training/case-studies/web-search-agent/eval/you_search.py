@@ -11,9 +11,9 @@ unchanged, in Gym v0.4.0 (bundled with NeMo-RL v0.7.0) and v0.6.0.
 
 ``install`` copies this file into the harness directory. A server whose ``entrypoint`` is
 ``you_search.py`` swaps its Tavily clients for You.com clients, one per key in its
-``tavily_api_key`` setting. ``launch.py start`` installs it for the evaluation; the NeMo-RL recipe
-ships it in its kit, and cwtrain's BrowseComp training preset copies it the same way. The copy runs
-in the harness's own venv, which has neither cwtrain nor this recipe, so this module imports only
+``tavily_api_key`` setting. ``launch.py start`` installs it for the evaluation. For training, the case study ships it in the
+NeMo-RL kit, and grpo_search_agent.yaml's ``coreweave_files`` copies it the same way. The copy runs
+in the harness's own venv, which has neither cwtrain nor the case study's files, so this module imports only
 the standard library and httpx, which the harness already uses.
 """
 

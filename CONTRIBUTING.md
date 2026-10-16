@@ -10,9 +10,8 @@ how to run the checks locally, the conventions reviewers look for, and how `cwtr
 | --- | --- |
 | `libs/cwtrain/` | Code that depends only on the Dedicated Inference API, object storage, the hot-load format or an open format such as safetensors, and the helpers that the recipes' launchers share. Also integration code that has to run inside a framework's processes, such as the slime and miles post-write hook and the NeMo-RL generation backend. Patches and thin adapters, such as the slime and miles rollout functions, stay in the recipes. Do not add datasets, benchmarks, prompts, rewards or judges here. |
 | `training/recipes/<framework>/` | One training framework wired to Dedicated Inference: its launcher, any patches, the Kubernetes Job, and a README that says what the deployment replaces, which settings and modes the recipe supports (such as synchronous or one step ahead), and which versions it was tested with. A recipe integrates the framework's own training loop rather than defining one. |
-| `evaluation/recipes/<harness>/` | One evaluation harness wired to Dedicated Inference: its launcher and configuration, and a README that says how it reaches the deployment, what it scores, which versions it uses, and how they were tested. |
 | `training/examples/<trainer>-<method>-<model>/` | A recipe run with a concrete model, dataset, deployment and sizes, including the data preparation and any reward or environment for the task. It uses the recipe as it is, without patches or a launcher of its own. |
-| `training/case-studies/<problem>/` | A real problem solved with Dedicated Inference: the problem, where the data comes from, the setup, the results, the cost and the limitations. A *study* is reproducible from public data and reports its results with the number of runs and their spread. A *field report* describes work that cannot be fully reproduced, for example because its data is private. It reports only published numbers and names a company only with its permission. |
+| `training/case-studies/<problem>/` | A real problem solved with Dedicated Inference: the problem, where the data comes from, the setup, its evaluation, the results, the cost and the limitations. A *study* is reproducible from public data and reports its results with the number of runs and their spread. A *field report* describes work that cannot be fully reproduced, for example because its data is private. It reports only published numbers and names a company only with its permission. |
 | `k8s/` | Kubernetes and object storage setup that more than one recipe uses. |
 | `docs/` | Files that more than one README uses, such as the flow diagram. |
 
@@ -88,7 +87,7 @@ both and runs the same checks on Python 3.12 to 3.14 for every pull request that
 From the repository root, with the environment above active:
 
 ```bash
-pytest training/recipes/*/tests training/examples/*/tests training/case-studies/*/tests evaluation/recipes/*/tests k8s/tests
+pytest training/recipes/*/tests training/examples/*/tests training/case-studies/*/tests k8s/tests
 for f in k8s/*.sh training/recipes/*/k8s/*.sh; do bash -n "$f"; done
 ```
 
@@ -128,7 +127,7 @@ configuration, trigger rules, cleanup, and how to run it from a workstation.
 ## Pull requests
 
 - Keep one logical change per pull request. Include tests with code changes. CI runs the checks
-  above on pull requests that touch `libs/cwtrain`, `training/`, `evaluation/`, `k8s/`, `docs/` or
+  above on pull requests that touch `libs/cwtrain`, `training/`, `k8s/`, `docs/` or
   `.gitignore`.
 - Commit messages and pull request titles follow
   [Conventional Commits](https://www.conventionalcommits.org/): `feat:`, `fix(launch):`, `ci:`,

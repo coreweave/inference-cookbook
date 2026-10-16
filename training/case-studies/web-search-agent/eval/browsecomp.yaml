@@ -28,7 +28,7 @@ judge_model:
 browsecomp_benchmark_resources_server:
   resources_servers:
     browsecomp_advanced_harness:
-      # you_search.py (this recipe's, copied in by `launch.py start`) serves the search and browse
+      # you_search.py (next to this file, copied in by `launch.py start`) serves the search and browse
       # tools from You.com. It reads the You.com key from the harness's Tavily key setting.
       entrypoint: you_search.py
       search_provider: tavily

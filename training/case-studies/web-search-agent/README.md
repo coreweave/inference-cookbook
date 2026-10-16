@@ -6,8 +6,8 @@ is: GRPO with rollouts from a Dedicated Inference deployment, and every refit ho
 The study brings its own environment through the recipe's settings: a config,
 [`grpo_search_agent.yaml`](grpo_search_agent.yaml), which inherits the recipe's
 [`grpo_coreweave.yaml`](../../recipes/nemo-rl/grpo_coreweave.yaml), a data script and the keys.
-The [NeMo Gym evaluation recipe](../../../evaluation/recipes/nemo-gym/README.md) then scores the
-trained policy against the same deployment.
+Its [evaluation](#evaluation) then runs Gym's BrowseComp benchmark on a CPU node against the same
+deployment.
 
 ## The problem
 
@@ -39,7 +39,7 @@ on it.
 | Data | OpenAI's [SimpleQA](https://openai.com/index/introducing-simpleqa/) questions, which [`prepare_search_data.py`](prepare_search_data.py) downloads before training |
 | Environment and reward | Gym's BrowseComp agent with You.com `search` and `browse` tools; an LLM judge (`zai-org/GLM-5.2` on W&B Inference) grades each final answer |
 | Trainer | 8 GPUs of a `gd-8xh100ib-i128` node, eight-way expert parallelism; 30 GRPO steps (`NUM_STEPS`) of 8 prompts × 4 generations |
-| Evaluation recipe | [NeMo Gym](../../../evaluation/recipes/nemo-gym/README.md): Gym's BrowseComp benchmark on a CPU node, against the same deployment |
+| Evaluation | [NeMo Gym](https://github.com/NVIDIA-NeMo/Gym) v0.6.0's BrowseComp benchmark on a CPU node, against the same deployment ([Evaluation](#evaluation)) |
 | Deployment | [`deployment.example.json`](deployment.example.json): `dynamo-vllm`, 4 replicas of 2 H100 GPUs each, `autoscaling.concurrency` 8, `max-model-len` 32,768 |
 
 ## Results
@@ -59,7 +59,7 @@ Every step had a non-zero loss, so groups had mixed rewards and GRPO had somethi
 The rewards over three steps measure nothing about learning; they show the loop works. The
 trainer exited 0.
 
-The [NeMo Gym evaluation](../../../evaluation/recipes/nemo-gym/README.md) then scored the trained
+The [evaluation](#evaluation) then scored the trained
 policy on 5 BrowseComp tasks with at most 50 tool turns each (`LIMIT=5`, `MAX_STEPS=50`): 1
 correct (mean reward 0.20), in 3 minutes 40 seconds on a CPU node. Three tasks reached the
 50-turn cap.
@@ -416,13 +416,13 @@ The study's settings for the recipe's
   BrowseComp agent and harness, and the judge (`zai-org/GLM-5.2` on W&B Inference; change
   `judge_model` for another OpenAI-compatible endpoint). Its `coreweave_secrets` read the judge and
   You.com keys from `GYM_SECRET`.
-- Gym's BrowseComp harness calls Tavily. The kit carries the Gym eval recipe's
-  [`you_search.py`](../../../evaluation/recipes/nemo-gym/you_search.py), and the config's
+- Gym's BrowseComp harness calls Tavily. The kit carries the evaluation's
+  [`you_search.py`](eval/you_search.py), and the config's
   `coreweave_files` copies it into the harness, which runs it as its entrypoint. It serves the
   same `search` and `browse` tools from the You.com Search API (with live-crawled page text) and
   Contents API. The harness's page handling and judge prompt stay unchanged. The tools never
-  return the sites in the eval recipe's
-  [`exclude_domains.json`](../../../evaluation/recipes/nemo-gym/exclude_domains.json)
+  return the sites in
+  [`exclude_domains.json`](eval/exclude_domains.json)
   (`huggingface.co`, which publishes the questions with their answers).
 
 SimpleQA is the default because GRPO learns only from a group of trajectories whose rewards differ.
@@ -435,9 +435,122 @@ The agent's `max_steps` limits the tool-calling turns per trajectory (12). `core
 `YOU_SEARCH_MAX_CHARS` (2,000), the characters kept of each search or browse result, so that about
 ten tool calls fit in a trajectory. A trajectory runs in one context: the agent's context resets
 are off, because a reset drops earlier turns and so changes the trajectory's tokens. A trajectory
-that reaches `policy.max_total_sequence_length` ends there. To score the deployment's current
-policy, run the [NeMo Gym evaluation recipe](../../../evaluation/recipes/nemo-gym/README.md) against
-it while no trainer Job runs.
+that reaches `policy.max_total_sequence_length` ends there.
+
+## Evaluation
+
+The evaluation scores the deployment's current policy with [NeMo Gym](https://github.com/NVIDIA-NeMo/Gym)'s
+[BrowseComp](https://openai.com/index/browsecomp/) benchmark. It reuses the training deployment and
+creates no gateway, deployment or other inference resource. It runs as a Kubernetes Job on a CPU
+node, in the trainer's namespace: the pod runs the Gym servers (agent, tools and judge client) and
+the collector, and sends model requests to the deployment's gateway.
+
+- Gym's BrowseComp agent searches and reads the web through You.com, with the same
+  [`you_search.py`](eval/you_search.py) as training. `YOU_SEARCH_MAX_CHARS`, when set, caps each
+  result; the evaluation keeps results whole.
+- The judge, `zai-org/GLM-5.2` on W&B Inference by default, compares each final answer with the
+  ground truth.
+- [`eval/launch.py`](eval/launch.py) uses cwtrain's `RolloutConfig` for the endpoint, model, key
+  file and collection concurrency. [`eval/browsecomp.yaml`](eval/browsecomp.yaml) overrides Gym's
+  BrowseComp config, and [`eval/coreweave.yaml`](eval/coreweave.yaml) points Gym's policy model at
+  the deployment, with Nemotron thinking off (`enable_thinking: false`; change
+  `chat_template_kwargs` for another model).
+
+Three settings in `k8s/eval.env` (or flags of `eval/launch.py`) change what runs:
+
+| `eval.env` | `launch.py` | Default | What it changes |
+| --- | --- | --- | --- |
+| `BENCHMARK` | `--benchmark` | `browsecomp` | The evaluation. BrowseComp is the only one; `launch.py`'s `BENCHMARKS` registry is where another Gym benchmark would go. |
+| `ROLLOUT_MODEL` | `--model` | `nemotron-lightning-hotload` | The target model: the deployment's served model name. |
+| `JUDGE_MODEL`, `JUDGE_BASE_URL` | `--judge-model`, `--judge-base-url` | `zai-org/GLM-5.2`, `https://api.inference.wandb.ai/v1` | The judge: any OpenAI-compatible endpoint and model. |
+
+| Component | Version |
+| --- | --- |
+| NeMo Gym | [`v0.6.0`](https://github.com/NVIDIA-NeMo/Gym/releases/tag/v0.6.0) (`GYM_REF`) |
+| Search | You.com Search and Contents APIs (`https://ydc-index.io/v1`) |
+| Judge | `zai-org/GLM-5.2` on [W&B Inference](https://docs.wandb.ai/inference/), CoreWeave's serverless inference |
+
+### Running the evaluation
+
+Evaluate when no trainer Job runs against the deployment: before training starts or after the last
+step. Each refit hot-loads new weights, so an evaluation during training would mix policy versions
+and compete with the trainer's rollouts for the replicas' slots. `cwtrain hotload list --deployment
+"$DEPLOYMENT_ID"` shows which version the deployment last loaded.
+
+Work in this study's `k8s/` directory with the setup block from
+[Running it on Kubernetes](#running-it-on-kubernetes) loaded. The Job reuses `run.env`'s namespace,
+inference key Secret and `GYM_SECRET` (steps 7 and 9), and needs a CPU node (8 CPUs, 32 GiB) that
+reaches the gateway, GitHub and the judge and search APIs.
+
+```bash
+[ -e eval.env ] || cp eval.env.example eval.env   # once; copy NAMESPACE, ROLLOUT_BASE_URL and the Secrets from run.env
+set -a; . ./eval.env; set +a
+(cd ../../../../libs/cwtrain && uv build --wheel) && ./make-eval-kit.sh "$CTX" "$NAMESPACE" "$EVAL_KIT_NAME"
+"$K/render.sh" eval.env eval-job.yaml | kubectl apply -f -
+kubectl -n "$NAMESPACE" logs -f --pod-running-timeout=10m "job/cwtrain-gym-$EVAL_NAME"
+```
+
+The Job runs [`k8s/run-eval.sh`](k8s/run-eval.sh) on a node without GPUs. The script:
+
+1. installs Gym `GYM_REF` (v0.6.0) and the cwtrain wheel in the pod,
+2. downloads and decrypts the benchmark data: Gym v0.6.0's fixed 400-question subset of
+   BrowseComp's 1,266 (seed 42),
+3. starts the Gym servers with `launch.py start`: `policy_model`, `judge_model`,
+   `browsecomp_benchmark_resources_server` and `browsecomp_benchmark_agent`,
+4. collects `LIMIT` tasks (five by default) with `launch.py collect`, at `EVAL_CONCURRENCY` tasks in
+   flight,
+5. prints each task's reward and tool calls, and the mean reward.
+
+The trajectories and Gym's metrics stay in the pod's `/work/results` until the Job is deleted. Use a
+new `EVAL_NAME` for each evaluation. On a cluster that admits Jobs through Kueue, add the label
+`kueue.x-k8s.io/queue-name: <local queue>` to the Job's metadata, as for the trainer Job. When you
+are done, delete the Job and its kit:
+`kubectl -n "$NAMESPACE" delete job "cwtrain-gym-$EVAL_NAME"` and
+`kubectl -n "$NAMESPACE" delete configmap "$EVAL_KIT_NAME"`. [Cleaning up](#cleaning-up) removes
+the deployment.
+
+### Eval time and cost
+
+Each task's time grows with its tool calls, and a hard BrowseComp question can take hundreds.
+`MAX_STEPS` (`--max-steps`, default 50) caps the tool-calling turns per task; Gym's benchmark
+allows 400. A task that reaches the cap is graded on the answer it gives then, usually none, so a
+lower cap lowers the score as well as the time. `LIMIT` (`--limit`, default 5) sets how many tasks
+run. They come from the fixed 400-question subset in the same order, so scores from runs with the
+same settings compare. Every task bills You.com and W&B Inference requests, so start with the
+default `LIMIT`.
+
+The deployment runs four replicas of eight slots each, so up to 32 tasks run at once
+(`EVAL_CONCURRENCY`). Each turn also waits on a You.com call, and each answer on a judge call. So
+raise the concurrency and `LIMIT` before you add replicas, and watch the You.com and W&B
+Inference rate limits.
+
+### Context length and tool calls
+
+BrowseComp allows 4,096 generated tokens per turn. Two settings bound a whole trajectory:
+
+- `MAX_CONTEXT_TOKENS` (`--max-context-tokens`, default 32,768): the deployment's `max-model-len`.
+- `--context-reset-tokens` (default half of `--max-context-tokens`): the prompt size at which the
+  agent resets its context. It keeps the last rounds and its progress board, and drops older tool
+  results. It must leave room for one more turn: at most `--max-context-tokens` minus 4,096.
+
+Gym's benchmark config resets at 50,000 tokens, which suits its 196,608-token context. On a
+32,768-token deployment a request would overflow before that reset, so the launcher always sets
+the reset point from these two flags.
+
+The deployment runs no tool-call parser, so `/v1/chat/completions` returns the model's Qwen3-coder
+`<tool_call>` text as the message content. `launch.py start` copies cwtrain's `gym_tool_calls`
+module into Gym's `vllm_model` server as `cwtrain_tool_app.py`, and `eval/coreweave.yaml` makes it
+the policy model's entrypoint. It parses that text into tool calls, with each argument converted to
+its schema type. The NeMo-RL training adapter uses the same parser. The evaluation does not request
+training token metadata, so a successful evaluation does not verify the training path's exact token
+IDs and log-probs.
+
+### Reading the scores
+
+A completed run has one trajectory with a reward per task. A reward of 1 means that the judge found
+the final `Exact Answer:` equivalent to the ground truth. A zero reward can mean a wrong answer, or a
+trajectory that ran out of turns or context; it does not mean a connection error. Read the tool
+calls and the judge's response before you interpret the mean.
 
 ## Concurrency
 

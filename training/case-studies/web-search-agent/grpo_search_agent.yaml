@@ -50,13 +50,13 @@ env:
     browsecomp_resources_server:
       resources_servers:
         browsecomp_advanced_harness:
-          # The Gym eval recipe's You.com client, which coreweave_files copies into the harness.
+          # The eval's You.com client (eval/you_search.py), which coreweave_files copies into the harness.
           entrypoint: you_search.py
           domain: agent
           verified: false
           debug: false
           tavily_api_key: unused
-          # Sites that publish the questions with their answers (the Gym eval recipe's list).
+          # Sites that publish the questions with their answers (eval/exclude_domains.json).
           exclude_domains_file_path: /opt/cwtrain/exclude_domains.json
           use_judge: true
           judge_model_server: {type: responses_api_models, name: judge_model}
