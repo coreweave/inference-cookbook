@@ -398,12 +398,14 @@ def run_cleanup(
     shell: dict[str, str] | None = None,
     deployment_json: str | None = None,
     hot_loads: list[str] = HOT_LOADS,
+    interpreter: str = "bash",
     **run_env: str,
 ) -> tuple[subprocess.CompletedProcess[str], str]:
     """Run the README's cleanup block in a repository with recording cwtrain, kubectl and aws.
 
     shell holds variables already exported in the user's shell, run_env the run.env overrides,
-    hot_loads the identities that the deployment hot-loaded."""
+    hot_loads the identities that the deployment hot-loaded, and interpreter the shell that runs the
+    block."""
     k8s = tmp_path / "training" / "recipes" / recipe.name / "k8s"
     k8s.mkdir(parents=True)
     if git_repo:
@@ -444,7 +446,7 @@ def run_cleanup(
     (bin_dir / "python3").symlink_to(sys.executable)
     env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(tmp_path), **(shell or {})}
     result = subprocess.run(
-        ["bash", "-c", readme_block(recipe, "### Cleaning up")],
+        [interpreter, "-c", readme_block(recipe, "### Cleaning up")],
         cwd=k8s if from_k8s else tmp_path,
         env=env,
         capture_output=True,
@@ -454,12 +456,25 @@ def run_cleanup(
     return result, calls.read_text() if calls.exists() else ""
 
 
+# users paste the block into their shell: bash, or zsh, the default on macOS
+shells = pytest.mark.parametrize(
+    "interpreter",
+    [
+        "bash",
+        pytest.param(
+            "zsh", marks=pytest.mark.skipif(shutil.which("zsh") is None, reason="needs zsh")
+        ),
+    ],
+)
+
+
+@shells
 @pytest.mark.parametrize("from_k8s", [False, True], ids=["from the repository root", "from k8s"])
 @per_recipe
 def test_the_cleanup_block_deletes_the_deployment_recipe_objects_and_prefixes(
-    tmp_path: Path, recipe: Recipe, from_k8s
+    tmp_path: Path, recipe: Recipe, from_k8s, interpreter
 ) -> None:
-    result, calls = run_cleanup(recipe, tmp_path, from_k8s=from_k8s)
+    result, calls = run_cleanup(recipe, tmp_path, from_k8s=from_k8s, interpreter=interpreter)
     assert result.returncode == 0, result.stderr
     lines = calls.splitlines()
     # the runs are listed while the deployment exists; a second cleanup still passes
