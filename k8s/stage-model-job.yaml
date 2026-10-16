@@ -5,7 +5,8 @@
 # Stage the base model in the deployment's bucket. The Job downloads a Hugging Face checkpoint and
 # uploads it with cwtrain's snapshot uploader, which applies the same validation as for hot-loads.
 #
-# Render with: ./render.sh run.env stage-model-job.yaml | kubectl apply -f -
+# Render from your recipe's k8s/ directory, where your run.env is:
+#   ../../../../k8s/render.sh run.env ../../../../k8s/stage-model-job.yaml | kubectl apply -f -
 # Requires the kit ConfigMap from make-kit.sh (KIT_NAME: wheel + scripts), and the Secret with the
 # admin's AWS config and credentials files (ADMIN_STORAGE_SECRET, keys "config" and "credentials").
 # The bucket policy does not let the trainer's key write the base model.

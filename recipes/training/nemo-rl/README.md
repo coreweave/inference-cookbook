@@ -10,7 +10,7 @@ NeMo-RL starts no inference engines:
 
 Training pauses until every replica serves the new version, so the next rollout is on-policy.
 
-![One training step: the trainer exports weights, the cwtrain synchronizer uploads a full or delta snapshot to Object Storage, creates a hot-load and polls until every replica is READY; the next rollout batch samples fresh weights from the OpenAI-compatible endpoint.](docs/hotload-flow.drawio.svg)
+![One training step: the trainer exports weights, the cwtrain synchronizer uploads a full or delta snapshot to Object Storage, creates a hot-load and polls until every replica is READY; the next rollout batch samples fresh weights from the OpenAI-compatible endpoint.](../../../docs/hotload-flow.drawio.svg)
 
 The [slime](../slime/README.md) and [miles](../miles/README.md) recipes run the same loop. Those
 frameworks expose a post-write hook. NeMo-RL has two seams instead, and this recipe uses both.
@@ -72,8 +72,8 @@ account prerequisites, the gateway and the bucket policy. Then get these:
   feature. The deployment's `autoscaling.concurrency` limits how many sequences each replica
   decodes at once. See [Concurrency](#concurrency).
 - **A bucket that the inference service can read and the trainer can write.**
-  [`bucket-policy.example.json`](bucket-policy.example.json) has four statements. The first two are
-  from the docs'
+  [`bucket-policy.example.json`](../../../k8s/bucket-policy.example.json) has four statements. The
+  first two are from the docs'
   [Grant inference access to your bucket](https://docs.coreweave.com/products/inference/models#grant-inference-access-to-your-bucket):
   `AllowInference` lets the canonical inference service account read, and `AllowOrgUsers` lets
   your org read. **Any attached policy makes the bucket explicit-allow only, so do not remove the
@@ -83,7 +83,8 @@ account prerequisites, the gateway and the bucket policy. Then get these:
   - `AllowAdmin` lets your admin user stage the base model, and delete objects when you clean up.
 
   To apply the policy:
-  1. Copy it to `k8s/bucket-policy.run.json` (git-ignored, like `deployment.run.json`).
+  1. Copy it to `k8s/bucket-policy.run.json` in this recipe's directory (git-ignored, like
+     `deployment.run.json`).
   2. Fill in `[BUCKET-NAME]`, `[ORG-ID]`, `[HOT-LOAD-PREFIX]` (the deployment's
      `hotLoad.pathPrefix`, `hotload` in every recipe) and `[ADMIN-USER-ID]`, which is on the
      admin's Cloud Console Settings page. Fill in the trainer's principal as the next item
@@ -92,7 +93,7 @@ account prerequisites, the gateway and the bucket policy. Then get these:
      <bucket> --policy file://k8s/bucket-policy.run.json --endpoint-url https://cwobject.com
      --region <bucket zone>`.
 
-  If your credentials are in the cluster, [`k8s/make-bucket-job.yaml`](k8s/make-bucket-job.yaml)
+  If your credentials are in the cluster, [`make-bucket-job.yaml`](../../../k8s/make-bucket-job.yaml)
   can create the bucket and attach the same policy instead. It fills in the template from the kit
   ConfigMap with the values in `run.env`. Running it again keeps the policy's other statements, and
   keeps the trainers and admins that an earlier run added.
@@ -106,10 +107,13 @@ account prerequisites, the gateway and the bucket policy. Then get these:
   1. The cluster's OIDC issuer, registered on the Cloud Console's **Workload Federation** page with
      the audience `https://coreweave.com/iam`. This needs the IAM Admin role. The issuer URL is on
      the cluster's page in the Cloud Console.
-  2. An org access policy for the service account. Fill in
-     [`trainer-access-policy.example.json`](trainer-access-policy.example.json) and apply it with
-     `cwic cwobject policy create --file <file>`. It allows the token exchange, reading the bucket,
-     and `s3:PutObject` and `s3:AbortMultipartUpload` under the hot-load prefix, and nothing else.
+  2. An org access policy for the service account. Copy
+     [`trainer-access-policy.example.json`](../../../k8s/trainer-access-policy.example.json) to
+     `k8s/trainer-access-policy.run.json` in this recipe's directory (git-ignored), fill it in, and
+     apply it from this directory with
+     `cwic cwobject policy create --file k8s/trainer-access-policy.run.json`. It allows the token
+     exchange, reading the bucket, and `s3:PutObject` and `s3:AbortMultipartUpload` under the
+     hot-load prefix, and nothing else.
   3. In `AllowTrainer`, the issuer URL for `[OIDC-ISSUER-URL]`, and `NAMESPACE` and
      `TRAINER_SERVICE_ACCOUNT` from `run.env` for `[NAMESPACE]` and `[SERVICE-ACCOUNT]`.
 
@@ -152,7 +156,7 @@ The pinned NeMo-RL AutoModel ignores the optional `mtp.*` speculative-decoding h
 The staging Job runs this step before it uploads. Use the prepared copy for both the trainer and
 the deployment, and keep speculative decoding off. Otherwise cwtrain's tensor-layout check rejects
 the first export. Use `k8s/stage-nemotron-job.yaml`, which gives 80 GiB for the raw checkpoint.
-The shared `stage-model-job.yaml` keeps its 60 GiB default.
+The shared [`stage-model-job.yaml`](../../../k8s/stage-model-job.yaml) keeps its 60 GiB default.
 
 Set a unique `DEPLOYMENT_RUN` in `run.env` for every new inference deployment, and stage its base
 model under that prefix. Two deployments in one organization that use the same model path can
@@ -220,8 +224,10 @@ against that identity's stored checksum manifest:
 
 ## Running it on Kubernetes
 
-`k8s/` runs this topology on a Kubernetes cluster with a GPU node of `INSTANCE_TYPE`, such as
-CoreWeave Kubernetes Service (CKS). You need these tools:
+This recipe's `k8s/` directory, with the files that the training recipes share in
+[`k8s/`](../../../k8s/README.md) at the repository root, runs this topology on a Kubernetes cluster
+with a GPU node of `INSTANCE_TYPE`, such as CoreWeave Kubernetes Service (CKS). You need these
+tools:
 
 - `kubectl`
 - `envsubst` (GNU gettext; `brew install gettext` on macOS)
@@ -234,6 +240,7 @@ shell:
 
 ```bash
 cd recipes/training/nemo-rl/k8s
+K=../../../../k8s                # the shared files: k8s/ at the repository root
 [ -e run.env ] || cp run.env.example run.env   # once; fill in every <placeholder>, render.sh refuses one
 set -a; . ./run.env; set +a      # the commands below use its values
 CTX=$(kubectl config current-context)
@@ -241,15 +248,15 @@ CTX=$(kubectl config current-context)
 
 | Step | Command |
 | --- | --- |
-| 1. Namespace | `./render.sh run.env namespace.yaml \| kubectl apply -f -` |
-| 2. Trainer service account and object storage Secrets (AWS-style `config` + `credentials` files) | `kubectl -n "$NAMESPACE" create serviceaccount "$TRAINER_SERVICE_ACCOUNT"`, then `WORKLOAD_IDENTITY=1 AWS_REGION=$BUCKET_ZONE ./make-storage-secret.sh "$CTX" "$NAMESPACE" "$STORAGE_SECRET"` (with a trainer key instead, export it as `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` and leave out `WORKLOAD_IDENTITY=1`); then, with the admin's key exported, `AWS_REGION=$BUCKET_ZONE ./make-storage-secret.sh "$CTX" "$NAMESPACE" "$ADMIN_STORAGE_SECRET"` |
+| 1. Namespace | `"$K/render.sh" run.env "$K/namespace.yaml" \| kubectl apply -f -` |
+| 2. Trainer service account and object storage Secrets (AWS-style `config` + `credentials` files) | `kubectl -n "$NAMESPACE" create serviceaccount "$TRAINER_SERVICE_ACCOUNT"`, then `WORKLOAD_IDENTITY=1 AWS_REGION=$BUCKET_ZONE "$K/make-storage-secret.sh" "$CTX" "$NAMESPACE" "$STORAGE_SECRET"` (with a trainer key instead, export it as `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` and leave out `WORKLOAD_IDENTITY=1`); then, with the admin's key exported, `AWS_REGION=$BUCKET_ZONE "$K/make-storage-secret.sh" "$CTX" "$NAMESPACE" "$ADMIN_STORAGE_SECRET"` |
 | 3. Wheel + config + patch ConfigMap | `(cd ../../../../libs/cwtrain && uv build --wheel) && ./make-kit.sh "$CTX" "$NAMESPACE" "$KIT_NAME"` |
-| 4. Bucket + policy (skip if done with `aws s3api`) | `./render.sh run.env make-bucket-job.yaml \| kubectl apply -f -`, then `kubectl -n "$NAMESPACE" logs -f --pod-running-timeout=10m job/cwtrain-make-bucket`; it is done when `kubectl -n "$NAMESPACE" get job cwtrain-make-bucket` shows COMPLETIONS `1/1` |
-| 5. Stage the base model into the bucket (required: the trainer reads it from there) | `./render.sh run.env stage-nemotron-job.yaml \| kubectl apply -f -`, then `kubectl -n "$NAMESPACE" logs -f --pod-running-timeout=10m "job/cwtrain-stage-$JOB_NAME"`; it is done when `kubectl -n "$NAMESPACE" get job "cwtrain-stage-$JOB_NAME"` shows COMPLETIONS `1/1` (it retries once, so follow the logs again while it shows `0/1`) |
+| 4. Bucket + policy (skip if done with `aws s3api`) | `"$K/render.sh" run.env "$K/make-bucket-job.yaml" \| kubectl apply -f -`, then `kubectl -n "$NAMESPACE" logs -f --pod-running-timeout=10m job/cwtrain-make-bucket`; it is done when `kubectl -n "$NAMESPACE" get job cwtrain-make-bucket` shows COMPLETIONS `1/1` |
+| 5. Stage the base model into the bucket (required: the trainer reads it from there) | `"$K/render.sh" run.env stage-nemotron-job.yaml \| kubectl apply -f -`, then `kubectl -n "$NAMESPACE" logs -f --pod-running-timeout=10m "job/cwtrain-stage-$JOB_NAME"`; it is done when `kubectl -n "$NAMESPACE" get job "cwtrain-stage-$JOB_NAME"` shows COMPLETIONS `1/1` (it retries once, so follow the logs again while it shows `0/1`) |
 | 6. Create the deployment | [below](#creating-the-deployment); put its `id` and `rollout_base_url` in `run.env` as `DEPLOYMENT_ID` and `ROLLOUT_BASE_URL` |
 | 7. Inference API key Secret | `kubectl -n "$NAMESPACE" create secret generic "$INFERENCE_KEY_SECRET" --from-file=api_key=<file>` |
 | 8. CoreWeave API token Secret | `kubectl -n "$NAMESPACE" create secret generic "$API_TOKEN_SECRET" --from-file=token=<file>` |
-| 9. Trainer | `./render.sh run.env trainer-job.yaml \| kubectl apply -f -` |
+| 9. Trainer | `"$K/render.sh" run.env trainer-job.yaml \| kubectl apply -f -` |
 
 Notes on the steps:
 
@@ -279,7 +286,7 @@ unit tests for the launcher's argument building are in `tests/`.
 ### Creating the deployment
 
 1. Copy [`deployment.nemotron.example.json`](deployment.nemotron.example.json) to
-   `deployment.run.json` in `k8s/` (git-ignored).
+   `deployment.run.json` in this recipe's `k8s/` (git-ignored).
 2. Fill in the gateway id, instance type, bucket and unique deployment prefix. Set `model.path` to
    `$MODEL_PREFIX/$MODEL_SLUG` from the same `run.env` that you used for staging.
 3. The example pins `dynamo-vllm` to `0.30.0+crwv.5`. Make sure that the gateway zone has this
@@ -324,6 +331,10 @@ request in the [RL Rollouts guide](https://docs.coreweave.com/products/inference
 in the **Hot loading** section of the create drawer.
 
 ### Watching and re-running
+
+In a new shell, run the setup block in [Running it on Kubernetes](#running-it-on-kubernetes) again
+first: these commands and step 9 use its `K` and the values in `run.env`. The block keeps your
+filled-in `run.env`.
 
 ```bash
 kubectl -n "$NAMESPACE" logs -f "job/cwtrain-$JOB_NAME"   # the trainer, including cwtrain's lines

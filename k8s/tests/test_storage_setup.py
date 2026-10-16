@@ -3,10 +3,7 @@
 # SPDX-PackageName: inference-cookbook
 
 """Object storage setup: make-storage-secret.sh and make-bucket-job.yaml need the bucket's zone, and
-the Job attaches the example bucket policy.
-
-Every training recipe carries identical copies of these files (CI checks it), so this tests the
-miles ones.
+the Job attaches the example bucket policy. Every training recipe uses these files from k8s/.
 """
 
 from __future__ import annotations
@@ -20,8 +17,7 @@ from pathlib import Path
 
 import pytest
 
-RECIPE = Path(__file__).resolve().parents[1]
-K8S = RECIPE / "k8s"
+K8S = Path(__file__).resolve().parents[1]
 PLATFORM_ARN = "arn:aws:iam::cw4637:coreweave/uvAGGQSxxXeeQBJzcGsD9"
 # the trainer runs as a Kubernetes service account (Workload Identity Federation)
 TRAINER_ARN = "arn:aws:iam::org:role/https://oidc.example/id/c1:system:serviceaccount:ns:trainer-sa"
@@ -179,7 +175,7 @@ def run_bucket_job(
             "ORG_ID": "org",
             "TRAINER_PRINCIPAL_ARN": TRAINER_ARN,
             "ADMIN_PRINCIPAL_ARN": "arn:aws:iam::org:coreweave/admin",
-            "BUCKET_POLICY_TEMPLATE": str(RECIPE / "bucket-policy.example.json"),
+            "BUCKET_POLICY_TEMPLATE": str(K8S / "bucket-policy.example.json"),
             "HOTLOAD_PREFIX": "hotload",
             "MODEL_PREFIX": "models",
             "CW_S3_ENDPOINT": endpoint,
@@ -232,7 +228,7 @@ def test_the_bucket_job_needs_a_zone(tmp_path: Path) -> None:
 
 
 def filled_example_policy() -> dict:
-    text = (RECIPE / "bucket-policy.example.json").read_text()
+    text = (K8S / "bucket-policy.example.json").read_text()
     for placeholder, value in (
         ("[BUCKET-NAME]", "my-checkpoints"),
         ("[ORG-ID]", "org"),
@@ -331,7 +327,9 @@ def test_the_bucket_job_warns_when_the_trainer_is_the_admin(tmp_path: Path) -> N
 
 
 def test_a_workload_identity_secret_holds_no_key(tmp_path: Path) -> None:
-    result, applied = make_secret(tmp_path, keys=False, WORKLOAD_IDENTITY="1", AWS_REGION="US-WEST-04A")
+    result, applied = make_secret(
+        tmp_path, keys=False, WORKLOAD_IDENTITY="1", AWS_REGION="US-WEST-04A"
+    )
     assert result.returncode == 0, result.stderr
     assert "region = US-WEST-04A\n" in applied and "aws_access_key_id" not in applied
     assert "no key" in result.stdout

@@ -41,8 +41,9 @@ NeMo Gym evaluation recipe uses it to create and clean up its deployment.
 | [NeMo Gym](recipes/evaluation/nemo-gym/README.md) | [NeMo Gym](https://github.com/NVIDIA-NeMo/Gym) | Evaluation with scored rollouts | None: cwtrain provisions and cleans up the gateway and deployment; Gym runs the agent and scores responses | NeMo Gym `v0.6.0` |
 
 The training recipes use DAPO-Math-17k and run on Kubernetes. NeMo-RL uses Nemotron 3.5
-Lightning BF16; slime and miles use Qwen3-4B. Each ships manifests, an example deployment
-request and an example bucket policy.
+Lightning BF16; slime and miles use Qwen3-4B. Each ships its own manifests and an example
+deployment request. They share the rest of the setup, with the example bucket policy, in
+[`k8s/`](k8s/README.md).
 
 ## Before you start
 
@@ -58,8 +59,8 @@ request and an example bucket policy.
   and let your trainer write snapshots under the hot-load prefix. The trainer needs no delete or
   policy rights, and a principal of its own: the recipes run it as a Kubernetes service account
   with Workload Identity Federation. **A bucket policy makes the bucket explicit-allow only.** Keep
-  your organization's statement in the policy, or all other access to the bucket stops. Each recipe
-  ships a `bucket-policy.example.json` with this structure.
+  your organization's statement in the policy, or all other access to the bucket stops. The recipes'
+  [`bucket-policy.example.json`](k8s/bucket-policy.example.json) has this structure.
 - A gateway, and a deployment created with engine `dynamo-vllm` and a `hotLoad` section naming the
   bucket and path prefix for snapshots ([example request](recipes/training/miles/deployment.example.json)).
   The recipes use `cwtrain deployment create` to create it from such a request. You can also use
@@ -177,6 +178,7 @@ limits, and the configuration.
 libs/cwtrain/                 Python library and CLI the recipes share: deployments, checkpoint
                               hot-load (uploads, deltas, the weight mirror), the rollout sampler,
                               and the framework integrations
+k8s/                          Kubernetes and object storage setup that the training recipes share
 recipes/training/miles/       GRPO with miles, with Kubernetes manifests
 recipes/training/slime/       GRPO with slime, with Kubernetes manifests and the patches slime needs
 recipes/training/nemo-rl/     GRPO with NeMo-RL, with Kubernetes manifests and the patches it needs
