@@ -476,12 +476,15 @@ def run_cleanup(
     tmp_path: Path,
     *,
     cwtrain_exit: int = 0,
+    hotload_list_exit: int = 0,
     hotload_prefix_file: bool = True,
     from_k8s: bool = False,
     git_repo: bool = True,
     shell: dict[str, str] | None = None,
     deployment_json: str | None = None,
-    hot_loads: list[str] = HOT_LOADS,
+    hot_loads: list[object] = HOT_LOADS,
+    hotload_json: str | None = None,
+    object_keys: list[str] | None = None,
     interpreter: str = "bash",
     **run_env: str,
 ) -> tuple[subprocess.CompletedProcess[str], str]:
@@ -489,7 +492,8 @@ def run_cleanup(
 
     shell holds variables already exported in the user's shell, run_env the run.env overrides,
     hot_loads the identities that the deployment hot-loaded, and interpreter the shell that runs the
-    block."""
+    block. The fake aws applies deletions to object_keys using S3 prefix and filter semantics, and
+    records each command's argv separately so whitespace and wildcard quoting can be checked."""
     k8s = tmp_path / "training" / example.kind / example.name / "k8s"
     k8s.mkdir(parents=True)
     if git_repo:
@@ -515,17 +519,55 @@ def run_cleanup(
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     calls = tmp_path / "calls"
-    # a failing cwtrain says why on stderr, as it does for a refused delete or a missing token
-    refuse = (
-        f'echo "error: permission_denied: not allowed" >&2; exit {cwtrain_exit}'
-        if cwtrain_exit
-        else ":"
+    listed = (
+        json.dumps([{"spec": {"identity": identity}} for identity in hot_loads])
+        if hotload_json is None
+        else hotload_json
     )
-    listed = tmp_path / "hot_loads.json"
-    listed.write_text(json.dumps([{"spec": {"identity": identity}} for identity in hot_loads]))
-    cwtrain = f'case "$1 $2" in "hotload list") cat {listed};; "deployment delete") {refuse};; esac'
-    for tool, reply in (("cwtrain", cwtrain), ("kubectl", ":"), ("aws", ":")):
-        (bin_dir / tool).write_text(f'#!/bin/sh\nprintf "{tool} %s\\n" "$*" >> {calls}\n{reply}\n')
+    (tmp_path / "objects.json").write_text(json.dumps(object_keys or []))
+    recorded_tool = f"""#!/usr/bin/env python3
+import fnmatch
+import json
+from pathlib import Path
+import sys
+
+root = Path({str(tmp_path)!r})
+tool = Path(sys.argv[0]).name
+args = sys.argv[1:]
+with (root / "calls").open("a") as stream:
+    print(" ".join([tool, *args]), file=stream)
+with (root / "argv.jsonl").open("a") as stream:
+    print(json.dumps([tool, *args]), file=stream)
+if tool == "cwtrain":
+    if args[:2] == ["hotload", "list"]:
+        print({listed!r})
+        code = {hotload_list_exit}
+    else:
+        code = {cwtrain_exit}
+    if code:
+        print("error: permission_denied: not allowed", file=sys.stderr)
+    sys.exit(code)
+if tool == "aws" and args[:2] == ["s3", "rm"]:
+    target = next(arg for arg in args if arg.startswith("s3://"))
+    recursive = "--recursive" in args
+    rules = [(arg, args[i + 1]) for i, arg in enumerate(args)
+             if arg in ("--exclude", "--include")]
+    def removed(key):
+        if not recursive:
+            return key == target
+        if not key.startswith(target):
+            return False
+        selected = True
+        for option, pattern in rules:
+            if fnmatch.fnmatchcase(key[len(target):], pattern):
+                selected = option == "--include"
+        return selected
+    objects = root / "objects.json"
+    objects.write_text(json.dumps([key for key in json.loads(objects.read_text())
+                                  if not removed(key)]))
+"""
+    for tool in ("cwtrain", "kubectl", "aws"):
+        (bin_dir / tool).write_text(recorded_tool)
         (bin_dir / tool).chmod(0o755)
     (bin_dir / "python3").symlink_to(sys.executable)
     env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(tmp_path), **(shell or {})}
@@ -533,6 +575,16 @@ def run_cleanup(
         readme_block(example, "### Cleaning up"), interpreter, k8s if from_k8s else tmp_path, env
     )
     return result, calls.read_text() if calls.exists() else ""
+
+
+def cleanup_argv(tmp_path: Path) -> list[list[str]]:
+    """Recorded arguments, without losing whitespace or shell metacharacters."""
+    recorded = tmp_path / "argv.jsonl"
+    return (
+        [json.loads(line) for line in recorded.read_text().splitlines()]
+        if recorded.exists()
+        else []
+    )
 
 
 def run_block(
@@ -564,7 +616,7 @@ shells = pytest.mark.parametrize(
 @shells
 @pytest.mark.parametrize("from_k8s", [False, True], ids=["from the repository root", "from k8s"])
 @per_example
-def test_the_cleanup_block_deletes_the_deployment_recipe_objects_and_prefixes(
+def test_the_cleanup_block_deletes_the_deployment_recipe_objects_and_exact_snapshots(
     tmp_path: Path, example: Example, from_k8s, interpreter
 ) -> None:
     result, calls = run_cleanup(example, tmp_path, from_k8s=from_k8s, interpreter=interpreter)
@@ -585,13 +637,124 @@ def test_the_cleanup_block_deletes_the_deployment_recipe_objects_and_prefixes(
         f"{delete} serviceaccount cwtrain-trainer --ignore-not-found",
     ]  # only the recipe's objects; the namespace may hold other work
     removed = [line.split(" --endpoint-url")[0] for line in lines if line.startswith("aws s3 rm")]
-    rm = "aws s3 rm --recursive s3://bkt"
-    assert removed == [  # only this deployment's runs: every deployment shares the hot-load prefix
-        f"{rm}/hotload/ --exclude * --include run-a-v* --include _manifests/run-a-v*",
-        f"{rm}/hotload/ --exclude * --include run-b-v* --include _manifests/run-b-v*",
-        f"{rm}/{example.model_prefix}/{example.model_slug}/",
-        f"{rm}/{example.model_prefix}/_probe/",
+    assert removed == [
+        command
+        for identity in sorted(HOT_LOADS)
+        for command in (
+            f"aws s3 rm --recursive s3://bkt/hotload/{identity}/",
+            f"aws s3 rm s3://bkt/hotload/_manifests/{identity}.json",
+        )
     ]
+
+
+@shells
+@per_example
+def test_cleanup_preserves_neighboring_runs_shared_models_and_literal_identity_characters(
+    tmp_path: Path, example: Example, interpreter: str
+) -> None:
+    identities = [
+        "experiment-v000000",
+        "literal*-v000001",
+        "literal?[ab]-v000001",
+        "  spaces \\ stay  ",
+        "x" * 128,
+    ]
+    removed = [
+        key
+        for identity in identities
+        for key in (
+            f"s3://bkt/hotload/{identity}/weights.safetensors",
+            f"s3://bkt/hotload/{identity}/nested/config.json",
+            f"s3://bkt/hotload/_manifests/{identity}.json",
+        )
+    ]
+    retained = [
+        key
+        for identity in (
+            "experiment-v2-v000000",  # the old experiment-v* filter also selected this run
+            "experiment-v000001",  # not returned by this deployment's history
+            "experiment-v000000-extra",  # the trailing slash bounds the snapshot's prefix
+            "literal-other-v000001",  # '*' in an identity is a literal S3 key character
+            "literalXa-v000001",  # '?' and brackets are also literal key characters
+            "spaces \\ stay",  # read must preserve leading/trailing spaces and backslashes
+            "initial",
+        )
+        for key in (
+            f"s3://bkt/hotload/{identity}/weights.safetensors",
+            f"s3://bkt/hotload/_manifests/{identity}.json",
+        )
+    ] + [
+        "s3://bkt/hotload/_manifests/experiment-v000000.json.backup",
+        f"s3://bkt/{example.model_prefix}/{example.model_slug}/weights.safetensors",
+        f"s3://bkt/{example.model_prefix}/_probe/check",
+    ]
+    result, _ = run_cleanup(
+        example,
+        tmp_path,
+        hot_loads=[*identities, identities[0]],  # repeated publications delete only once
+        object_keys=[*removed, *retained],
+        interpreter=interpreter,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads((tmp_path / "objects.json").read_text()) == retained
+    options = ["--endpoint-url", "https://cwobject.com", "--region", "US-EAST-04A"]
+    assert [args for args in cleanup_argv(tmp_path) if args[0] == "aws"] == [
+        args
+        for identity in sorted(identities)
+        for args in (
+            ["aws", "s3", "rm", "--recursive", f"s3://bkt/hotload/{identity}/", *options],
+            ["aws", "s3", "rm", f"s3://bkt/hotload/_manifests/{identity}.json", *options],
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    "identity",
+    [
+        None,
+        12,
+        False,
+        [],
+        {},
+        "",
+        "x" * 129,
+        "/",
+        "nested/snapshot",
+        ".",
+        "..",
+        "initial",
+        "_manifests",
+        *[f"run{chr(code)}identity" for code in (*range(32), 127)],
+    ],
+)
+@per_example
+def test_cleanup_validates_all_identities_before_any_deletion(
+    tmp_path: Path, example: Example, identity: object
+) -> None:
+    result, calls = run_cleanup(example, tmp_path, hot_loads=["valid-v000000", identity])
+    assert result.returncode != 0, result.stderr
+    assert "unsafe snapshot identity" in result.stderr
+    assert calls.splitlines() == ["cwtrain hotload list --deployment dep-1 --limit 100000"]
+
+
+@pytest.mark.parametrize("history", ["{", "{}", "null", "[null]", "[{}]", '[{"spec": {}}]'])
+@per_example
+def test_cleanup_rejects_invalid_history_before_any_deletion(
+    tmp_path: Path, example: Example, history: str
+) -> None:
+    result, calls = run_cleanup(example, tmp_path, hotload_json=history)
+    assert result.returncode != 0, result.stderr
+    assert calls.splitlines() == ["cwtrain hotload list --deployment dep-1 --limit 100000"]
+
+
+@shells
+@per_example
+def test_cleanup_stops_after_a_failed_history_list_even_when_it_prints_valid_json(
+    tmp_path: Path, example: Example, interpreter: str
+) -> None:
+    result, calls = run_cleanup(example, tmp_path, hotload_list_exit=1, interpreter=interpreter)
+    assert result.returncode != 0 and "permission_denied" in result.stderr
+    assert calls.splitlines() == ["cwtrain hotload list --deployment dep-1 --limit 100000"]
 
 
 @pytest.mark.parametrize(
@@ -636,14 +799,15 @@ def test_the_cleanup_block_stops_when_the_deployment_is_not_deleted(
     ]
 
 
+@shells
 @per_example
 def test_the_cleanup_block_leaves_the_shared_prefix_alone_without_hot_loads(
-    tmp_path: Path, example: Example
+    tmp_path: Path, example: Example, interpreter: str
 ) -> None:
-    result, calls = run_cleanup(example, tmp_path, hot_loads=[])
+    result, _ = run_cleanup(example, tmp_path, hot_loads=[], interpreter=interpreter)
     assert result.returncode == 0, result.stderr
     assert "found no hot-loads of dep-1" in result.stderr
-    assert "s3://bkt/hotload/" not in calls  # never the whole prefix that other deployments share
+    assert not any(args[0] == "aws" for args in cleanup_argv(tmp_path))
 
 
 @pytest.mark.parametrize("prefix", ["hotload//", "//hotload", "/hotload/"])
@@ -655,7 +819,7 @@ def test_the_cleanup_block_strips_every_outer_slash(
     result, calls = run_cleanup(example, tmp_path, hotload_prefix_file=False, HOTLOAD_PREFIX=prefix)
     assert result.returncode == 0, result.stderr
     removed = [line.split()[4] for line in calls.splitlines() if line.startswith("aws s3 rm")]
-    assert removed[0] == "s3://bkt/hotload/"
+    assert removed[0] == "s3://bkt/hotload/run-a-v000000/"
 
 
 @pytest.mark.parametrize("prefix", ["/", "///"])
@@ -825,7 +989,7 @@ def test_the_cleanup_block_prefers_the_deployment_file_to_a_prefix_left_in_the_s
     result, calls = run_cleanup(example, tmp_path, shell={"HOTLOAD_PREFIX": "old/prefix"})
     assert result.returncode == 0, result.stderr
     removed = [line.split()[4] for line in calls.splitlines() if line.startswith("aws s3 rm")]
-    assert removed[0] == "s3://bkt/hotload/" and "old/prefix" not in calls
+    assert removed[0] == "s3://bkt/hotload/run-a-v000000/" and "old/prefix" not in calls
 
 
 @per_example
@@ -926,7 +1090,7 @@ def test_the_cleanup_block_ignores_slashes_around_the_prefix(
         )
     assert result.returncode == 0, result.stderr
     removed = [line.split()[4] for line in calls.splitlines() if line.startswith("aws s3 rm")]
-    assert removed[0] == "s3://bkt/hotload/"
+    assert removed[0] == "s3://bkt/hotload/run-a-v000000/"
 
 
 @pytest.mark.parametrize("file", [True, False], ids=["deployment file", "run.env"])
@@ -1043,9 +1207,9 @@ def test_the_setup_block_sets_k_and_r_when_pasted_into_zsh(
 
 @per_example
 def test_the_cleanup_block_accepts_a_lone_angle_bracket(tmp_path: Path, example: Example) -> None:
-    result, calls = run_cleanup(example, tmp_path, MODEL_SLUG="'run<v2'")
+    result, calls = run_cleanup(example, tmp_path, hot_loads=["run<v2"])
     assert result.returncode == 0, result.stderr
-    assert f"s3://bkt/{example.model_prefix}/run<v2/" in calls
+    assert "s3://bkt/hotload/run<v2/" in calls
 
 
 @needs_envsubst

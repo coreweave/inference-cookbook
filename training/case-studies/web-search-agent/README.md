@@ -317,7 +317,9 @@ Your shell's `$RUN_ID` comes from when you loaded `run.env`, not from the render
 
 The deployment holds its GPUs until you delete it. Run this block with the kubectl context that you
 used for the steps above (`kubectl config current-context`), and with the admin's object-storage
-credentials. Only the admin may delete from the bucket:
+credentials. Only the admin may delete from the bucket. If another deployment uses one of this
+deployment's snapshots as its base model, wait until that deployment is gone before running this
+block.
 
 ```bash
 [ -z "${ZSH_VERSION-}" ] || setopt interactivecomments
@@ -345,43 +347,54 @@ print(p.strip("/"))')
         $TRAINER_SERVICE_ACCOUNT" in
     *'<'[A-Za-z]*'>'*) echo "fill in run.env before cleaning up" >&2; exit 1;;
   esac
-  # Every deployment shares the hot-load prefix, so remove only the runs that this deployment
-  # hot-loaded: <prefix>/<run>-vNNNNNN/ and <prefix>/_manifests/<run>-vNNNNNN.json. List them
-  # while the deployment exists.
-  runs=$(cwtrain hotload list --deployment "$DEPLOYMENT_ID" --limit 100000 | python3 -c 'import json, re, sys
-print("\n".join(sorted({re.sub(r"-v[0-9]+$", "", h["spec"]["identity"]) for h in json.load(sys.stdin)})))')
+  # List exact identities while the deployment exists. A failed list must stop cleanup,
+  # even if it wrote JSON before failing. Validate every identity before deleting anything.
+  hot_loads=$(cwtrain hotload list --deployment "$DEPLOYMENT_ID" --limit 100000)
+  identities=$(printf '%s\n' "$hot_loads" | python3 -c 'import json, sys
+hot_loads = json.load(sys.stdin)
+if not isinstance(hot_loads, list):
+    sys.exit("expected a hot-load history list; refusing cleanup")
+identities = [h["spec"]["identity"] for h in hot_loads]
+for identity in identities:
+    if (not isinstance(identity, str) or not 1 <= len(identity) <= 128
+            or identity in (".", "..", "initial", "_manifests") or "/" in identity
+            or any(ord(c) < 32 or ord(c) == 127 for c in identity)):
+        sys.exit(f"unsafe snapshot identity {identity!r}; remove its objects by hand")
+print("\n".join(sorted(set(identities))))')
   cwtrain deployment delete "$DEPLOYMENT_ID" --ignore-not-found
   kubectl -n "$NAMESPACE" delete job "cwtrain-$JOB_NAME" "cwtrain-stage-$JOB_NAME" cwtrain-make-bucket --ignore-not-found
   kubectl -n "$NAMESPACE" delete secret "$STORAGE_SECRET" "$ADMIN_STORAGE_SECRET" "$INFERENCE_KEY_SECRET" \
     "$API_TOKEN_SECRET" "$GYM_SECRET" --ignore-not-found
   kubectl -n "$NAMESPACE" delete configmap "$KIT_NAME" --ignore-not-found
   [ -z "$TRAINER_SERVICE_ACCOUNT" ] || kubectl -n "$NAMESPACE" delete serviceaccount "$TRAINER_SERVICE_ACCOUNT" --ignore-not-found
-  [ -n "$runs" ] || echo "found no hot-loads of $DEPLOYMENT_ID, so nothing under $HOTLOAD_PREFIX/ is removed" >&2
-  # read line by line: zsh, unlike bash, does not split an unquoted $runs into words
-  printf '%s\n' "$runs" | while read -r run; do
-    [ -z "$run" ] || aws s3 rm --recursive "s3://$BUCKET/$HOTLOAD_PREFIX/" --exclude '*' \
-      --include "$run-v*" --include "_manifests/$run-v*" --endpoint-url https://cwobject.com \
-      --region "$BUCKET_ZONE"
-  done
-  for prefix in "$MODEL_PREFIX/$MODEL_SLUG" "$MODEL_PREFIX/_probe"; do
-    aws s3 rm --recursive "s3://$BUCKET/$prefix/" --endpoint-url https://cwobject.com --region "$BUCKET_ZONE"
+  [ -n "$identities" ] || echo "found no hot-loads of $DEPLOYMENT_ID, so nothing under $HOTLOAD_PREFIX/ is removed" >&2
+  # A trailing slash bounds each snapshot prefix. No wildcard filters: names such as
+  # experiment and experiment-v2, or names containing *, must never select each other.
+  printf '%s\n' "$identities" | while IFS= read -r identity; do
+    [ -n "$identity" ] || continue
+    aws s3 rm --recursive "s3://$BUCKET/$HOTLOAD_PREFIX/$identity/" \
+      --endpoint-url https://cwobject.com --region "$BUCKET_ZONE"
+    aws s3 rm "s3://$BUCKET/$HOTLOAD_PREFIX/_manifests/$identity.json" \
+      --endpoint-url https://cwobject.com --region "$BUCKET_ZONE"
   done
 )
 ```
 
-The block removes from the bucket:
+The block removes only the exact snapshot identities returned by the deployment's hot-load
+history: `<prefix>/<identity>/` and the corresponding `_manifests/<identity>.json`. It does not
+expand a run name into a wildcard. The prefix comes from `deployment.run.json`, or from
+`HOTLOAD_PREFIX` in `run.env` if you created the deployment another way. Uploads that never reached
+the hot-load API are not in that history and need separate cleanup.
 
-- The runs that the deployment hot-loaded: each `<run>-vNNNNNN/` snapshot under the hot-load
-  prefix, and its entry in `_manifests/`. Other deployments' runs under the same prefix stay. The
-  prefix comes from `deployment.run.json`, or from `HOTLOAD_PREFIX` in `run.env` if you created the
-  deployment another way.
-- The staged base model.
-- The bucket Job's write check (`_probe`).
+The staged base model and the bucket Job's write check (`_probe`) remain in the bucket. Other
+deployments can use the same model path even when they run in different Kubernetes namespaces.
+Remove those shared objects separately only after every deployment using them is gone.
 
-It also deletes the Jobs, the Secrets, the kit ConfigMap and the trainer's service account that
+The block also deletes the Jobs, the Secrets, the kit ConfigMap and the trainer's service account that
 `run.env` names, and the bucket Job. It does not delete the namespace or the trainer's org access
 policy. You can run it again after a partial cleanup. But a deleted deployment lists no hot-loads,
-so if the deployment is already gone, remove its runs by hand (`aws s3 ls` the hot-load prefix).
+so if the deployment is already gone, identify and remove its exact snapshot paths by hand
+(`aws s3 ls` the hot-load prefix).
 
 Examples and case studies that share a namespace also share these objects, unless their `run.env`
 names differ. The defaults are the same in every one, so clean up after the last one. If this study
