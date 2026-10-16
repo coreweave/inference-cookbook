@@ -13,7 +13,7 @@ trainer rank in full mode and on rank 0 in delta mode. This hook does its work o
 
 miles runs the disk sync with zero rollout engines by default. Upstream slime skips it unless it
 starts with ``--update-weight-standalone-publish``, from the patch in
-``recipes/training/slime/patches``.
+``training/recipes/slime/patches``.
 
 How the calls map onto hot-load snapshots
 -----------------------------------------

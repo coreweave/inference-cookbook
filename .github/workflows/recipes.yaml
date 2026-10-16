@@ -9,7 +9,8 @@ on:
   pull_request:
     paths:
       - "k8s/**"
-      - "recipes/**"
+      - "training/**"
+      - "evaluation/**"
       - "docs/**"
       - ".gitignore"
       - "libs/cwtrain/cwtrain/integrations/launch.py"
@@ -18,7 +19,8 @@ on:
     branches: [main]
     paths:
       - "k8s/**"
-      - "recipes/**"
+      - "training/**"
+      - "evaluation/**"
       - "docs/**"
       - ".gitignore"
       - "libs/cwtrain/cwtrain/integrations/launch.py"
@@ -36,7 +38,7 @@ jobs:
           # nothing here pushes, so the token is not left in .git/config for later steps
           persist-credentials: false
       - name: Shell scripts parse
-        run: for f in k8s/*.sh recipes/*/*/k8s/*.sh; do bash -n "$f"; done
+        run: for f in k8s/*.sh training/recipes/*/k8s/*.sh; do bash -n "$f"; done
 
   launchers:
     name: recipe launchers
@@ -51,5 +53,5 @@ jobs:
           python-version: "3.12"
           activate-environment: true
       - run: uv pip install -e 'libs/cwtrain[dev]'
-      - run: pytest -q recipes/*/*/tests k8s/tests
+      - run: pytest -q training/recipes/*/tests evaluation/recipes/*/tests k8s/tests
 

@@ -239,7 +239,7 @@ Work in this recipe's `k8s/` directory, with a filled-in copy of `run.env.exampl
 shell:
 
 ```bash
-cd recipes/training/nemo-rl/k8s
+cd training/recipes/nemo-rl/k8s
 K=../../../../k8s                # the shared files: k8s/ at the repository root
 [ -e run.env ] || cp run.env.example run.env   # once; fill in every <placeholder>, render.sh refuses one
 set -a; . ./run.env; set +a      # the commands below use its values
@@ -358,7 +358,7 @@ credentials. Only the admin may delete from the bucket:
 
 ```bash
 ( set -eu   # run from anywhere in the repository; stops at the first unset value or failed step
-  cd "$(git rev-parse --show-toplevel)/recipes/training/nemo-rl/k8s"
+  cd "$(git rev-parse --show-toplevel)/training/recipes/nemo-rl/k8s"
   set -a; . ./run.env; set +a
   # deployment.run.json, when present, decides; a file without hotLoad.pathPrefix stops the block.
   # Like the API, ignore slashes at either end of the prefix ("/hotload/" is "hotload").

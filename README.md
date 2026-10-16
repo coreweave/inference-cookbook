@@ -33,12 +33,19 @@ NeMo Gym evaluation recipe uses it to create and clean up its deployment.
 
 ## Recipes
 
+A recipe wires one trainer or evaluation harness to Dedicated Inference: its launcher, any patches,
+and the settings and modes it supports. It runs the framework's own training or evaluation loop. An
+example runs a recipe with a concrete model, dataset and deployment, and a case study shows a real
+problem solved with Dedicated Inference, with its results. Examples and case studies will go in
+`training/examples/` and `training/case-studies/`. [CONTRIBUTING](CONTRIBUTING.md#what-goes-where)
+says what goes where.
+
 | Recipe | Framework | Algorithm | Upstream changes | Tested with |
 | --- | --- | --- | --- | --- |
-| [miles](recipes/training/miles/README.md) | [miles](https://github.com/radixark/miles) | GRPO, synchronous or one step ahead | None: miles calls the `cwtrain` hook after each weight sync | `radixark/miles:v0.1.1` |
-| [slime](recipes/training/slime/README.md) | [slime](https://github.com/THUDM/slime) | GRPO | Three small patches, applied by the launcher, so slime publishes weights without inference engines of its own | slime `8ee9c1e` |
-| [NeMo-RL](recipes/training/nemo-rl/README.md) | [NeMo-RL](https://github.com/NVIDIA-NeMo/RL) | GRPO | Patches, applied by the launcher, that register the `coreweave` backend and optional Gym rollouts | NeMo-RL `v0.7.0` |
-| [NeMo Gym](recipes/evaluation/nemo-gym/README.md) | [NeMo Gym](https://github.com/NVIDIA-NeMo/Gym) | Evaluation with scored rollouts | None: cwtrain provisions and cleans up the gateway and deployment; Gym runs the agent and scores responses | NeMo Gym `v0.6.0` |
+| [miles](training/recipes/miles/README.md) | [miles](https://github.com/radixark/miles) | GRPO, synchronous or one step ahead | None: miles calls the `cwtrain` hook after each weight sync | `radixark/miles:v0.1.1` |
+| [slime](training/recipes/slime/README.md) | [slime](https://github.com/THUDM/slime) | GRPO | Three small patches, applied by the launcher, so slime publishes weights without inference engines of its own | slime `8ee9c1e` |
+| [NeMo-RL](training/recipes/nemo-rl/README.md) | [NeMo-RL](https://github.com/NVIDIA-NeMo/RL) | GRPO | Patches, applied by the launcher, that register the `coreweave` backend and optional Gym rollouts | NeMo-RL `v0.7.0` |
+| [NeMo Gym](evaluation/recipes/nemo-gym/README.md) | [NeMo Gym](https://github.com/NVIDIA-NeMo/Gym) | Evaluation with scored rollouts | None: cwtrain provisions and cleans up the gateway and deployment; Gym runs the agent and scores responses | NeMo Gym `v0.6.0` |
 
 The training recipes use DAPO-Math-17k and run on Kubernetes. NeMo-RL uses Nemotron 3.5
 Lightning BF16; slime and miles use Qwen3-4B. Each ships its own manifests and an example
@@ -62,7 +69,7 @@ deployment request. They share the rest of the setup, with the example bucket po
   your organization's statement in the policy, or all other access to the bucket stops. The recipes'
   [`bucket-policy.example.json`](k8s/bucket-policy.example.json) has this structure.
 - A gateway, and a deployment created with engine `dynamo-vllm` and a `hotLoad` section naming the
-  bucket and path prefix for snapshots ([example request](recipes/training/miles/deployment.example.json)).
+  bucket and path prefix for snapshots ([example request](training/recipes/miles/deployment.example.json)).
   The recipes use `cwtrain deployment create` to create it from such a request. You can also use
   the API, or the **Hot loading** section of the Cloud Console's create drawer. You can enable
   hot-load only when you create a deployment; you cannot add it later. All of the deployment's
@@ -91,7 +98,7 @@ export AWS_REGION=<bucket zone>                          # the bucket's Availabi
 `COREWEAVE_API_TOKEN` is not set.
 
 Create the deployment from a request body like a recipe's
-[`deployment.example.json`](recipes/training/miles/deployment.example.json), with every
+[`deployment.example.json`](training/recipes/miles/deployment.example.json), with every
 `<placeholder>` filled in:
 
 ```bash
@@ -179,10 +186,10 @@ libs/cwtrain/                 Python library and CLI the recipes share: deployme
                               hot-load (uploads, deltas, the weight mirror), the rollout sampler,
                               and the framework integrations
 k8s/                          Kubernetes and object storage setup that the training recipes share
-recipes/training/miles/       GRPO with miles, with Kubernetes manifests
-recipes/training/slime/       GRPO with slime, with Kubernetes manifests and the patches slime needs
-recipes/training/nemo-rl/     GRPO with NeMo-RL, with Kubernetes manifests and the patches it needs
-recipes/evaluation/nemo-gym/  Scored evaluation with NeMo Gym against a temporary deployment
+training/recipes/miles/       GRPO with miles, with Kubernetes manifests
+training/recipes/slime/       GRPO with slime, with Kubernetes manifests and the patches slime needs
+training/recipes/nemo-rl/     GRPO with NeMo-RL, with Kubernetes manifests and the patches it needs
+evaluation/recipes/nemo-gym/  Scored evaluation with NeMo Gym against a temporary deployment
 docs/                         Diagrams
 ```
 

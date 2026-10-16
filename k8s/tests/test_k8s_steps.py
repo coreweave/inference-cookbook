@@ -33,7 +33,7 @@ needs_envsubst = pytest.mark.skipif(
 
 @dataclass(frozen=True)
 class Recipe:
-    name: str  # its directory under recipes/training
+    name: str  # its directory under training/recipes
     extra: str  # the run.env variable for free-form trainer arguments
     run_id: str  # how RUN_ID in run.env.example starts
     deployment: str  # the example deployment that the README creates
@@ -42,7 +42,7 @@ class Recipe:
 
     @property
     def path(self) -> Path:
-        return ROOT / "recipes" / "training" / self.name
+        return ROOT / "training" / "recipes" / self.name
 
     @property
     def k8s(self) -> Path:
@@ -76,9 +76,6 @@ RECIPES = [
     ),
 ]
 per_recipe = pytest.mark.parametrize("recipe", RECIPES, ids=[recipe.name for recipe in RECIPES])
-# Copies of shared files that pages outside this repository link. Delete each copy, and its line
-# here, once those pages link the file in k8s/ instead.
-LINKED_COPIES = ["recipes/training/miles/bucket-policy.example.json"]
 
 
 def manifests(recipe: Recipe) -> list[Path]:
@@ -216,7 +213,7 @@ def test_the_example_deployment_sets_no_engine_env_or_internal_options(recipe: R
 def kit_tree(recipe: Recipe, tmp_path: Path) -> tuple[Path, Path, Path]:
     """A copy of make-kit.sh and the shared script it sources in a repository layout, an empty
     wheel dir, and a recording kubectl."""
-    script = tmp_path / "recipes" / "training" / recipe.name / "k8s" / "make-kit.sh"
+    script = tmp_path / "training" / "recipes" / recipe.name / "k8s" / "make-kit.sh"
     script.parent.mkdir(parents=True)
     shutil.copy(recipe.k8s / "make-kit.sh", script)
     (tmp_path / "k8s").mkdir()
@@ -392,7 +389,7 @@ def run_cleanup(
 
     shell holds variables already exported in the user's shell, run_env the run.env overrides,
     hot_loads the identities that the deployment hot-loaded."""
-    k8s = tmp_path / "recipes" / "training" / recipe.name / "k8s"
+    k8s = tmp_path / "training" / "recipes" / recipe.name / "k8s"
     k8s.mkdir(parents=True)
     if git_repo:
         subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
@@ -848,7 +845,7 @@ def test_the_cleanup_block_explains_a_deployment_without_a_prefix(
 
 @per_recipe
 def test_the_setup_block_keeps_a_filled_in_run_env(tmp_path: Path, recipe: Recipe) -> None:
-    k8s = tmp_path / "recipes" / "training" / recipe.name / "k8s"
+    k8s = tmp_path / "training" / "recipes" / recipe.name / "k8s"
     k8s.mkdir(parents=True)
     shutil.copy(recipe.k8s / "run.env.example", k8s / "run.env.example")
     bin_dir = tmp_path / "bin"
@@ -895,18 +892,10 @@ def test_no_other_directory_holds_a_copy_of_a_shared_file() -> None:
     shared = {path.name for path in tracked if path.parent == Path("k8s")} - {"README.md"}
     listed = git("ls-files", "--cached", "--others", "--exclude-standard").stdout.splitlines()
     copies = [path for path in listed if not path.startswith("k8s/") and Path(path).name in shared]
-    assert sorted(copies) == sorted(LINKED_COPIES), "use the files in k8s/ by path, not copies"
+    assert copies == [], "use the files in k8s/ by path, not copies"
 
 
 def test_every_training_recipe_is_in_recipes() -> None:
     # a recipe that is not in RECIPES gets none of the tests above
-    found = {path.parent.name for path in (ROOT / "recipes" / "training").glob("*/k8s")}
+    found = {path.parent.name for path in (ROOT / "training" / "recipes").glob("*/k8s")}
     assert found == {recipe.name for recipe in RECIPES}, "add the recipe to RECIPES"
-
-
-def test_the_linked_copies_are_identical_to_the_shared_files() -> None:
-    for copy in LINKED_COPIES:
-        shared = SHARED / Path(copy).name
-        assert (ROOT / copy).read_bytes() == shared.read_bytes(), (
-            f"copy k8s/{shared.name} to {copy}"
-        )

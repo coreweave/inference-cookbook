@@ -5,7 +5,7 @@ Purpose: add the `coreweave` generation backend to grpo.setup() (policy cluster 
   over to that synchronizer, and keep print_performance_metrics working when generation
   owns no GPUs in the training cluster.
 License: Apache-2.0. Upstream code by NVIDIA CORPORATION; changes by CoreWeave, Inc. (see REUSE.toml).
-Applied by recipes/training/nemo-rl/launch.py with `git apply`, which skips this header.
+Applied by training/recipes/nemo-rl/launch.py with `git apply`, which skips this header.
 
 diff --git a/nemo_rl/algorithms/grpo.py b/nemo_rl/algorithms/grpo.py
 index 76d75c8..bea06a5 100644

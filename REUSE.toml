@@ -12,14 +12,14 @@ SPDX-PackageName = "inference-cookbook"
 
 # The recipes' patches carry context lines from the upstream projects they modify.
 [[annotations]]
-path = "recipes/training/slime/patches/*.patch"
+path = "training/recipes/slime/patches/*.patch"
 precedence = "override"
 SPDX-FileCopyrightText = ["2025 Zhipu AI", "2026 CoreWeave, Inc."]
 SPDX-License-Identifier = "Apache-2.0"
 SPDX-PackageName = "inference-cookbook"
 
 [[annotations]]
-path = "recipes/training/nemo-rl/patches/*.patch"
+path = "training/recipes/nemo-rl/patches/*.patch"
 precedence = "override"
 SPDX-FileCopyrightText = ["2025-2026 NVIDIA CORPORATION", "2026 CoreWeave, Inc."]
 SPDX-License-Identifier = "Apache-2.0"

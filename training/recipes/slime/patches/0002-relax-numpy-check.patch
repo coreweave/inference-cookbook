@@ -3,7 +3,7 @@ Base: commit 8ee9c1e1c8871ccd6dc8ec812edfaefa3dd1156b
 Purpose: let SLIME_RELAX_NUMPY_CHECK=1 skip slime's numpy 1 assertion on images whose Megatron-LM
   works with numpy 2, such as the arm64 miles image; the check is unchanged otherwise.
 License: Apache-2.0. Upstream code by Zhipu AI; changes by CoreWeave, Inc. (see REUSE.toml).
-Applied by recipes/training/slime/launch.py with `git apply`, which skips this header.
+Applied by training/recipes/slime/launch.py with `git apply`, which skips this header.
 
 diff --git a/slime/backends/megatron_utils/initialize.py b/slime/backends/megatron_utils/initialize.py
 index 36872bd..c2cfb68 100644
