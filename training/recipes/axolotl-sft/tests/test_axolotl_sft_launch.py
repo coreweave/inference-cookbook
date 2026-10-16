@@ -157,9 +157,10 @@ def test_stage_takes_the_weights_from_the_result_and_the_rest_from_the_base(tmp_
     assert (staged / "model.safetensors").samefile(result / "model.safetensors")  # a hard link
 
 
-def test_served_names_leave_out_a_tied_head_equal_to_the_embedding(tmp_path) -> None:
+def test_served_names_leave_out_a_tied_head_equal_to_the_embedding(tmp_path, capsys) -> None:
     base, result = make_base(tmp_path / "base"), make_result(tmp_path / "out")
     assert launch.served_names(result, base, tokenizer_dir=result) == {EMBED, NORM}
+    assert f"left out {HEAD}: a copy of {EMBED}" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize(
@@ -324,17 +325,24 @@ def test_main_trains_without_the_api_credentials_and_publishes_the_base_tensors(
     assert (snapshot / "config.json").read_text() == '{"rope_theta": 1000000}'  # the base's
 
 
-def test_main_merges_a_lora_adapter_and_publishes_the_merged_model(
-    tmp_path, monkeypatch, clock, stub_axolotl
-) -> None:
+def lora_run(tmp_path, monkeypatch, *, changed: bool) -> None:
+    """A LoRA run's output, and a merge in the base's layout that changed the norm or nothing."""
     adapter = tmp_path / "adapter"
     adapter.mkdir()
     (adapter / "adapter_config.json").write_text("{}")
     save_safetensors(adapter / "adapter_model.safetensors", {"lora_A": ("BF16", [1], b"\0\0")})
     (adapter / "tokenizer.json").write_text(tokenizer())
     merged = make_base(tmp_path / "merged")  # merge-lora writes the base's layout
+    if changed:
+        save_safetensors(merged / SHARDS[1], {NORM: ("BF16", [2], b"\x05\x06\x07\x08")})
     monkeypatch.setenv("STUB_TRAIN_OUTPUT", str(adapter))
     monkeypatch.setenv("STUB_MERGED", str(merged))
+
+
+def test_main_merges_a_lora_adapter_and_publishes_the_merged_model(
+    tmp_path, monkeypatch, clock, stub_axolotl
+) -> None:
+    lora_run(tmp_path, monkeypatch, changed=True)
     loader = run_main(tmp_path, monkeypatch, clock)
 
     calls = [json.loads(line)["args"] for line in stub_axolotl.read_text().splitlines()]
@@ -343,6 +351,15 @@ def test_main_merges_a_lora_adapter_and_publishes_the_merged_model(
     snapshot = loader.calls[1][1]
     assert set(tensor_locations(snapshot)) == {EMBED, NORM}
     assert (snapshot / SHARDS[1]).is_file()
+
+
+def test_main_stops_when_the_merge_left_the_base_model_unchanged(
+    tmp_path, monkeypatch, clock, stub_axolotl
+) -> None:
+    lora_run(tmp_path, monkeypatch, changed=False)
+    with pytest.raises(LaunchError, match="applied no LoRA weight"):
+        run_main(tmp_path, monkeypatch, clock)
+    assert not (tmp_path / "work" / "sft-run-v000030").exists()  # nothing to upload
 
 
 def test_main_stops_before_training_when_the_identity_is_already_hot_loaded(

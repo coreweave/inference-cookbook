@@ -56,7 +56,7 @@ def test_the_example_deployment_is_the_staged_model_under_a_name_of_its_own() ->
     ours = json.loads((RECIPE / "deployment.example.json").read_text())
     others = [
         json.loads(path.read_text())
-        for path in ROOT.glob("recipes/*/*/deployment*.example.json")
+        for path in ROOT.glob("*/recipes/*/deployment*.example.json")
         if path.parent != RECIPE
     ]
     assert ours["name"] not in {other.get("name") for other in others}

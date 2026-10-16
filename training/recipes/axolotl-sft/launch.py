@@ -227,6 +227,13 @@ def same_bytes(a: TensorLocation, b: TensorLocation) -> bool:
     return True
 
 
+def same_weights(result: Path, base: Path) -> bool:
+    """Whether every tensor in ``result`` has the base model's bytes, as after a merge that
+    applied nothing. The first tensor that differs ends the comparison."""
+    got, want = tensor_locations(result), tensor_locations(base)
+    return set(got) <= set(want) and all(same_bytes(loc, want[name]) for name, loc in got.items())
+
+
 def added_tokens(directory: Path) -> set[str]:
     """The ``added_tokens`` of the tokenizer in ``directory``, if it holds a ``tokenizer.json``."""
     path = directory / "tokenizer.json"
@@ -256,6 +263,7 @@ def served_names(result: Path, base: Path, tokenizer_dir: Path) -> set[str]:
     extra = set(got) - set(want)
     if extra == {TIED_HEAD} and EMBEDDING in got and same_bytes(got[TIED_HEAD], got[EMBEDDING]):
         extra = set()  # an FSDP2 gather saved the tied head again; the base holds it once
+        say(f"left out {TIED_HEAD}: a copy of {EMBEDDING}, which the base model ties it to")
     problems = [
         *(f"missing {name}" for name in sorted(set(want) - set(got))),
         *(f"extra {name}" for name in sorted(extra)),
@@ -370,6 +378,12 @@ def main(environ: Mapping[str, str] | None = None) -> None:
         say("== merge the LoRA adapter")
         axolotl(merge_command(job), cwd=job.work)
         result = result / "merged"
+        if same_weights(result, job.model_dir):
+            raise LaunchError(
+                f"{result} is the base model: axolotl merge-lora applied no LoRA weight (its "
+                "'Applied LoRA to' line says how many tensors it changed). With FSDP2, train "
+                'LoRA with --no-fsdp-config.activation-checkpointing (README, "LoRA")'
+            )
 
     say(f"== snapshot {job.identity}")
     names = served_names(result, job.model_dir, tokenizer_dir=job.output_dir)
