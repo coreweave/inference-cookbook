@@ -31,7 +31,9 @@ def run_env_example() -> dict[str, str]:
         r"strict: false",  # the launcher's options and EXTRA_TRAIN_ARGS override any key
         r"chat_template: tokenizer_default",  # the deployment keeps the base model's template
         r"chat_template_kwargs: \{enable_thinking: false\}",
-        r"\s+revision: [0-9a-f]{40}",  # the dataset's bytes are pinned
+        # the dataset's bytes are pinned: one file, by URL, at a commit
+        r"\s+- path: https://huggingface\.co/datasets/\S+/resolve/[0-9a-f]{40}/\S+\.parquet",
+        r"\s+ds_type: parquet",
         r"attn_implementation: sdpa",
         r"sample_packing: false",  # sdpa does not pack
         r"fsdp_version: 2",

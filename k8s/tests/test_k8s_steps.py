@@ -42,6 +42,7 @@ class Recipe:
     # a variable that run.env.example leaves unfilled and trainer-job.yaml uses
     placeholder: str = "ROLLOUT_BASE_URL"
     inference_key: bool = True  # whether the trainer reads an inference API key Secret
+    diagram: str = "docs/hotload-flow.drawio.svg"  # the hot-load flow that the README embeds
 
     @property
     def path(self) -> Path:
@@ -86,6 +87,7 @@ RECIPES = [
         model_slug="Qwen3-4B",
         placeholder="DEPLOYMENT_ID",  # SFT samples no rollouts, so it has no rollout endpoint
         inference_key=False,
+        diagram="docs/hotload-flow-sft.drawio.svg",  # one publish after training, no RL loop
     ),
 ]
 per_recipe = pytest.mark.parametrize("recipe", RECIPES, ids=[recipe.name for recipe in RECIPES])
@@ -374,7 +376,7 @@ def test_the_readme_links_shared_files_that_exist(recipe: Recipe) -> None:
     expected = [
         "k8s/README.md",
         "k8s/trainer-access-policy.example.json",
-        "docs/hotload-flow.drawio.svg",
+        recipe.diagram,
     ]
     assert {f"../../../{path}" for path in expected} <= links
     for link in links:

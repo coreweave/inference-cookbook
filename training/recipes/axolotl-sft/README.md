@@ -12,7 +12,7 @@ right away:
 3. `cwtrain` uploads the snapshot and creates a hot-load.
 4. The deployment swaps the weights in place on all replicas.
 
-![The hot-load flow, which this recipe runs once, after training: cwtrain uploads the weights to Object Storage, creates a hot-load and polls until every replica is READY; requests to the OpenAI-compatible endpoint then get the new weights.](../../../docs/hotload-flow.drawio.svg)
+![The hot-load flow of this recipe, once per run, after training: the trainer Job runs axolotl train, and axolotl merge-lora after a LoRA run; launch.py checks the result and writes one full snapshot; cwtrain uploads it to AI Object Storage, creates a hot-load and polls until every replica is READY; the deployment's OpenAI-compatible endpoint then serves the fine-tuned weights.](../../../docs/hotload-flow-sft.drawio.svg)
 
 The snapshot is also a plain Hugging Face checkpoint in your bucket, so an RL recipe can start
 from it (see [SFT, then RL](#sft-then-rl)).
@@ -52,7 +52,10 @@ must be full, because no delta can chain onto its base weights.
 | Axolotl | [`v0.20.0`](https://github.com/axolotl-ai-cloud/axolotl/releases/tag/v0.20.0): the trainer image `axolotlai/axolotl:0.20.0-py3.12-cu130-2.13.0@sha256:80ab8e2eb7a6f1987656a5b8c09e4c317e7481bcfb543674fd7414ef61a73c4b` (amd64 and arm64), `TRAINER_IMAGE` in `run.env.example` |
 | Inference engine | `dynamo-vllm` `0.30.0+crwv.5` |
 
-This configuration is not yet validated against a live deployment.
+An end-to-end run trained on two B200 GPUs, an amd64 node, against a deployment of two one-GPU
+H100 replicas. A full fine-tune and a LoRA run each published a full snapshot of the base model's
+398 tensors, which hot-loaded on both replicas, and the same greedy request answered differently
+after each swap. The default `INSTANCE_TYPE`, `gb300-4x` (arm64), is not yet validated.
 
 ## What you need
 
@@ -188,11 +191,17 @@ base model with `axolotl merge-lora`, and publishes the merged model. Turn LoRA 
 `EXTRA_TRAIN_ARGS`:
 
 ```bash
-EXTRA_TRAIN_ARGS='--adapter lora --lora-r 32 --lora-alpha 64 --lora-target-linear'
+EXTRA_TRAIN_ARGS='--adapter lora --lora-r 32 --lora-alpha 64 --lora-target-linear --no-fsdp-config.activation-checkpointing'
 ```
 
 The merge gets the same options as the training run and writes `/work/out/merged`. With FSDP2,
 Axolotl saves the adapter only, so the merge is the step that produces full weights.
+
+Keep `--no-fsdp-config.activation-checkpointing`, which turns off the config's FSDP activation
+checkpointing for the LoRA run. With it on, Axolotl v0.20.0 saves the adapter under the
+checkpoint wrappers' module names (`..._checkpoint_wrapped_module...`), so `merge-lora` matches
+none of its weights to the base model: it logs `Applied LoRA to 0/398 tensors`, and the merged
+model is the base model.
 
 ## Running it on Kubernetes
 
@@ -245,11 +254,14 @@ environment. `run-trainer.sh` does these steps:
 ### Creating the deployment
 
 Copy [`deployment.example.json`](deployment.example.json) to `deployment.run.json` in this recipe's
-`k8s/` (git-ignored). Fill in the gateway id and the bucket. The example pins `dynamo-vllm` to
+`k8s/` (git-ignored). Fill in the gateway id and the bucket. If you changed `MODEL_PREFIX`,
+`MODEL_SLUG` or `HOTLOAD_PREFIX` in `run.env`, change `model.path` (`<MODEL_PREFIX>/<MODEL_SLUG>`)
+and `hotLoad.pathPrefix` (`HOTLOAD_PREFIX`) to match. The example pins `dynamo-vllm` to
 `0.30.0+crwv.5`, which has hot-load support; its ModelExpress client is built into the engine. Put
 your API token in `COREWEAVE_API_TOKEN` (or `CW_API_TOKEN`, as the CoreWeave docs set it). Then
 `cwtrain deployment parameters` lists the runtime versions, instance types and engine options that
-your organization can use. `--gateway <gateway id>` limits the list to that gateway's zone:
+your organization can use. `--gateway <gateway id>` limits the list to that gateway's zone. Set
+`resources.instanceType` to one of the instance types that it lists:
 
 ```bash
 cwtrain deployment parameters
@@ -340,9 +352,9 @@ print(p.strip("/"))')
   esac
   # Every deployment shares the hot-load prefix, so remove only the runs that this deployment
   # hot-loaded: <prefix>/<run>-vNNNNNN/ and <prefix>/_manifests/<run>-vNNNNNN.json. List them
-  # while the deployment exists.
+  # while the deployment exists, one per line.
   runs=$(cwtrain hotload list --deployment "$DEPLOYMENT_ID" --limit 100000 | python3 -c 'import json, re, sys
-print(" ".join(sorted({re.sub(r"-v[0-9]+$", "", h["spec"]["identity"]) for h in json.load(sys.stdin)})))')
+print("\n".join(sorted({re.sub(r"-v[0-9]+$", "", h["spec"]["identity"]) for h in json.load(sys.stdin)})))')
   cwtrain deployment delete "$DEPLOYMENT_ID" --ignore-not-found
   kubectl -n "$NAMESPACE" delete job "cwtrain-$JOB_NAME" "cwtrain-stage-$JOB_NAME" cwtrain-make-bucket --ignore-not-found
   kubectl -n "$NAMESPACE" delete secret "$STORAGE_SECRET" "$ADMIN_STORAGE_SECRET" "$API_TOKEN_SECRET" \
@@ -350,9 +362,11 @@ print(" ".join(sorted({re.sub(r"-v[0-9]+$", "", h["spec"]["identity"]) for h in 
   kubectl -n "$NAMESPACE" delete configmap "$KIT_NAME" --ignore-not-found
   [ -z "$TRAINER_SERVICE_ACCOUNT" ] || kubectl -n "$NAMESPACE" delete serviceaccount "$TRAINER_SERVICE_ACCOUNT" --ignore-not-found
   [ -n "$runs" ] || echo "found no hot-loads of $DEPLOYMENT_ID, so nothing under $HOTLOAD_PREFIX/ is removed" >&2
-  for run in $runs; do
-    aws s3 rm --recursive "s3://$BUCKET/$HOTLOAD_PREFIX/" --exclude '*' --include "$run-v*" \
-      --include "_manifests/$run-v*" --endpoint-url https://cwobject.com --region "$BUCKET_ZONE"
+  # read line by line: zsh, unlike bash, does not split an unquoted $runs into words
+  printf '%s\n' "$runs" | while read -r run; do
+    [ -z "$run" ] || aws s3 rm --recursive "s3://$BUCKET/$HOTLOAD_PREFIX/" --exclude '*' \
+      --include "$run-v*" --include "_manifests/$run-v*" --endpoint-url https://cwobject.com \
+      --region "$BUCKET_ZONE"
   done
   for prefix in "$MODEL_PREFIX/$MODEL_SLUG" "$MODEL_PREFIX/_probe"; do
     aws s3 rm --recursive "s3://$BUCKET/$prefix/" --endpoint-url https://cwobject.com --region "$BUCKET_ZONE"
@@ -427,7 +441,9 @@ to evaluate an existing deployment.
 ## Failure handling
 
 - A failure before the upload (training, the merge, the check, the snapshot) leaves nothing in the
-  bucket. Fix the cause, delete the Job, and render and apply step 8 again.
+  bucket. Fix the cause, delete the Job, and render and apply step 8 again. If the fix is in a file
+  of the kit, such as `sft_coreweave.yaml`, run step 3 first: the Job reads those files from the
+  kit ConfigMap.
 - A failure after the upload leaves the snapshot in the bucket: the deployment was not READY
   within `HOTLOAD_TIMEOUT`, the hot-load ended `FAILED` (`HotLoadFailedError`, with per-replica
   reasons), or it did not complete in time. The launcher prints the command that hot-loads the

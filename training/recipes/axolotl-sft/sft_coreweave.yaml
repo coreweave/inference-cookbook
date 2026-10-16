@@ -14,9 +14,11 @@ strict: false
 chat_template: tokenizer_default
 chat_template_kwargs: {enable_thinking: false}
 datasets:
-  - path: AI-MO/NuminaMath-CoT
-    revision: 9d8d210c9f6a36c8f3cd84045668c9b7800ef517
-    data_files: data/train-00000-of-00005.parquet  # one 235 MiB shard, not all five
+  # One 235 MiB shard of five, at a pinned revision, read by URL as plain parquet. Read as a Hub
+  # dataset with data_files, the shard fails the check against the dataset card's splits
+  # (ExpectedMoreSplitsError: {'test'}).
+  - path: https://huggingface.co/datasets/AI-MO/NuminaMath-CoT/resolve/9d8d210c9f6a36c8f3cd84045668c9b7800ef517/data/train-00000-of-00005.parquet
+    ds_type: parquet
     split: train[:2000]
     type: chat_template
 
