@@ -59,7 +59,9 @@ Three inputs change what runs. Set them in `eval.env` (the Job's settings) or pa
 `RolloutConfig` for the endpoint, model, key file and collection concurrency. For BrowseComp, it
 copies this recipe's [`you_search.py`](you_search.py) into Gym's BrowseComp harness. It serves the
 harness's `search` and `browse` tools from the You.com Search and Contents APIs, in place of
-Tavily. The NeMo-RL recipe ships the same file in its kit for BrowseComp training.
+Tavily. The NeMo-RL recipe ships the same file in its kit for search-agent training.
+`YOU_SEARCH_MAX_CHARS`, when set, caps each result's page text and snippets to that many
+characters; the evaluation keeps them whole.
 
 Gym sends the chat requests, runs the agent and scores the answers. The recipe's
 [`browsecomp.yaml`](browsecomp.yaml) overrides Gym's BrowseComp benchmark
@@ -190,8 +192,9 @@ need it.
 ## Why this is separate from NeMo-RL training
 
 Gym supplies environments, agent execution and rewards. NeMo-RL supplies the optimizer and the
-training loop. The [NeMo-RL recipe](../../../training/recipes/nemo-rl/README.md#training-environment) trains on
-BrowseComp by default, with the same You.com tools and GLM-5.2 judge.
+training loop. The [NeMo-RL recipe](../../../training/recipes/nemo-rl/README.md#training-environment)
+trains the same agent on SimpleQA by default, with the same You.com tools and GLM-5.2 judge, and
+this recipe scores it on BrowseComp.
 
 This evaluation does not request training token metadata. So successful chat and reward collection
 does not verify the training path, which requires exact token IDs and log-probs. See the training

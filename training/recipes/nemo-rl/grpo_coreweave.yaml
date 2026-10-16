@@ -53,6 +53,9 @@ policy:
     # puts cwtrain's worker extension on the worker venv's path (launch.py unpacks it there)
     env_vars:
       PYTHONPATH: "/work/py"
+      # Lets the training step use memory that fragmentation otherwise strands; the search agent's
+      # long trajectories need it.
+      PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
   hf_config_overrides:
     router_aux_loss_coef: 0.0
   sequence_packing:
@@ -107,20 +110,23 @@ data:
     env_name: "math"
 
 env:
-  # The launcher's TRAIN_ENV sets this and data.train.dataset_name: browsecomp (its default) selects
-  # the Gym BrowseComp preset, dapo the Gym DAPO math preset, math NeMo-RL's math environment.
+  # The launcher's TRAIN_ENV sets this and data.train.dataset_name: simpleqa (its default) and
+  # browsecomp select the Gym search-agent presets, dapo the Gym DAPO math preset, math NeMo-RL's
+  # math environment.
   should_use_nemo_gym: false
   nemo_gym:
-    # The BrowseComp preset's LLM judge and You.com search. The key files are mounted Secrets; the
-    # Gym actor reads them, so the keys stay out of the logged config.
-    browsecomp:
+    # The search-agent presets' LLM judge and You.com search. The key files are mounted Secrets;
+    # the Gym actor reads them, so the keys stay out of the logged config.
+    search:
       judge_model: ${oc.env:CWTRAIN_JUDGE_MODEL,zai-org/GLM-5.2}
       judge_base_url: ${oc.env:CWTRAIN_JUDGE_BASE_URL,'https://api.inference.wandb.ai/v1'}
       judge_api_key_file: ${oc.env:CWTRAIN_JUDGE_API_KEY_FILE,null}
       search_api_key_file: ${oc.env:CWTRAIN_SEARCH_API_KEY_FILE,null}
       # The Gym eval recipe's You.com client, in the kit; the Gym actor copies it into the harness.
       search_entrypoint: /opt/cwtrain/you_search.py
-      max_steps: 8              # tool-calling turns per trajectory
+      # Characters kept of each search or browse result, so that ~10 tool calls fit a trajectory.
+      search_env: {YOU_SEARCH_MAX_CHARS: "2000"}
+      max_steps: 12             # tool-calling turns per trajectory
   math:
     num_workers: 8
     math_verify_impl: "hf_math_verify"

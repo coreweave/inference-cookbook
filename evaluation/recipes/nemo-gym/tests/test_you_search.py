@@ -131,3 +131,13 @@ def test_install_copies_a_self_contained_entrypoint(tmp_path):
     # The harness venv has no cwtrain, so the copy must not import it.
     assert "import cwtrain" not in source and "from cwtrain" not in source
     assert "run_server()" in source
+
+
+def test_max_chars_caps_page_text_and_snippets(monkeypatch):
+    monkeypatch.setenv("YOU_SEARCH_MAX_CHARS", "3")
+    results = you_search.search_results(SEARCH)
+    assert results[0]["raw_content"] == "# A" and results[0]["content"] == "fir"
+    fetched, _ = you_search.contents_results([{"url": "u", "markdown": "abcdef"}])
+    assert fetched[0]["raw_content"] == "abc"
+    monkeypatch.setenv("YOU_SEARCH_MAX_CHARS", "0")
+    assert you_search.search_results(SEARCH)[0]["raw_content"] == "# A page"

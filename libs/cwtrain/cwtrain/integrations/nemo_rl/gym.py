@@ -63,6 +63,10 @@ BROWSECOMP_CSV_URL = (
     "https://openaipublic.blob.core.windows.net/simple-evals/browse_comp_test_set.csv"
 )
 BROWSECOMP_ROWS = 1266
+# SimpleQA: OpenAI's short fact-seeking questions, in plain text. A search agent answers many of
+# them in a few tool calls, so a training group gets mixed rewards.
+SIMPLEQA_CSV_URL = "https://openaipublic.blob.core.windows.net/simple-evals/simple_qa_test_set.csv"
+SIMPLEQA_ROWS = 4326
 BROWSECOMP_AGENT = "browsecomp_agent"
 BROWSECOMP_SERVER = "browsecomp_resources_server"
 JUDGE_SERVER = "judge_model"
@@ -150,26 +154,50 @@ def browsecomp_decrypt(ciphertext: str, password: str) -> str:
     return bytes(a ^ b for a, b in zip(data, key, strict=True)).decode()
 
 
+def _csv_rows(url: str, expected: int, name: str) -> list[dict[str, str]]:
+    import httpx
+
+    response = httpx.get(url, timeout=120, follow_redirects=True)
+    response.raise_for_status()
+    rows = list(csv.DictReader(io.StringIO(response.text)))
+    if len(rows) != expected:
+        raise ValueError(f"expected {expected} {name} rows, got {len(rows)}")
+    return rows
+
+
 def browsecomp_rows(url: str = BROWSECOMP_CSV_URL) -> list[dict[str, str]]:
     """Download the encrypted BrowseComp test set.
 
     Raises:
         ValueError: The download does not have the published number of rows.
     """
-    import httpx
+    return _csv_rows(url, BROWSECOMP_ROWS, "BrowseComp")
 
-    response = httpx.get(url, timeout=120, follow_redirects=True)
-    response.raise_for_status()
-    rows = list(csv.DictReader(io.StringIO(response.text)))
-    if len(rows) != BROWSECOMP_ROWS:
-        raise ValueError(f"expected {BROWSECOMP_ROWS} BrowseComp rows, got {len(rows)}")
-    return rows
+
+def simpleqa_rows(url: str = SIMPLEQA_CSV_URL) -> list[dict[str, str]]:
+    """Download the SimpleQA test set.
+
+    Raises:
+        ValueError: The download does not have the published number of rows.
+    """
+    return _csv_rows(url, SIMPLEQA_ROWS, "SimpleQA")
 
 
 def browsecomp_example(row: Mapping[str, str], today: date | None = None) -> dict[str, Any]:
-    """Convert an encrypted BrowseComp row to a Gym example for the BrowseComp agent."""
+    """Convert an encrypted BrowseComp row to a Gym example for the search agent."""
     problem = browsecomp_decrypt(row["problem"], row["canary"])
     answer = browsecomp_decrypt(row["answer"], row["canary"])
+    return search_example(problem, answer, today)
+
+
+def simpleqa_example(row: Mapping[str, str], today: date | None = None) -> dict[str, Any]:
+    """Convert a SimpleQA row to a Gym example for the search agent."""
+    return search_example(row["problem"], row["answer"], today)
+
+
+def search_example(question: str, answer: str, today: date | None = None) -> dict[str, Any]:
+    """A Gym example for the BrowseComp agent: its prompt and tools, the question and answer."""
+    problem = question
     system = BROWSECOMP_SYSTEM_PROMPT.format(date=(today or date.today()).isoformat())
     return {
         "agent_ref": {"name": BROWSECOMP_AGENT},
@@ -185,8 +213,15 @@ def browsecomp_example(row: Mapping[str, str], today: date | None = None) -> dic
     }
 
 
-def browsecomp_servers(settings: Mapping[str, Any], max_model_len: int, exclude: Path) -> dict:
-    """Gym server instances for BrowseComp training: the search tools, a judge and the agent.
+# The search-agent presets: data.train.dataset_name -> (download, example builder, file name).
+SEARCH_PRESETS = {
+    "BrowseComp": (browsecomp_rows, browsecomp_example, "browsecomp.jsonl"),
+    "SimpleQA": (simpleqa_rows, simpleqa_example, "simpleqa.jsonl"),
+}
+
+
+def search_servers(settings: Mapping[str, Any], max_model_len: int, exclude: Path) -> dict:
+    """Gym server instances for search-agent training: the search tools, a judge and the agent.
 
     Keys are placeholders here. ``actor_config`` fills them in inside the Gym actor.
     """
@@ -230,7 +265,7 @@ def browsecomp_servers(settings: Mapping[str, Any], max_model_len: int, exclude:
                     "entrypoint": "app.py",
                     "resources_server": {"type": "resources_servers", "name": BROWSECOMP_SERVER},
                     "model_server": {"type": "responses_api_models", "name": "policy_model"},
-                    "max_steps": int(settings.get("max_steps") or 8),
+                    "max_steps": int(settings.get("max_steps") or 12),
                     "nudge_steps": True,
                     "max_context_tokens": max_model_len,
                     # A context reset drops earlier turns, which breaks the trajectory's token
@@ -247,9 +282,9 @@ def browsecomp_servers(settings: Mapping[str, Any], max_model_len: int, exclude:
 def _required_key_file(settings: Mapping[str, Any], name: str, what: str) -> str:
     path = settings.get(name)
     if not path:
-        raise ValueError(f"BrowseComp training requires env.nemo_gym.browsecomp.{name} ({what})")
+        raise ValueError(f"Search-agent training requires env.nemo_gym.search.{name} ({what})")
     if not Path(path).is_file():
-        raise ValueError(f"BrowseComp {what} file {path} does not exist; mount its Secret")
+        raise ValueError(f"The {what} file {path} does not exist; mount its Secret")
     return str(path)
 
 
@@ -257,14 +292,15 @@ def prepare_config(config: dict[str, Any], *, rows=None) -> dict[str, Any]:
     """Check a CoreWeave Gym training config, and fill in a preset when one is selected.
 
     The config is returned as an unchanged copy unless the backend is ``coreweave`` and
-    ``env.should_use_nemo_gym`` is set. With ``data.train.dataset_name: DAPOMath17K`` or
-    ``BrowseComp``, that dataset is written as Gym data and the Gym configs are set. BrowseComp
-    reads its judge and search settings from ``env.nemo_gym.browsecomp``. Otherwise the config
-    must name an explicit ``NemoGymDataset`` and ``env.nemo_gym.config_paths``.
+    ``env.should_use_nemo_gym`` is set. With ``data.train.dataset_name`` ``DAPOMath17K``,
+    ``SimpleQA`` or ``BrowseComp``, that dataset is written as Gym data and the Gym configs are set.
+    SimpleQA and BrowseComp run Gym's BrowseComp agent, with the judge and search settings in
+    ``env.nemo_gym.search``. Otherwise the config must name an explicit ``NemoGymDataset`` and
+    ``env.nemo_gym.config_paths``.
 
     Args:
         config: The NeMo-RL config. It is not modified; a changed copy is returned.
-        rows: Dataset rows (DAPO, or encrypted BrowseComp) to use instead of downloading them.
+        rows: Dataset rows (DAPO, SimpleQA or encrypted BrowseComp) to use instead of downloading.
 
     Raises:
         ValueError: The config does not meet a CoreWeave Gym training requirement, such as
@@ -310,8 +346,9 @@ def prepare_config(config: dict[str, Any], *, rows=None) -> dict[str, Any]:
     data = config["data"]
     train = data["train"]
     preset = train.get("dataset_name") if isinstance(train, dict) else None
-    browsecomp = gym.pop("browsecomp", None)
-    if preset in ("DAPOMath17K", "BrowseComp"):
+    search = gym.pop("search", None)
+    presets = ("DAPOMath17K", *SEARCH_PRESETS)
+    if preset in presets:
         if data.get("validation") or train.get("split_validation_size", 0):
             raise ValueError(
                 f"The {preset} Gym preset requires validation disabled; use explicit Gym data"
@@ -331,28 +368,33 @@ def prepare_config(config: dict[str, Any], *, rows=None) -> dict[str, Any]:
             rows = islice(rows, max_samples)
         path = directory / "dapo.jsonl"
         write_dapo(rows, path)
-    elif preset == "BrowseComp":
-        settings = dict(browsecomp or {})
+    elif preset in SEARCH_PRESETS:
+        download, example, filename = SEARCH_PRESETS[preset]
+        settings = dict(search or {})
         for name in ("judge_model", "judge_base_url"):
             if not settings.get(name):
-                raise ValueError(f"BrowseComp training requires env.nemo_gym.browsecomp.{name}")
+                raise ValueError(f"Search-agent training requires env.nemo_gym.search.{name}")
         gym["coreweave_judge_api_key_file"] = _required_key_file(
             settings, "judge_api_key_file", "judge API key"
         )
         gym["coreweave_search_api_key_file"] = _required_key_file(
             settings, "search_api_key_file", "search API key"
         )
+        search_env = settings.get("search_env") or {}
+        if search_env:
+            # Environment for the search backend, set in the Gym actor before its servers start.
+            gym["coreweave_search_env"] = {str(k): str(v) for k, v in search_env.items()}
         entrypoint = settings.get("search_entrypoint")
         if entrypoint:
             if not Path(entrypoint).is_file():
-                raise ValueError(f"BrowseComp search_entrypoint {entrypoint} does not exist")
+                raise ValueError(f"search_entrypoint {entrypoint} does not exist")
             gym["coreweave_search_entrypoint"] = str(entrypoint)
         if rows is None:
-            rows = browsecomp_rows()
+            rows = download()
         if max_samples is not None:
             rows = islice(rows, max_samples)
-        path = directory / "browsecomp.jsonl"
-        write_examples((browsecomp_example(row) for row in rows), path)
+        path = directory / filename
+        write_examples((example(row) for row in rows), path)
         exclude = directory / "exclude_domains.json"
         domains = settings.get("exclude_domains")
         domains = BROWSECOMP_EXCLUDED_DOMAINS if domains is None else domains
@@ -362,8 +404,8 @@ def prepare_config(config: dict[str, Any], *, rows=None) -> dict[str, Any]:
                 {"notices": [{"properties": [{"type": "domain", "value": d} for d in domains]}]}
             )
         )
-        gym.update(browsecomp_servers(settings, int(cw["max_model_len"]), exclude))
-    if preset in ("DAPOMath17K", "BrowseComp"):
+        gym.update(search_servers(settings, int(cw["max_model_len"]), exclude))
+    if preset in presets:
         data["train"] = {"dataset_name": "NemoGymDataset", "data_path": str(path)}
         data["validation"] = None
         data["max_input_seq_length"] = None
@@ -386,7 +428,9 @@ def prepare_config(config: dict[str, Any], *, rows=None) -> dict[str, Any]:
     else:
         datasets = train if isinstance(train, list) else [train]
         if any(item.get("dataset_name") != "NemoGymDataset" for item in datasets):
-            raise ValueError("Gym requires DAPOMath17K, BrowseComp or an explicit NemoGymDataset")
+            raise ValueError(
+                "Gym requires DAPOMath17K, SimpleQA, BrowseComp or an explicit NemoGymDataset"
+            )
         if not gym.get("config_paths"):
             raise ValueError("Custom Gym data requires env.nemo_gym.config_paths")
     return config
@@ -436,6 +480,8 @@ def actor_config(initial: dict[str, Any], environ=None) -> dict[str, Any]:
     judge_file = initial.pop("coreweave_judge_api_key_file", None)
     search_file = initial.pop("coreweave_search_api_key_file", None)
     search_entrypoint = initial.pop("coreweave_search_entrypoint", None)
+    # Gym's servers inherit the actor's environment.
+    os.environ.update(initial.pop("coreweave_search_env", None) or {})
     if judge_file or search_file:
         if search_entrypoint:
             import shutil

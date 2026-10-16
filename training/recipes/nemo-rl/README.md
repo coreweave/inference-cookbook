@@ -10,11 +10,12 @@ NeMo-RL starts no inference engines:
 
 Training pauses until every replica serves the new version, so the next rollout is on-policy.
 
-By default the recipe trains the policy on [BrowseComp](https://openai.com/index/browsecomp/)
-through [NeMo Gym](https://github.com/NVIDIA-NeMo/Gym). Gym's BrowseComp agent searches and reads
-the web through You.com, and an LLM judge (GLM-5.2 on W&B Inference by default) scores each final
-answer. `TRAIN_ENV` in `run.env` switches to DAPO math instead. See
-[Training environment](#training-environment).
+By default the recipe trains the policy on [SimpleQA](https://openai.com/index/introducing-simpleqa/)
+through [NeMo Gym](https://github.com/NVIDIA-NeMo/Gym), with Gym's BrowseComp agent. The agent
+searches and reads the web through You.com, and an LLM judge (GLM-5.2 on W&B Inference by default)
+scores each final answer. The [NeMo Gym evaluation recipe](../../../evaluation/recipes/nemo-gym/README.md)
+scores the policy on BrowseComp with the same agent, tools and judge. `TRAIN_ENV` in `run.env`
+switches to BrowseComp or DAPO math instead. See [Training environment](#training-environment).
 
 ![One training step: the trainer exports weights, the cwtrain synchronizer uploads a full or delta snapshot to Object Storage, creates a hot-load and polls until every replica is READY; the next rollout batch samples fresh weights from the OpenAI-compatible endpoint.](../../../docs/hotload-flow.drawio.svg)
 
@@ -27,7 +28,7 @@ Each example runs this recipe end to end on Kubernetes, with what you need, the 
 cleanup:
 
 - [`nemo-rl-grpo-nemotron-3.5-lightning-30b-a3b`](../../examples/nemo-rl-grpo-nemotron-3.5-lightning-30b-a3b/README.md):
-  GRPO on Nemotron 3.5 Lightning as a Gym BrowseComp search agent (the recipe's default
+  GRPO on Nemotron 3.5 Lightning as a Gym search agent on SimpleQA (the recipe's default
   `TRAIN_ENV`).
 
 An example's `run.env` holds the settings that this README names. This recipe's `k8s/` directory
@@ -249,21 +250,28 @@ overrides before `EXTRA_OVERRIDES`, so an override there still wins.
 
 | `TRAIN_ENV` | Environment | Reward | Default `MAX_SEQUENCE_LENGTH` |
 | --- | --- | --- | --- |
-| `browsecomp` (default) | Gym's BrowseComp agent with web search and browse tools | LLM judge compares the final answer with the ground truth | 16384 |
+| `simpleqa` (default) | Gym's BrowseComp agent with web search and browse tools, on SimpleQA | LLM judge compares the final answer with the ground truth | 16384 |
+| `browsecomp` | The same agent and judge, on BrowseComp | LLM judge | 16384 |
 | `dapo` | Gym's `math_with_judge_simple_agent` on DAPO-Math-17k | math-verify (its LLM judge is off) | 3072 |
 | `math` | NeMo-RL's own math environment on DAPO-Math-17k, without Gym | math-verify | 3072 |
 
-Both Gym environments use NeMo-RL's bundled Gym revision and actor environments. Gym owns sampling
+The Gym environments use NeMo-RL's bundled Gym revision and actor environments. Gym owns sampling
 and rewards. NeMo-RL owns optimization. cwtrain keeps the blocking checkpoint hot-load between
 batches. Asynchronous GRPO and nonblocking hot-load are rejected. The Gym actor resolves every
 credential itself, so no key is in its serialized config or Ray runtime environment.
 
-### BrowseComp
+### Search agent (SimpleQA and BrowseComp)
 
-The launcher downloads OpenAI's published BrowseComp set (1,266 questions), decrypts it and writes
-it as a `NemoGymDataset` under `/work/hotload/nemo-gym`. The prompts and tools are the same as Gym's
-`benchmarks/browsecomp` benchmark. `++data.train.max_samples=<n>` limits the questions. BrowseComp
-has only a test split. A model trained on it can no longer be evaluated on BrowseComp.
+The launcher downloads OpenAI's published question set and writes it as a `NemoGymDataset` under
+`/work/hotload/nemo-gym`: SimpleQA's 4,326 short fact-seeking questions, or BrowseComp's 1,266
+(decrypted). The prompts and tools are the same as Gym's `benchmarks/browsecomp` benchmark.
+`++data.train.max_samples=<n>` limits the questions.
+
+SimpleQA is the default because GRPO learns only from a group of trajectories whose rewards differ.
+The agent answers many SimpleQA questions in a few tool calls, so groups get mixed rewards. A
+BrowseComp question takes tens to hundreds of tool calls, more than a 16,384-token trajectory holds,
+so its rewards stay at 0 and the step learns nothing. BrowseComp stays the evaluation. Both sets
+have only a test split, so a model trained on one can no longer be evaluated on it.
 
 To score the deployment's current policy, run the
 [NeMo Gym evaluation recipe](../../../evaluation/recipes/nemo-gym/README.md) against this
@@ -278,17 +286,22 @@ deployment of its own.
 | `SEARCH_KEY_SECRET` | `search-api-key` | the Secret with the You.com key, under `api_key` |
 | `MAX_SEQUENCE_LENGTH` | 16384 | tokens per trajectory: prompt, turns and tool results |
 
-On the eight-H100 trainer, 32,768 tokens per trajectory runs out of GPU memory in the training step:
-the fp32 logits of one sequence need another 16 GiB, on top of 60 GiB of weights, gradients and
-optimizer state per GPU. Raise `MAX_SEQUENCE_LENGTH` only with more trainer memory.
+The training step needs about 0.5 MiB per token of a sequence for its fp32 logits, on top of 64 GiB
+of weights, gradients and optimizer state per GPU. On the eight-H100 trainer, 16,384 tokens fits
+every step; a longer sequence runs out of GPU memory once the optimizer state exists, after the
+first step. The config sets `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` for the policy
+workers, so fragmentation leaves no memory unusable. Raise `MAX_SEQUENCE_LENGTH` only with more
+trainer memory.
 
-`env.nemo_gym.browsecomp.max_steps` in `grpo_coreweave.yaml` limits the tool-calling turns per
-trajectory (8). `env.nemo_gym.browsecomp.exclude_domains` lists the sites that the tools never
-return (default `huggingface.co`, which publishes the questions with their answers).
+`env.nemo_gym.search.max_steps` in `grpo_coreweave.yaml` limits the tool-calling turns per
+trajectory (12). `env.nemo_gym.search.search_env` sets `YOU_SEARCH_MAX_CHARS` (2,000), the
+characters kept of each search or browse result, so that about ten tool calls fit in a trajectory.
+`env.nemo_gym.search.exclude_domains` lists the sites that the tools never return (default
+`huggingface.co`, which publishes the questions with their answers).
 
 Gym's BrowseComp harness calls Tavily. The kit carries the Gym eval recipe's
 [`you_search.py`](../../../evaluation/recipes/nemo-gym/you_search.py), and
-`env.nemo_gym.browsecomp.search_entrypoint` points at it. The Gym actor copies it into the harness
+`env.nemo_gym.search.search_entrypoint` points at it. The Gym actor copies it into the harness
 and runs the harness with it. It serves the same `search` and `browse` tools from the You.com Search
 API (with live-crawled page text) and Contents API. The harness's page handling and judge prompt
 stay unchanged.

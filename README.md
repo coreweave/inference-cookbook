@@ -44,7 +44,7 @@ problem solved with Dedicated Inference, with its results. The [examples](#examp
 | --- | --- | --- | --- | --- |
 | [miles](training/recipes/miles/README.md) | [miles](https://github.com/radixark/miles) | GRPO, synchronous or one step ahead | None: miles calls the `cwtrain` hook after each weight sync | `radixark/miles:v0.1.1` |
 | [slime](training/recipes/slime/README.md) | [slime](https://github.com/THUDM/slime) | GRPO | Three small patches, applied by the launcher, so slime publishes weights without inference engines of its own | slime `8ee9c1e` |
-| [NeMo-RL](training/recipes/nemo-rl/README.md) | [NeMo-RL](https://github.com/NVIDIA-NeMo/RL) | GRPO on Gym BrowseComp (default) or DAPO math | Patches, applied by the launcher, that register the `coreweave` backend and Gym rollouts | NeMo-RL `v0.7.0` |
+| [NeMo-RL](training/recipes/nemo-rl/README.md) | [NeMo-RL](https://github.com/NVIDIA-NeMo/RL) | GRPO with a Gym search agent on SimpleQA (default) or BrowseComp, or DAPO math | Patches, applied by the launcher, that register the `coreweave` backend and Gym rollouts | NeMo-RL `v0.7.0` |
 | [Axolotl SFT](training/recipes/axolotl-sft/README.md) | [Axolotl](https://github.com/axolotl-ai-cloud/axolotl) | SFT, full or LoRA (merged) | None: stock `axolotl train`; cwtrain publishes the result as a full snapshot | Axolotl `v0.20.0` |
 | [NeMo Gym](evaluation/recipes/nemo-gym/README.md) | [NeMo Gym](https://github.com/NVIDIA-NeMo/Gym) | Evaluation with scored rollouts: BrowseComp with an LLM judge | None: Gym runs on CPU against the NeMo-RL recipe's hot-load deployment, runs the agent and scores responses | NeMo Gym `v0.6.0` |
 
@@ -59,7 +59,7 @@ bucket policy.
 | --- | --- | --- | --- | --- |
 | [miles-grpo-qwen3-4b](training/examples/miles-grpo-qwen3-4b/README.md) | miles, GRPO | Qwen3-4B | DAPO-Math-17k | 2 replicas, 1 GPU each |
 | [slime-grpo-qwen3-4b](training/examples/slime-grpo-qwen3-4b/README.md) | slime, GRPO | Qwen3-4B | DAPO-Math-17k | 2 replicas, 1 GPU each |
-| [nemo-rl-grpo-nemotron-3.5-lightning-30b-a3b](training/examples/nemo-rl-grpo-nemotron-3.5-lightning-30b-a3b/README.md) | NeMo-RL, GRPO | Nemotron 3.5 Lightning 30B-A3B BF16 | BrowseComp, as a Gym search agent | 4 replicas, 2 H100 GPUs each |
+| [nemo-rl-grpo-nemotron-3.5-lightning-30b-a3b](training/examples/nemo-rl-grpo-nemotron-3.5-lightning-30b-a3b/README.md) | NeMo-RL, GRPO | Nemotron 3.5 Lightning 30B-A3B BF16 | SimpleQA, as a Gym search agent | 4 replicas, 2 H100 GPUs each |
 | [axolotl-sft-qwen3-4b](training/examples/axolotl-sft-qwen3-4b/README.md) | Axolotl SFT, full or LoRA | Qwen3-4B | 2,000 rows of NuminaMath-CoT | 2 replicas, 1 GPU each |
 
 ## Before you start

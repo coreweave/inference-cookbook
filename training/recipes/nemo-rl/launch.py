@@ -10,9 +10,9 @@ bucket. Then it replaces itself with ``examples/run_grpo.py`` and the recipe's c
 vLLM or SGLang workers: the deployment serves the rollouts and receives every refit by hot-load.
 
 Settings are the environment variables that an example's ``k8s/run.env.example`` documents.
-``TRAIN_ENV`` picks the training environment: ``browsecomp`` (the default) runs Gym's BrowseComp
-agent, with You.com search and an LLM judge; ``dapo`` runs Gym's DAPO math; ``math`` runs NeMo-RL's
-own math environment.
+``TRAIN_ENV`` picks the training environment: ``simpleqa`` (the default) and ``browsecomp`` run
+Gym's BrowseComp agent on SimpleQA or BrowseComp questions, with You.com search and an LLM judge;
+``dapo`` runs Gym's DAPO math; ``math`` runs NeMo-RL's own math environment.
 ``EXTRA_OVERRIDES`` holds Hydra-style overrides. Each whitespace-separated word is one override,
 and quotes reach Hydra unchanged (``policy.generation.stop_strings=["</answer>"]``). So write lists
 without spaces (``["</answer>","<|end|>"]``).
@@ -42,11 +42,12 @@ from cwtrain.integrations.launch import (
 )
 
 TESTED = "NeMo-RL v0.7.0 (nvcr.io/nvidia/nemo-rl:v0.7.0)"
-TRAIN_ENVS = ("browsecomp", "dapo", "math")
-# Trajectory token limit for each environment when MAX_SEQUENCE_LENGTH is unset. A BrowseComp
-# trajectory holds every search result and turn; the math prompts are short. 32768 runs the
-# 8-GPU trainer out of memory: one sequence's fp32 logits need another 16 GiB on top of 60 GiB.
-SEQUENCE_LENGTHS = {"browsecomp": 16384, "dapo": 3072, "math": 3072}
+TRAIN_ENVS = ("simpleqa", "browsecomp", "dapo", "math")
+# Trajectory token limit for each environment when MAX_SEQUENCE_LENGTH is unset. A search-agent
+# trajectory holds every search result and turn; the math prompts are short. One sequence's fp32
+# logits take about 0.5 MiB per token on top of 64 GiB of training state per GPU once the
+# optimizer state exists, so 16384 is the longest that fits the 8-GPU trainer.
+SEQUENCE_LENGTHS = {"simpleqa": 16384, "browsecomp": 16384, "dapo": 3072, "math": 3072}
 
 
 @dataclass(frozen=True)
@@ -61,7 +62,7 @@ class NemoJob:
     python: str = field(default_factory=lambda: sys.executable)
     worker_venvs: Path = Path("/opt/ray_venvs")
     base_s3_uri: str = ""
-    train_env: str = "browsecomp"
+    train_env: str = "simpleqa"
     max_sequence_length: int = 0  # 0: SEQUENCE_LENGTHS[train_env]
     extra_overrides: tuple[str, ...] = ()
 
@@ -72,7 +73,7 @@ class NemoJob:
         def text(name: str, default: str) -> str:
             return env_text(env, name, default)
 
-        train_env = text("TRAIN_ENV", "browsecomp").lower()
+        train_env = text("TRAIN_ENV", "simpleqa").lower()
         if train_env not in TRAIN_ENVS:
             raise LaunchError(f"TRAIN_ENV must be one of {', '.join(TRAIN_ENVS)}, got {train_env!r}")
         return cls(
@@ -106,6 +107,7 @@ def wheel(job: NemoJob) -> Path:
 def environment_overrides(job: NemoJob) -> list[str]:
     """The overrides that select ``job.train_env`` and its trajectory token limit."""
     overrides = {
+        "simpleqa": ["env.should_use_nemo_gym=true", "data.train.dataset_name=SimpleQA"],
         "browsecomp": ["env.should_use_nemo_gym=true", "data.train.dataset_name=BrowseComp"],
         "dapo": ["env.should_use_nemo_gym=true"],
         "math": [],

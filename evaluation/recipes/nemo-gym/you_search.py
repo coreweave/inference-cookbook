@@ -20,6 +20,7 @@ the standard library and httpx, which the harness already uses.
 from __future__ import annotations
 
 import asyncio
+import os
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,9 @@ from urllib.parse import urlparse
 BASE_URL = "https://ydc-index.io/v1"
 HARNESS = Path("resources_servers") / "browsecomp_advanced_harness"
 ENTRYPOINT = "you_search.py"
+# Characters kept of each result's page text and snippets; unset or 0 keeps all of it. A smaller
+# cap fits more tool calls into a trajectory's tokens.
+MAX_CHARS_ENV = "YOU_SEARCH_MAX_CHARS"
 # Retry rate limits and server errors; a 4xx other than 429 is the request's fault.
 RETRY_STATUS = frozenset({429, 500, 502, 503, 504})
 
@@ -36,6 +40,17 @@ def excluded(url: str, domains: Iterable[str]) -> bool:
     """Whether ``url``'s host is one of ``domains`` or a subdomain of one."""
     host = (urlparse(url).hostname or "").lower()
     return any(host == d.lower() or host.endswith("." + d.lower()) for d in domains)
+
+
+def max_chars() -> int | None:
+    """The per-result character cap from ``YOU_SEARCH_MAX_CHARS``, or ``None`` for no cap."""
+    value = os.environ.get(MAX_CHARS_ENV, "").strip()
+    return int(value) if value and int(value) > 0 else None
+
+
+def _cap(text: str | None) -> str | None:
+    limit = max_chars()
+    return text[:limit] if text and limit else text
 
 
 def search_results(payload: dict, exclude_domains: Sequence[str] = ()) -> list[dict[str, Any]]:
@@ -54,8 +69,8 @@ def search_results(payload: dict, exclude_domains: Sequence[str] = ()) -> list[d
             {
                 "title": item.get("title") or "",
                 "url": url,
-                "content": "\n".join(snippets) or item.get("description") or "",
-                "raw_content": (item.get("contents") or {}).get("markdown") or None,
+                "content": _cap("\n".join(snippets) or item.get("description") or ""),
+                "raw_content": _cap((item.get("contents") or {}).get("markdown") or None),
             }
         )
     return results
@@ -68,7 +83,7 @@ def contents_results(payload: Any) -> tuple[list[dict[str, str]], list[dict[str,
     for item in items:
         text = item.get("markdown") or ""
         target = results if text else failed
-        target.append({"url": item.get("url") or "", "raw_content": text})
+        target.append({"url": item.get("url") or "", "raw_content": _cap(text)})
     return results, failed
 
 

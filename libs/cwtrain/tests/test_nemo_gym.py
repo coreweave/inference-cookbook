@@ -245,12 +245,13 @@ def browsecomp(config, tmp_path):
     entrypoint.write_text("# a search backend\n")
     config["data"]["train"]["dataset_name"] = "BrowseComp"
     config["env"]["nemo_gym"] = {
-        "browsecomp": {
+        "search": {
             "judge_model": "zai-org/GLM-5.2",
             "judge_base_url": "https://api.inference.wandb.ai/v1",
             "judge_api_key_file": str(judge),
             "search_api_key_file": str(search),
             "search_entrypoint": str(entrypoint),
+            "search_env": {"YOU_SEARCH_MAX_CHARS": 2000},
             "max_steps": 6,
         }
     }
@@ -275,7 +276,7 @@ def test_browsecomp_preset_writes_tasks_and_servers(browsecomp):
     assert row["responses_create_params"]["input"][1]["content"].startswith("Who wrote book 0?")
     assert [t["name"] for t in row["responses_create_params"]["tools"]] == ["search", "browse"]
     gym = result["env"]["nemo_gym"]
-    assert "browsecomp" not in gym  # consumed, not passed on to Gym
+    assert "search" not in gym  # consumed, not passed on to Gym
     judge = gym["judge_model"]["responses_api_models"]["vllm_model"]
     assert judge["model"] == "zai-org/GLM-5.2" and judge["api_key"] == "unused"
     assert judge["extra_body"]["max_tokens"] == 8192
@@ -304,20 +305,23 @@ def test_browsecomp_sample_limit(browsecomp):
 @pytest.mark.parametrize("missing", ["judge_api_key_file", "search_api_key_file", "judge_model"])
 def test_browsecomp_requires_judge_and_search_settings(browsecomp, missing):
     config, rows = browsecomp
-    config["env"]["nemo_gym"]["browsecomp"].pop(missing)
+    config["env"]["nemo_gym"]["search"].pop(missing)
     with pytest.raises(ValueError, match=missing):
         prepare_config(config, rows=rows)
 
 
 def test_browsecomp_rejects_an_unmounted_key_file(browsecomp, tmp_path):
     config, rows = browsecomp
-    config["env"]["nemo_gym"]["browsecomp"]["search_api_key_file"] = str(tmp_path / "absent")
+    config["env"]["nemo_gym"]["search"]["search_api_key_file"] = str(tmp_path / "absent")
     with pytest.raises(ValueError, match="mount its Secret"):
         prepare_config(config, rows=rows)
 
 
 def test_actor_reads_judge_and_search_keys_and_installs_you_com(browsecomp, tmp_path, monkeypatch):
+    import os
     import sys
+
+    monkeypatch.delenv("YOU_SEARCH_MAX_CHARS", raising=False)
     from types import SimpleNamespace
 
     from cwtrain.integrations.nemo_rl.gym import HARNESS_DIR
@@ -337,6 +341,7 @@ def test_actor_reads_judge_and_search_keys_and_installs_you_com(browsecomp, tmp_
     ]
     assert judge["api_key"] == "judge-key"
     assert harness["tavily_api_key"] == "you-key"
+    assert os.environ["YOU_SEARCH_MAX_CHARS"] == "2000"  # Gym's servers inherit it
     assert (root / HARNESS_DIR / "you_search.py").read_text() == "# a search backend\n"
     assert not any(key.startswith("coreweave_") for key in result)
     Path_ = type(tmp_path)
@@ -355,7 +360,7 @@ def test_browsecomp_decrypts_the_published_format():
 
 def test_browsecomp_uses_the_harness_app_without_a_search_entrypoint(browsecomp):
     config, rows = browsecomp
-    config["env"]["nemo_gym"]["browsecomp"].pop("search_entrypoint")
+    config["env"]["nemo_gym"]["search"].pop("search_entrypoint")
     gym = prepare_config(config, rows=rows)["env"]["nemo_gym"]
     harness = gym["browsecomp_resources_server"]["resources_servers"]["browsecomp_advanced_harness"]
     assert harness["entrypoint"] == "app.py" and "coreweave_search_entrypoint" not in gym
@@ -363,6 +368,22 @@ def test_browsecomp_uses_the_harness_app_without_a_search_entrypoint(browsecomp)
 
 def test_browsecomp_rejects_a_missing_search_entrypoint(browsecomp, tmp_path):
     config, rows = browsecomp
-    config["env"]["nemo_gym"]["browsecomp"]["search_entrypoint"] = str(tmp_path / "absent.py")
+    config["env"]["nemo_gym"]["search"]["search_entrypoint"] = str(tmp_path / "absent.py")
     with pytest.raises(ValueError, match="search_entrypoint"):
         prepare_config(config, rows=rows)
+
+
+def test_simpleqa_preset_uses_the_search_agent(browsecomp):
+    from pathlib import Path
+
+    config, _ = browsecomp
+    config["data"]["train"]["dataset_name"] = "SimpleQA"
+    rows = [{"metadata": "{}", "problem": "Who wrote Hamlet?", "answer": "William Shakespeare"}]
+    result = prepare_config(config, rows=rows)
+    path = Path(result["data"]["train"]["data_path"])
+    row = json.loads(path.read_text())
+    assert path.name == "simpleqa.jsonl"
+    assert row["agent_ref"]["name"] == "browsecomp_agent"
+    assert row["question"] == "Who wrote Hamlet?" and row["ground_truth"] == "William Shakespeare"
+    assert row["responses_create_params"]["input"][1]["content"].startswith("Who wrote Hamlet?")
+    assert "judge_model" in result["env"]["nemo_gym"]

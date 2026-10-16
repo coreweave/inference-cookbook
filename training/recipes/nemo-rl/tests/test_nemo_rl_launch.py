@@ -51,9 +51,9 @@ def test_grpo_command_applies_settings_and_overrides(tmp_path: Path) -> None:
         "policy.model_name=/w/models/Qwen3-4B",
         "grpo.max_num_steps=30",
         "cluster.gpus_per_node=8",
-        # BrowseComp is the default training environment
+        # SimpleQA is the default training environment
         "env.should_use_nemo_gym=true",
-        "data.train.dataset_name=BrowseComp",
+        "data.train.dataset_name=SimpleQA",
         "policy.max_total_sequence_length=16384",
         'policy.generation.stop_strings=["</answer>"]',  # quotes reach Hydra
         "grpo.val_period=0",
@@ -90,7 +90,7 @@ def test_the_config_defaults_to_the_glm_judge_on_wandb_inference(monkeypatch) ->
     for name in ("CWTRAIN_JUDGE_MODEL", "CWTRAIN_JUDGE_BASE_URL", "CWTRAIN_JUDGE_API_KEY_FILE"):
         monkeypatch.delenv(name, raising=False)
     config = OmegaConf.load(Path(__file__).resolve().parents[1] / "grpo_coreweave.yaml")
-    browsecomp = OmegaConf.to_container(config.env.nemo_gym.browsecomp, resolve=True)
+    browsecomp = OmegaConf.to_container(config.env.nemo_gym.search, resolve=True)
     assert browsecomp["judge_model"] == "zai-org/GLM-5.2"
     assert browsecomp["judge_base_url"] == "https://api.inference.wandb.ai/v1"
     assert browsecomp["judge_api_key_file"] is None
