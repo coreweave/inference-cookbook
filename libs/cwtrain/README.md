@@ -81,8 +81,8 @@ cwtrain.integrations.preflight`, which does the same with the hooks' environment
 
 ### Create the deployment
 
-Put the `CreateDeploymentRequest` body in a file, such as the miles recipe's
-[`deployment.example.json`](https://github.com/coreweave/inference-cookbook/blob/main/training/recipes/miles/deployment.example.json)
+Put the `CreateDeploymentRequest` body in a file, such as the miles example's
+[`deployment.example.json`](https://github.com/coreweave/inference-cookbook/blob/main/training/examples/miles-grpo-qwen3-4b/deployment.example.json)
 with its placeholders filled in, and create the deployment:
 
 ```bash

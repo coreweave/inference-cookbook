@@ -5,7 +5,8 @@
 #
 # Runs in the NeMo-RL trainer Job (nvcr.io/nvidia/nemo-rl image). Installs cwtrain into the NeMo-RL
 # venv, then starts launch.py. launch.py patches NeMo-RL, makes cwtrain importable in the policy
-# workers, stages the model and starts GRPO. For the settings, see run.env.example.
+# workers, stages the model and starts GRPO. For the settings, see an example's
+# k8s/run.env.example.
 set -euo pipefail
 VENV_PY=${NEMO_RL_PYTHON:-/opt/nemo_rl_venv/bin/python}
 # uv pip install, not uv run: uv run re-syncs the venv to NeMo-RL's lockfile and drops cwtrain

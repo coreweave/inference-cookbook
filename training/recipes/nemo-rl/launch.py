@@ -9,7 +9,7 @@ importable in the policy workers' environments and stages the base model from th
 bucket. Then it replaces itself with ``examples/run_grpo.py`` and the recipe's config. It starts no
 vLLM or SGLang workers: the deployment serves the rollouts and receives every refit by hot-load.
 
-Settings are the environment variables that ``k8s/run.env.example`` documents.
+Settings are the environment variables that an example's ``k8s/run.env.example`` documents.
 ``EXTRA_OVERRIDES`` holds Hydra-style overrides. Each whitespace-separated word is one override,
 and quotes reach Hydra unchanged (``policy.generation.stop_strings=["</answer>"]``). So write lists
 without spaces (``["</answer>","<|end|>"]``).

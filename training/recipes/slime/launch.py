@@ -9,9 +9,9 @@ Megatron-LM when the image's differs), converts the checkpoint to Megatron ``tor
 Ray and submits ``train.py`` with disk-delta publication into the ``cwtrain`` hot-load hook. No
 SGLang engines are started: ``--rollout-num-gpus 0``, and rollouts come from the deployment.
 
-Settings are environment variables, the same ones ``k8s/run.env.example`` documents. Every
-argument is built as a list, so values are never re-split or re-quoted by a shell;
-``EXTRA_TRAIN_ARGS`` is split shell-style (quotes respected, nothing expanded).
+Settings are environment variables, the ones that an example's ``k8s/run.env.example``
+documents. Every argument is built as a list, so values are never re-split or re-quoted by a
+shell; ``EXTRA_TRAIN_ARGS`` is split shell-style (quotes respected, nothing expanded).
 """
 
 from __future__ import annotations

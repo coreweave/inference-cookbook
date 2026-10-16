@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-PackageName: inference-cookbook
 #
-# Axolotl config for the recipe's smoke run: a full fine-tune of Qwen3-4B on 2,000 rows of
+# The Axolotl config that the launcher runs unless AXOLOTL_CONFIG names another, and that the
+# axolotl-sft-qwen3-4b example runs: a full fine-tune of Qwen3-4B on 2,000 rows of
 # NuminaMath-CoT, with FSDP2. launch.py sets base_model (the staged copy), output_dir and
 # max_steps; EXTRA_TRAIN_ARGS overrides any other key.
 base_model: Qwen/Qwen3-4B

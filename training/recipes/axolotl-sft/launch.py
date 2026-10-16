@@ -9,7 +9,8 @@ merge-lora`` after a LoRA run), checks that the result holds the base model's te
 publishes it into the deployment as one full hot-load snapshot, ``<RUN_ID>-v<MAX_STEPS:06d>``.
 Nothing runs inside Axolotl's processes, and they do not get the CoreWeave API credentials.
 
-Settings are environment variables, the same ones ``k8s/run.env.example`` documents.
+Settings are environment variables, the ones that an example's ``k8s/run.env.example``
+documents.
 ``AXOLOTL_CONFIG`` names another Axolotl config than the kit's ``sft_coreweave.yaml``. Every
 argument is built as a list, so values are never re-split or re-quoted by a shell;
 ``EXTRA_TRAIN_ARGS`` is split shell-style (quotes respected, nothing expanded) and goes to

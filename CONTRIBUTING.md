@@ -27,10 +27,12 @@ To place a change:
   picks the model and data.
 - If it fits none of these, such as a training loop of your own, open an issue before you start.
 
-`training/examples/` and `training/case-studies/` do not exist yet. Each is created by the pull
-request that adds its first entry. Until then, each training recipe's README walks through one run
-with a default model and dataset, and `cwtrain.integrations.nemo_rl.gym` holds the DAPO-Math-17k
-preset for NeMo-RL's Gym rollouts.
+The first examples run their recipes' defaults: the dataset that the miles and slime launchers
+download, the NeMo-RL and Axolotl configs, and the NeMo-RL recipe's Nemotron staging Job. An example
+that needs other data or another config adds a setting for it to the recipe, tested there, and
+sets it in its `run.env.example`. `training/case-studies/` does not exist yet; the pull request that
+adds the first case study creates it. `cwtrain.integrations.nemo_rl.gym` still holds the
+DAPO-Math-17k preset for NeMo-RL's Gym rollouts.
 
 ## Contributor License Agreement
 
@@ -79,12 +81,12 @@ dependency group. Without torch, pytest skips them. CI (`.github/workflows/cwtra
 both and runs the same checks on Python 3.12 to 3.14 for every pull request that touches
 `libs/cwtrain`. It also builds a wheel and source distribution to catch packaging errors.
 
-### Recipes
+### Recipes and examples
 
 From the repository root, with the environment above active:
 
 ```bash
-pytest training/recipes/*/tests evaluation/recipes/*/tests k8s/tests
+pytest training/recipes/*/tests training/examples/*/tests evaluation/recipes/*/tests k8s/tests
 for f in k8s/*.sh training/recipes/*/k8s/*.sh; do bash -n "$f"; done
 ```
 
@@ -92,18 +94,26 @@ A recipe is named after the framework it integrates: `training/recipes/slime/` i
 slime. The training recipes share their Kubernetes and object storage setup in
 [`k8s/`](k8s/README.md) at the repository root: `render.sh`, the namespace, the storage Secret, the
 bucket and staging Jobs, and the example bucket and trainer access policies. A recipe's own `k8s/`
-directory holds what is specific to it, such as `run.env.example`, `trainer-job.yaml`,
-`run-trainer.sh` and `make-kit.sh`. Its README calls the shared files by their relative path, and
-embeds the flow diagram from `docs/`.
+directory holds what is specific to it, such as `trainer-job.yaml`, `run-trainer.sh` and
+`make-kit.sh`. An example's `k8s/` directory holds its `run.env.example`, and its README's steps run
+there. The READMEs call the shared files by their relative path, and a recipe's README embeds the
+flow diagram from `docs/`.
 
-Change a shared file in `k8s/` only. `k8s/tests` runs every training recipe's steps against it, and
-fails when another directory holds a copy.
+Change a shared file in `k8s/` only. `k8s/tests` runs every example's steps against it, and fails
+when another directory holds a copy.
 
 Put a new training recipe under `training/recipes/<framework>/`, with its own README, and use the
 files in `k8s/` from there. Add it to `RECIPES` in `k8s/tests/test_k8s_steps.py`, and add a row for
-it to the table in the top-level [README](README.md). A framework that supports more than one
-training method gets one recipe per method, `training/recipes/<framework>-<method>/`, such as
-`training/recipes/axolotl-sft/`.
+it to the recipes table in the top-level [README](README.md). A framework that supports more than
+one training method gets one recipe per method, `training/recipes/<framework>-<method>/`, such as
+`training/recipes/axolotl-sft/`. Every training recipe has at least one example.
+
+Put a new example under `training/examples/<trainer>-<method>-<model>/`: a README with its steps,
+`deployment.example.json`, `k8s/run.env.example`, and its tests in `tests/`, in a file named after
+the example, such as `test_miles_grpo_qwen3_4b.py` (pytest needs test file names that differ across
+directories). Its README's setup block sets `K` to the shared `k8s/` and `R` to its recipe's
+`k8s/`. Add it to `EXAMPLES` in `k8s/tests/test_k8s_steps.py`, link it from its recipe's README,
+and add a row for it to the examples table in the top-level README.
 
 ### Live hot-load test
 

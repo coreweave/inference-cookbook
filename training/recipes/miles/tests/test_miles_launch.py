@@ -134,13 +134,6 @@ def test_trailing_slashes_and_spaces_in_the_model_name_are_ignored(name) -> None
     )
 
 
-def test_run_env_pins_the_image_the_launcher_and_the_readme_name() -> None:
-    lines = (K8S / "run.env.example").read_text().splitlines()
-    image = next(line.partition("=")[2].strip() for line in lines if line.startswith("TRAINER_IMAGE="))
-    assert re.fullmatch(rf"{re.escape(launch.PINNED_IMAGE)}@sha256:[0-9a-f]{{64}}", image)
-    assert f"`{launch.PINNED_IMAGE}`" in (K8S.parent / "README.md").read_text()
-
-
 @pytest.mark.parametrize("base_s3_uri", ["", "s3://bucket/models/Llama-3.1-8B"])
 @pytest.mark.parametrize("hf_model", ["Qwen/Qwen3-4B", "meta-llama/Llama-3.1-8B/", "Qwen3-8B"])
 def test_the_launcher_stages_the_model_where_every_later_step_reads_it(

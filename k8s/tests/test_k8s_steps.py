@@ -2,12 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-PackageName: inference-cookbook
 
-"""The Kubernetes steps an external user follows, for every training recipe: run.env renders every
-manifest, nothing is left unset or half filled in, the Job cannot start without its Secrets, and the
-kit script explains itself.
+"""The Kubernetes steps an external user follows, for every example: run.env renders every manifest,
+nothing is left unset or half filled in, the Job cannot start without its Secrets, and the kit
+script explains itself.
 
-The recipes share the files in k8s/ and keep their own run.env.example, trainer-job.yaml,
-run-trainer.sh and make-kit.sh. A test that reads a recipe's files or README runs once per recipe.
+The recipes share the files in k8s/ and keep their own trainer-job.yaml, run-trainer.sh and
+make-kit.sh. Each example runs one recipe, with its own README, run.env.example and deployment. A
+test that reads only a recipe's files runs once per recipe; a test that needs a run.env or reads a
+README's steps runs once per example.
 """
 
 from __future__ import annotations
@@ -35,10 +37,6 @@ needs_envsubst = pytest.mark.skipif(
 class Recipe:
     name: str  # its directory under training/recipes
     extra: str  # the run.env variable for free-form trainer arguments
-    run_id: str  # how RUN_ID in run.env.example starts
-    deployment: str  # the example deployment that the README creates
-    model_prefix: str  # MODEL_PREFIX and MODEL_SLUG in a filled-in run.env.example
-    model_slug: str
     # a variable that run.env.example leaves unfilled and trainer-job.yaml uses
     placeholder: str = "ROLLOUT_BASE_URL"
     inference_key: bool = True  # whether the trainer reads an inference API key Secret
@@ -53,44 +51,69 @@ class Recipe:
         return self.path / "k8s"
 
 
-RECIPES = [
-    Recipe(
-        name="miles",
-        extra="EXTRA_TRAIN_ARGS",
+@dataclass(frozen=True)
+class Example:
+    name: str  # its directory under training/examples
+    recipe: Recipe  # the recipe that it runs
+    run_id: str  # how RUN_ID in run.env.example starts
+    model_prefix: str  # MODEL_PREFIX and MODEL_SLUG in a filled-in run.env.example
+    model_slug: str
+
+    @property
+    def path(self) -> Path:
+        return ROOT / "training" / "examples" / self.name
+
+    @property
+    def k8s(self) -> Path:
+        """Where its README works: run.env.example, and the user's filled-in copies."""
+        return self.path / "k8s"
+
+
+MILES = Recipe(name="miles", extra="EXTRA_TRAIN_ARGS")
+SLIME = Recipe(name="slime", extra="EXTRA_TRAIN_ARGS")
+NEMO_RL = Recipe(name="nemo-rl", extra="EXTRA_OVERRIDES")
+AXOLOTL_SFT = Recipe(
+    name="axolotl-sft",
+    extra="EXTRA_TRAIN_ARGS",
+    placeholder="DEPLOYMENT_ID",  # SFT samples no rollouts, so it has no rollout endpoint
+    inference_key=False,
+    diagram="docs/hotload-flow-sft.drawio.svg",  # one publish after training, no RL loop
+)
+RECIPES = [MILES, SLIME, NEMO_RL, AXOLOTL_SFT]
+EXAMPLES = [
+    Example(
+        name="miles-grpo-qwen3-4b",
+        recipe=MILES,
         run_id="qwen3-4b-grpo",
-        deployment="deployment.example.json",
         model_prefix="models",
         model_slug="Qwen3-4B",
     ),
-    Recipe(
-        name="slime",
-        extra="EXTRA_TRAIN_ARGS",
+    Example(
+        name="slime-grpo-qwen3-4b",
+        recipe=SLIME,
         run_id="qwen3-4b-grpo",
-        deployment="deployment.example.json",
         model_prefix="models",
         model_slug="Qwen3-4B",
     ),
-    Recipe(
-        name="nemo-rl",
-        extra="EXTRA_OVERRIDES",
+    Example(
+        name="nemo-rl-grpo-nemotron-3.5-lightning-30b-a3b",
+        recipe=NEMO_RL,
         run_id="nemotron-lightning-grpo",
-        deployment="deployment.nemotron.example.json",
         model_prefix="cookbook/filled/models",  # cookbook/${DEPLOYMENT_RUN}/models
         model_slug="NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16",
     ),
-    Recipe(
-        name="axolotl-sft",
-        extra="EXTRA_TRAIN_ARGS",
+    Example(
+        name="axolotl-sft-qwen3-4b",
+        recipe=AXOLOTL_SFT,
         run_id="qwen3-4b-sft",
-        deployment="deployment.example.json",
         model_prefix="models",
         model_slug="Qwen3-4B",
-        placeholder="DEPLOYMENT_ID",  # SFT samples no rollouts, so it has no rollout endpoint
-        inference_key=False,
-        diagram="docs/hotload-flow-sft.drawio.svg",  # one publish after training, no RL loop
     ),
 ]
 per_recipe = pytest.mark.parametrize("recipe", RECIPES, ids=[recipe.name for recipe in RECIPES])
+per_example = pytest.mark.parametrize(
+    "example", EXAMPLES, ids=[example.name for example in EXAMPLES]
+)
 
 
 def manifests(recipe: Recipe) -> list[Path]:
@@ -98,9 +121,9 @@ def manifests(recipe: Recipe) -> list[Path]:
     return sorted([*SHARED.glob("*.yaml"), *recipe.k8s.glob("*.yaml")], key=lambda path: path.name)
 
 
-def filled_run_env(recipe: Recipe, tmp_path: Path, **overrides: str) -> Path:
+def filled_run_env(example: Example, tmp_path: Path, **overrides: str) -> Path:
     """run.env.example with every <placeholder> filled in, as a user's run.env would be."""
-    text = PLACEHOLDER.sub("filled", (recipe.k8s / "run.env.example").read_text())
+    text = PLACEHOLDER.sub("filled", (example.k8s / "run.env.example").read_text())
     path = tmp_path / "run.env"
     path.write_text(text + "".join(f"{key}={value}\n" for key, value in overrides.items()))
     return path
@@ -132,8 +155,10 @@ def git(*args: str, cwd: Path = ROOT) -> subprocess.CompletedProcess[str]:
     return result
 
 
-@per_recipe
-def test_run_env_example_can_be_sourced_and_names_a_new_run_each_time(recipe: Recipe) -> None:
+@per_example
+def test_run_env_example_can_be_sourced_and_names_a_new_run_each_time(
+    example: Example,
+) -> None:
     # quoted placeholders are values to bash, not redirections
     result = subprocess.run(
         [
@@ -141,38 +166,42 @@ def test_run_env_example_can_be_sourced_and_names_a_new_run_each_time(recipe: Re
             "-c",
             'set -euo pipefail; set -a; . "$1"; printf "%s" "$RUN_ID"',
             "-",
-            str(recipe.k8s / "run.env.example"),
+            str(example.k8s / "run.env.example"),
         ],
         capture_output=True,
         text=True,
         check=False,
     )
     assert result.returncode == 0, result.stderr
-    assert re.fullmatch(rf"{re.escape(recipe.run_id)}-\d{{8}}T\d{{6}}Z-\d+", result.stdout)
+    assert re.fullmatch(rf"{re.escape(example.run_id)}-\d{{8}}T\d{{6}}Z-\d+", result.stdout)
 
 
 @needs_envsubst
 @pytest.mark.parametrize(
-    ("recipe", "manifest"),
-    [(recipe, manifest) for recipe in RECIPES for manifest in manifests(recipe)],
-    ids=[f"{recipe.name}-{manifest.name}" for recipe in RECIPES for manifest in manifests(recipe)],
+    ("example", "manifest"),
+    [(example, manifest) for example in EXAMPLES for manifest in manifests(example.recipe)],
+    ids=[
+        f"{example.name}-{manifest.name}"
+        for example in EXAMPLES
+        for manifest in manifests(example.recipe)
+    ],
 )
 def test_every_manifest_renders_from_a_filled_in_run_env(
-    tmp_path: Path, recipe: Recipe, manifest: Path
+    tmp_path: Path, example: Example, manifest: Path
 ) -> None:
-    result = render(filled_run_env(recipe, tmp_path), manifest)
+    result = render(filled_run_env(example, tmp_path), manifest)
     assert result.returncode == 0, result.stderr
     assert "${" not in result.stdout
 
 
 @needs_envsubst
-@per_recipe
-def test_render_refuses_a_placeholder_left_in_place(tmp_path: Path, recipe: Recipe) -> None:
+@per_example
+def test_render_refuses_a_placeholder_left_in_place(tmp_path: Path, example: Example) -> None:
     env = tmp_path / "run.env"
-    shutil.copy(recipe.k8s / "run.env.example", env)
-    result = render(env, recipe.k8s / "trainer-job.yaml")
+    shutil.copy(example.k8s / "run.env.example", env)
+    result = render(env, example.recipe.k8s / "trainer-job.yaml")
     assert result.returncode == 1 and result.stdout == ""
-    assert "fill in" in result.stderr and recipe.placeholder in result.stderr
+    assert "fill in" in result.stderr and example.recipe.placeholder in result.stderr
     # step 1 needs only NAMESPACE, so it works before the rest is filled in
     assert render(env, SHARED / "namespace.yaml").returncode == 0
 
@@ -190,23 +219,28 @@ def test_render_refuses_a_variable_the_env_file_does_not_set(
 
 
 @needs_envsubst
-@per_recipe
-def test_free_form_arguments_may_carry_tags(tmp_path: Path, recipe: Recipe) -> None:
+@per_example
+def test_free_form_arguments_may_carry_tags(tmp_path: Path, example: Example) -> None:
     # "<qwen size>" reads as a run.env placeholder anywhere but in EXTRA_* arguments
     value = "'--tag <qwen size> --stop </answer>'"
-    env = filled_run_env(recipe, tmp_path, **{recipe.extra: value})
-    result = render(env, recipe.k8s / "trainer-job.yaml")
+    env = filled_run_env(example, tmp_path, **{example.recipe.extra: value})
+    result = render(env, example.recipe.k8s / "trainer-job.yaml")
     assert result.returncode == 0, result.stderr
     assert "--tag <qwen size> --stop </answer>" in result.stdout
 
 
 @needs_envsubst
-@per_recipe
-def test_the_hot_load_settings_come_from_run_env(tmp_path: Path, recipe: Recipe) -> None:
-    settings = {"WAIT": "0", "TIMEOUT": "3600", "VERIFY": "1", "PROMPT_CACHE_POLICY": "preserve"}
+@per_example
+def test_the_hot_load_settings_come_from_run_env(tmp_path: Path, example: Example) -> None:
+    settings = {
+        "WAIT": "0",
+        "TIMEOUT": "3600",
+        "VERIFY": "1",
+        "PROMPT_CACHE_POLICY": "preserve",
+    }
     overrides = {f"HOTLOAD_{key}": value for key, value in settings.items()}
-    env = filled_run_env(recipe, tmp_path, **overrides)
-    rendered = render(env, recipe.k8s / "trainer-job.yaml").stdout
+    env = filled_run_env(example, tmp_path, **overrides)
+    rendered = render(env, example.recipe.k8s / "trainer-job.yaml").stdout
     for key, value in settings.items():
         assert f'{{name: CWTRAIN_HOTLOAD_{key}, value: "{value}"}}' in rendered
 
@@ -218,9 +252,11 @@ def test_the_trainer_does_not_start_without_the_api_token(recipe: Recipe) -> Non
     assert "secretKeyRef" in token and "optional" not in token
 
 
-@per_recipe
-def test_the_example_deployment_sets_no_engine_env_or_internal_options(recipe: Recipe) -> None:
-    runtime = json.loads((recipe.path / recipe.deployment).read_text())["runtime"]
+@per_example
+def test_the_example_deployment_sets_no_engine_env_or_internal_options(
+    example: Example,
+) -> None:
+    runtime = json.loads((example.path / "deployment.example.json").read_text())["runtime"]
     assert "engineEnv" not in runtime
     assert not {"enable-rl", "load-format"} & set(runtime["engineConfig"])
 
@@ -269,7 +305,10 @@ def test_make_kit_says_how_to_build_the_missing_wheel(tmp_path: Path, recipe: Re
 @per_recipe
 def test_make_kit_bundles_the_newest_wheel(tmp_path: Path, recipe: Recipe) -> None:
     script, dist, calls = kit_tree(recipe, tmp_path)
-    older, newer = dist / "cwtrain-0.10.0-py3-none-any.whl", dist / "cwtrain-0.2.0-py3-none-any.whl"
+    older, newer = (
+        dist / "cwtrain-0.10.0-py3-none-any.whl",
+        dist / "cwtrain-0.2.0-py3-none-any.whl",
+    )
     for wheel, mtime in ((older, 1_700_000_000), (newer, 1_800_000_000)):
         wheel.write_bytes(b"")
         os.utime(wheel, (mtime, mtime))
@@ -295,7 +334,12 @@ def test_make_kit_bundles_files_that_exist(tmp_path: Path, recipe: Recipe) -> No
     prefix = "--from-file="
     lines = args.read_text().splitlines()
     bundled = dict(line[len(prefix) :].split("=", 1) for line in lines if line.startswith(prefix))
-    needed = {wheel.name, "stage-model.sh", "run-trainer.sh", "bucket-policy.example.json"}
+    needed = {
+        wheel.name,
+        "stage-model.sh",
+        "run-trainer.sh",
+        "bucket-policy.example.json",
+    }
     assert needed <= bundled.keys()
     for key, path in bundled.items():
         assert Path(path).is_file(), f"make-kit.sh bundles {key} from {path}, which is not a file"
@@ -342,9 +386,9 @@ def test_storage_secret_refuses_a_placeholder_region(tmp_path: Path) -> None:
     assert SECRET not in result.stdout + result.stderr
 
 
-def readme_block(recipe: Recipe, heading: str, index: int = 0) -> str:
-    """The index-th bash block under a heading of the recipe's README."""
-    text = (recipe.path / "README.md").read_text()
+def readme_block(example: Example, heading: str, index: int = 0) -> str:
+    """The index-th bash block under a heading of the example's README."""
+    text = (example.path / "README.md").read_text()
     section = text[text.index(heading) :]
     start = -1
     for _ in range(index + 1):
@@ -353,34 +397,62 @@ def readme_block(recipe: Recipe, heading: str, index: int = 0) -> str:
     return section[start : section.index("\n```", start)]
 
 
-@per_recipe
-def test_the_step_table_names_files_that_exist(recipe: Recipe) -> None:
+@per_example
+def test_the_step_table_names_files_that_exist(example: Example) -> None:
     # the tests run the README's bash blocks, but not the commands in its step table: check that
-    # each file they name exists, a $K/ one in the setup block's K, any other in the recipe's k8s/
-    k = re.search(r"^K=(\S+)", readme_block(recipe, "## Running it on Kubernetes"), re.M)
-    assert k and (recipe.k8s / k.group(1)).resolve() == SHARED
-    text = (recipe.path / "README.md").read_text()
+    # each file they name exists, a $K/ one in the setup block's K, a $R/ one in its R (the
+    # recipe's k8s/), any other in the example's k8s/
+    setup = readme_block(example, "## Running it on Kubernetes")
+    k, r = (re.search(rf"^{name}=(\S+)", setup, re.M) for name in ("K", "R"))
+    assert k and (example.k8s / k.group(1)).resolve() == SHARED
+    assert r and (example.k8s / r.group(1)).resolve() == example.recipe.k8s
+    text = (example.path / "README.md").read_text()
     table = text[text.index("| Step | Command |") :].split("\n\n")[0]
-    named = re.findall(r"(\$K/)?\b([\w-]+\.(?:sh|yaml))\b", table)
-    assert {name for shared, name in named if shared} >= {"render.sh", "namespace.yaml"}
-    for shared, name in named:
-        assert (SHARED if shared else recipe.k8s).joinpath(name).is_file(), f"{shared}{name}"
+    named = re.findall(r"(\$[KR]/)?\b([\w-]+\.(?:sh|yaml))\b", table)
+    assert {name for where, name in named if where == "$K/"} >= {
+        "render.sh",
+        "namespace.yaml",
+    }
+    assert {name for where, name in named if where == "$R/"} >= {
+        "make-kit.sh",
+        "trainer-job.yaml",
+    }
+    directory = {"$K/": SHARED, "$R/": example.recipe.k8s, "": example.k8s}
+    for where, name in named:
+        assert directory[where].joinpath(name).is_file(), f"{where}{name}"
 
 
-@per_recipe
-def test_the_readme_links_shared_files_that_exist(recipe: Recipe) -> None:
-    # the README links the files in k8s/ and embeds the diagram in docs/ by their paths from the
-    # recipe; no other test reads k8s/README.md, the trainer access policy or the diagram
-    text = (recipe.path / "README.md").read_text()
-    links = set(re.findall(r"\]\((\.\./\.\./\.\./(?:k8s|docs)/[^)#\s]+)", text))
-    expected = [
-        "k8s/README.md",
-        "k8s/trainer-access-policy.example.json",
-        recipe.diagram,
-    ]
+def shared_links(readme: Path) -> set[str]:
+    """The README's links into k8s/ and docs/, by their paths from its directory."""
+    return set(re.findall(r"\]\((\.\./\.\./\.\./(?:k8s|docs)/[^)#\s]+)", readme.read_text()))
+
+
+@per_example
+def test_the_readme_links_shared_files_that_exist(example: Example) -> None:
+    # the README links the files in k8s/ by their paths from the example; no other test reads
+    # k8s/README.md or the trainer access policy
+    links = shared_links(example.path / "README.md")
+    expected = ["k8s/README.md", "k8s/trainer-access-policy.example.json"]
     assert {f"../../../{path}" for path in expected} <= links
     for link in links:
+        assert (example.path / link).is_file(), f"{link} is not a file"
+
+
+@per_recipe
+def test_the_recipe_readme_embeds_a_diagram_that_exists(recipe: Recipe) -> None:
+    # no other test reads the diagram
+    links = shared_links(recipe.path / "README.md")
+    assert f"../../../{recipe.diagram}" in links
+    for link in links:
         assert (recipe.path / link).is_file(), f"{link} is not a file"
+
+
+@per_recipe
+def test_the_recipe_readme_links_its_examples(recipe: Recipe) -> None:
+    text = (recipe.path / "README.md").read_text()
+    for example in EXAMPLES:
+        if example.recipe == recipe:
+            assert f"](../../examples/{example.name}/README.md)" in text, example.name
 
 
 # two runs of this deployment, as `cwtrain hotload list` prints them (newest first)
@@ -388,7 +460,7 @@ HOT_LOADS = ["run-b-v000000", "run-a-v000001", "run-a-v000000"]
 
 
 def run_cleanup(
-    recipe: Recipe,
+    example: Example,
     tmp_path: Path,
     *,
     cwtrain_exit: int = 0,
@@ -406,7 +478,7 @@ def run_cleanup(
     shell holds variables already exported in the user's shell, run_env the run.env overrides,
     hot_loads the identities that the deployment hot-loaded, and interpreter the shell that runs the
     block."""
-    k8s = tmp_path / "training" / "recipes" / recipe.name / "k8s"
+    k8s = tmp_path / "training" / "examples" / example.name / "k8s"
     k8s.mkdir(parents=True)
     if git_repo:
         subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
@@ -422,7 +494,7 @@ def run_cleanup(
         "API_TOKEN_SECRET": "token",
         "KIT_NAME": "kit",
     }
-    filled_run_env(recipe, k8s, **{**defaults, **run_env})  # writes k8s/run.env
+    filled_run_env(example, k8s, **{**defaults, **run_env})  # writes k8s/run.env
     if hotload_prefix_file:
         good = json.dumps({"hotLoad": {"pathPrefix": "hotload"}})
         (k8s / "deployment.run.json").write_text(
@@ -445,36 +517,45 @@ def run_cleanup(
         (bin_dir / tool).chmod(0o755)
     (bin_dir / "python3").symlink_to(sys.executable)
     env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(tmp_path), **(shell or {})}
-    result = subprocess.run(
-        [interpreter, "-c", readme_block(recipe, "### Cleaning up")],
-        cwd=k8s if from_k8s else tmp_path,
+    result = run_block(
+        readme_block(example, "### Cleaning up"), interpreter, k8s if from_k8s else tmp_path, env
+    )
+    return result, calls.read_text() if calls.exists() else ""
+
+
+def run_block(
+    block: str, interpreter: str, cwd: Path, env: dict[str, str]
+) -> subprocess.CompletedProcess[str]:
+    """Run a README block as a user does: "zsh -i" reads it as a stock interactive zsh reads a
+    paste, line by line and without the user's startup files."""
+    pasted = interpreter == "zsh -i"
+    return subprocess.run(
+        ["zsh", "-f", "-i"] if pasted else [interpreter, "-c", block],
+        input=block + "\n" if pasted else None,
+        cwd=cwd,
         env=env,
         capture_output=True,
         text=True,
         check=False,
     )
-    return result, calls.read_text() if calls.exists() else ""
 
 
-# users paste the block into their shell: bash, or zsh, the default on macOS
+needs_zsh = pytest.mark.skipif(shutil.which("zsh") is None, reason="needs zsh")
+# users paste the block into their shell: bash, or zsh, the default on macOS. An interactive zsh
+# treats "#" as the start of a comment only with interactivecomments, which the block turns on.
 shells = pytest.mark.parametrize(
     "interpreter",
-    [
-        "bash",
-        pytest.param(
-            "zsh", marks=pytest.mark.skipif(shutil.which("zsh") is None, reason="needs zsh")
-        ),
-    ],
+    ["bash", pytest.param("zsh", marks=needs_zsh), pytest.param("zsh -i", marks=needs_zsh)],
 )
 
 
 @shells
 @pytest.mark.parametrize("from_k8s", [False, True], ids=["from the repository root", "from k8s"])
-@per_recipe
+@per_example
 def test_the_cleanup_block_deletes_the_deployment_recipe_objects_and_prefixes(
-    tmp_path: Path, recipe: Recipe, from_k8s, interpreter
+    tmp_path: Path, example: Example, from_k8s, interpreter
 ) -> None:
-    result, calls = run_cleanup(recipe, tmp_path, from_k8s=from_k8s, interpreter=interpreter)
+    result, calls = run_cleanup(example, tmp_path, from_k8s=from_k8s, interpreter=interpreter)
     assert result.returncode == 0, result.stderr
     lines = calls.splitlines()
     # the runs are listed while the deployment exists; a second cleanup still passes
@@ -483,7 +564,7 @@ def test_the_cleanup_block_deletes_the_deployment_recipe_objects_and_prefixes(
         "cwtrain deployment delete dep-1 --ignore-not-found",
     ]
     delete = "kubectl -n ns delete"
-    secrets = "store admin ikey token" if recipe.inference_key else "store admin token"
+    secrets = "store admin ikey token" if example.recipe.inference_key else "store admin token"
     assert [line for line in lines if line.startswith("kubectl")] == [
         f"{delete} job cwtrain-job cwtrain-stage-job cwtrain-make-bucket --ignore-not-found",
         f"{delete} secret {secrets} --ignore-not-found",
@@ -495,8 +576,8 @@ def test_the_cleanup_block_deletes_the_deployment_recipe_objects_and_prefixes(
     assert removed == [  # only this deployment's runs: every deployment shares the hot-load prefix
         f"{rm}/hotload/ --exclude * --include run-a-v* --include _manifests/run-a-v*",
         f"{rm}/hotload/ --exclude * --include run-b-v* --include _manifests/run-b-v*",
-        f"{rm}/{recipe.model_prefix}/{recipe.model_slug}/",
-        f"{rm}/{recipe.model_prefix}/_probe/",
+        f"{rm}/{example.model_prefix}/{example.model_slug}/",
+        f"{rm}/{example.model_prefix}/_probe/",
     ]
 
 
@@ -508,28 +589,33 @@ def test_the_cleanup_block_deletes_the_deployment_recipe_objects_and_prefixes(
         ({"BUCKET": "'<bucket>'"}, "fill in run.env"),
         ({"DEPLOYMENT_ID": "'<deployment id>'"}, "fill in run.env"),
     ],
-    ids=["zone placeholder", "no hot-load prefix", "bucket placeholder", "deployment placeholder"],
+    ids=[
+        "zone placeholder",
+        "no hot-load prefix",
+        "bucket placeholder",
+        "deployment placeholder",
+    ],
 )
-@per_recipe
+@per_example
 def test_the_cleanup_block_touches_nothing_until_everything_is_set(
-    tmp_path: Path, recipe: Recipe, case, error
+    tmp_path: Path, example: Example, case, error
 ) -> None:
-    result, calls = run_cleanup(recipe, tmp_path, **case)
+    result, calls = run_cleanup(example, tmp_path, **case)
     assert result.returncode != 0 and error in result.stderr, result.stderr
     assert calls == ""
 
 
-@per_recipe
-def test_the_cleanup_block_is_valid_bash(recipe: Recipe) -> None:
-    block = readme_block(recipe, "### Cleaning up")
+@per_example
+def test_the_cleanup_block_is_valid_bash(example: Example) -> None:
+    block = readme_block(example, "### Cleaning up")
     assert subprocess.run(["bash", "-n", "-c", block], check=False).returncode == 0
 
 
-@per_recipe
+@per_example
 def test_the_cleanup_block_stops_when_the_deployment_is_not_deleted(
-    tmp_path: Path, recipe: Recipe
+    tmp_path: Path, example: Example
 ) -> None:
-    result, calls = run_cleanup(recipe, tmp_path, cwtrain_exit=1)
+    result, calls = run_cleanup(example, tmp_path, cwtrain_exit=1)
     assert result.returncode != 0 and "permission_denied" in result.stderr
     assert calls.splitlines() == [  # nothing else
         "cwtrain hotload list --deployment dep-1 --limit 100000",
@@ -537,34 +623,34 @@ def test_the_cleanup_block_stops_when_the_deployment_is_not_deleted(
     ]
 
 
-@per_recipe
+@per_example
 def test_the_cleanup_block_leaves_the_shared_prefix_alone_without_hot_loads(
-    tmp_path: Path, recipe: Recipe
+    tmp_path: Path, example: Example
 ) -> None:
-    result, calls = run_cleanup(recipe, tmp_path, hot_loads=[])
+    result, calls = run_cleanup(example, tmp_path, hot_loads=[])
     assert result.returncode == 0, result.stderr
     assert "found no hot-loads of dep-1" in result.stderr
     assert "s3://bkt/hotload/" not in calls  # never the whole prefix that other deployments share
 
 
 @pytest.mark.parametrize("prefix", ["hotload//", "//hotload", "/hotload/"])
-@per_recipe
+@per_example
 def test_the_cleanup_block_strips_every_outer_slash(
-    tmp_path: Path, recipe: Recipe, prefix: str
+    tmp_path: Path, example: Example, prefix: str
 ) -> None:
     # the bucket Job and the API strip them all, so cleanup must target the same objects
-    result, calls = run_cleanup(recipe, tmp_path, hotload_prefix_file=False, HOTLOAD_PREFIX=prefix)
+    result, calls = run_cleanup(example, tmp_path, hotload_prefix_file=False, HOTLOAD_PREFIX=prefix)
     assert result.returncode == 0, result.stderr
     removed = [line.split()[4] for line in calls.splitlines() if line.startswith("aws s3 rm")]
     assert removed[0] == "s3://bkt/hotload/"
 
 
 @pytest.mark.parametrize("prefix", ["/", "///"])
-@per_recipe
+@per_example
 def test_the_cleanup_block_refuses_a_prefix_of_slashes(
-    tmp_path: Path, recipe: Recipe, prefix: str
+    tmp_path: Path, example: Example, prefix: str
 ) -> None:
-    result, calls = run_cleanup(recipe, tmp_path, hotload_prefix_file=False, HOTLOAD_PREFIX=prefix)
+    result, calls = run_cleanup(example, tmp_path, hotload_prefix_file=False, HOTLOAD_PREFIX=prefix)
     assert result.returncode != 0 and "HOTLOAD_PREFIX" in result.stderr
     assert calls == ""
 
@@ -580,27 +666,29 @@ def test_run_trainer_checks_snapshot_access_before_training(recipe: Recipe) -> N
 
 
 @needs_envsubst
-@per_recipe
+@per_example
 def test_the_trainer_job_can_run_as_the_trainer_service_account(
-    tmp_path: Path, recipe: Recipe
+    tmp_path: Path, example: Example
 ) -> None:
-    env = filled_run_env(recipe, tmp_path, TRAINER_SERVICE_ACCOUNT="trainer-sa", ORG_ID="org1")
-    result = render(env, recipe.k8s / "trainer-job.yaml")
+    env = filled_run_env(example, tmp_path, TRAINER_SERVICE_ACCOUNT="trainer-sa", ORG_ID="org1")
+    result = render(env, example.recipe.k8s / "trainer-job.yaml")
     assert result.returncode == 0, result.stderr
     assert 'serviceAccountName: "trainer-sa"' in result.stdout
     assert "https://api.coreweave.com/v1/cwobject/temporary-credentials/oidc/org1" in result.stdout
     assert 'audience: "https://coreweave.com/iam"' in result.stdout
 
 
-@per_recipe
-def test_the_create_block_creates_the_deployment_and_waits(tmp_path: Path, recipe: Recipe) -> None:
+@per_example
+def test_the_create_block_creates_the_deployment_and_waits(
+    tmp_path: Path, example: Example
+) -> None:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     calls = tmp_path / "calls"
     (bin_dir / "cwtrain").write_text(f'#!/bin/sh\nprintf "cwtrain %s\\n" "$*" >> {calls}\n')
     (bin_dir / "cwtrain").chmod(0o755)
     result = subprocess.run(
-        ["bash", "-c", readme_block(recipe, "### Creating the deployment", 1)],
+        ["bash", "-c", readme_block(example, "### Creating the deployment", 1)],
         cwd=tmp_path,
         env={"PATH": f"{bin_dir}:/usr/bin:/bin"},
         capture_output=True,
@@ -620,7 +708,11 @@ def test_run_trainer_leaves_an_empty_hot_load_timeout_to_cwtrain(
     guard = re.search(r"^hotload_timeout=.*\n.*unset CWTRAIN_HOTLOAD_TIMEOUT$", script, re.M)
     assert guard, "run-trainer.sh must drop a blank CWTRAIN_HOTLOAD_TIMEOUT"
     out = subprocess.run(
-        ["bash", "-c", guard.group(0) + '\nprintf %s "${CWTRAIN_HOTLOAD_TIMEOUT-unset}"'],
+        [
+            "bash",
+            "-c",
+            guard.group(0) + '\nprintf %s "${CWTRAIN_HOTLOAD_TIMEOUT-unset}"',
+        ],
         env={"PATH": "/usr/bin:/bin", "CWTRAIN_HOTLOAD_TIMEOUT": value},
         capture_output=True,
         text=True,
@@ -632,25 +724,27 @@ def test_run_trainer_leaves_an_empty_hot_load_timeout_to_cwtrain(
     assert launch and guard.start() < launch.start(), "the guard must run before the launcher"
 
 
-@per_recipe
-def test_the_bucket_policy_command_applies_the_git_ignored_copy(recipe: Recipe) -> None:
-    text = (recipe.path / "README.md").read_text()
+@per_example
+def test_the_bucket_policy_command_applies_the_git_ignored_copy(
+    example: Example,
+) -> None:
+    text = (example.path / "README.md").read_text()
     assert "file://bucket-policy.json" not in text
     assert "file://k8s/bucket-policy.run.json" in text
     # git check-ignore exits 0 when git ignores the path
     copy = "k8s/bucket-policy.run.json"
-    ignored = git("check-ignore", "-q", "--no-index", copy, cwd=recipe.path)
+    ignored = git("check-ignore", "-q", "--no-index", copy, cwd=example.path)
     assert ignored.returncode == 0, f"git does not ignore {copy}"
 
 
 @pytest.mark.parametrize(
     "directory",
-    [*(recipe.k8s for recipe in RECIPES), SHARED],
-    ids=[*(recipe.name for recipe in RECIPES), "k8s"],
+    [*(example.k8s for example in EXAMPLES), SHARED],
+    ids=[*(example.name for example in EXAMPLES), "k8s"],
 )
 def test_the_filled_in_copies_are_git_ignored(directory: Path) -> None:
     # they hold ids, endpoints and headers: run.env, and the *.run.json copies of the templates,
-    # in a recipe's k8s/ or next to the templates in k8s/
+    # in an example's k8s/ or next to the templates in k8s/
     copies = [
         "run.env",
         "deployment.run.json",
@@ -686,9 +780,9 @@ def test_make_kit_names_a_cwtrain_wheel_that_does_not_exist(tmp_path: Path, reci
     assert "CWTRAIN_WHEEL" in result.stderr and "uv build" not in result.stderr
 
 
-@per_recipe
-def test_the_cleanup_block_stops_when_it_cannot_reach_the_recipe(
-    tmp_path: Path, recipe: Recipe
+@per_example
+def test_the_cleanup_block_stops_when_it_cannot_reach_the_example(
+    tmp_path: Path, example: Example
 ) -> None:
     # outside a checkout the cd fails; values the shell still holds from an earlier run.env must not
     # be used instead
@@ -706,36 +800,36 @@ def test_the_cleanup_block_stops_when_it_cannot_reach_the_recipe(
         "INFERENCE_KEY_SECRET": "i",
         "API_TOKEN_SECRET": "t",
     }
-    result, calls = run_cleanup(recipe, tmp_path, git_repo=False, shell=shell)
+    result, calls = run_cleanup(example, tmp_path, git_repo=False, shell=shell)
     assert result.returncode != 0
     assert calls == ""
 
 
-@per_recipe
+@per_example
 def test_the_cleanup_block_prefers_the_deployment_file_to_a_prefix_left_in_the_shell(
-    tmp_path: Path, recipe: Recipe
+    tmp_path: Path, example: Example
 ) -> None:
-    result, calls = run_cleanup(recipe, tmp_path, shell={"HOTLOAD_PREFIX": "old/prefix"})
+    result, calls = run_cleanup(example, tmp_path, shell={"HOTLOAD_PREFIX": "old/prefix"})
     assert result.returncode == 0, result.stderr
     removed = [line.split()[4] for line in calls.splitlines() if line.startswith("aws s3 rm")]
     assert removed[0] == "s3://bkt/hotload/" and "old/prefix" not in calls
 
 
-@per_recipe
-def test_the_cleanup_block_refuses_an_empty_model_prefix(tmp_path: Path, recipe: Recipe) -> None:
-    result, calls = run_cleanup(recipe, tmp_path, MODEL_PREFIX="")
+@per_example
+def test_the_cleanup_block_refuses_an_empty_model_prefix(tmp_path: Path, example: Example) -> None:
+    result, calls = run_cleanup(example, tmp_path, MODEL_PREFIX="")
     assert result.returncode != 0 and "MODEL_PREFIX" in result.stderr
     assert calls == ""
 
 
-@per_recipe
+@per_example
 def test_the_parameters_block_keeps_a_filled_in_deployment_file(
-    tmp_path: Path, recipe: Recipe
+    tmp_path: Path, example: Example
 ) -> None:
-    k8s = tmp_path / "recipe" / "k8s"
+    k8s = tmp_path / "example" / "k8s"
     k8s.mkdir(parents=True)
-    example = recipe.path / recipe.deployment
-    shutil.copy(example, k8s.parent / recipe.deployment)
+    template = example.path / "deployment.example.json"
+    shutil.copy(template, k8s.parent / template.name)
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     (bin_dir / "cwtrain").write_text("#!/bin/sh\nprintf '{}'\n")
@@ -744,7 +838,7 @@ def test_the_parameters_block_keeps_a_filled_in_deployment_file(
 
     def run() -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            ["bash", "-c", readme_block(recipe, "### Creating the deployment")],
+            ["bash", "-c", readme_block(example, "### Creating the deployment")],
             cwd=k8s,
             env=env,
             capture_output=True,
@@ -753,18 +847,18 @@ def test_the_parameters_block_keeps_a_filled_in_deployment_file(
         )
 
     assert run().returncode == 0
-    assert (k8s / "deployment.run.json").read_text() == example.read_text()
+    assert (k8s / "deployment.run.json").read_text() == template.read_text()
     (k8s / "deployment.run.json").write_text('{"name": "mine"}')
     run()
     assert (k8s / "deployment.run.json").read_text() == '{"name": "mine"}'
 
 
 @needs_envsubst
-@per_recipe
-def test_api_headers_may_carry_tags(tmp_path: Path, recipe: Recipe) -> None:
+@per_example
+def test_api_headers_may_carry_tags(tmp_path: Path, example: Example) -> None:
     value = """'{"X-Trace":"<trace-id>"}'"""
-    env = filled_run_env(recipe, tmp_path, CWTRAIN_API_HEADERS=value)
-    result = render(env, recipe.k8s / "trainer-job.yaml")
+    env = filled_run_env(example, tmp_path, CWTRAIN_API_HEADERS=value)
+    result = render(env, example.recipe.k8s / "trainer-job.yaml")
     assert result.returncode == 0, result.stderr
     assert "<trace-id>" in result.stdout
 
@@ -774,42 +868,48 @@ def test_api_headers_may_carry_tags(tmp_path: Path, recipe: Recipe) -> None:
     ['{"hotLoad": {"otherKey": "x"}}', "{", "{}"],
     ids=["no pathPrefix", "truncated", "empty"],
 )
-@per_recipe
+@per_example
 def test_the_cleanup_block_stops_on_a_broken_deployment_file(
-    tmp_path: Path, recipe: Recipe, content: str
+    tmp_path: Path, example: Example, content: str
 ) -> None:
     # a prefix left in the shell must not stand in for a file that exists but cannot be read
     shell = {"HOTLOAD_PREFIX": "stale/prefix"}
-    result, calls = run_cleanup(recipe, tmp_path, deployment_json=content, shell=shell)
+    result, calls = run_cleanup(example, tmp_path, deployment_json=content, shell=shell)
     assert result.returncode != 0
     assert calls == ""
 
 
-@per_recipe
+@per_example
 def test_the_cleanup_block_uses_the_run_env_prefix_without_a_file(
-    tmp_path: Path, recipe: Recipe
+    tmp_path: Path, example: Example
 ) -> None:
     shell = {"HOTLOAD_PREFIX": "stale/prefix"}
     result, calls = run_cleanup(
-        recipe, tmp_path, hotload_prefix_file=False, HOTLOAD_PREFIX="made/elsewhere", shell=shell
+        example,
+        tmp_path,
+        hotload_prefix_file=False,
+        HOTLOAD_PREFIX="made/elsewhere",
+        shell=shell,
     )
     assert result.returncode == 0, result.stderr
     assert "s3://bkt/made/elsewhere/" in calls and "stale/prefix" not in calls
 
 
 @pytest.mark.parametrize("file", [True, False], ids=["deployment file", "run.env"])
-@per_recipe
+@per_example
 def test_the_cleanup_block_ignores_slashes_around_the_prefix(
-    tmp_path: Path, recipe: Recipe, file
+    tmp_path: Path, example: Example, file
 ) -> None:
     # the API stores snapshots under "hotload/" for a pathPrefix of "/hotload/"
     if file:
         result, calls = run_cleanup(
-            recipe, tmp_path, deployment_json='{"hotLoad": {"pathPrefix": "/hotload/"}}'
+            example,
+            tmp_path,
+            deployment_json='{"hotLoad": {"pathPrefix": "/hotload/"}}',
         )
     else:
         result, calls = run_cleanup(
-            recipe, tmp_path, hotload_prefix_file=False, HOTLOAD_PREFIX="/hotload/"
+            example, tmp_path, hotload_prefix_file=False, HOTLOAD_PREFIX="/hotload/"
         )
     assert result.returncode == 0, result.stderr
     removed = [line.split()[4] for line in calls.splitlines() if line.startswith("aws s3 rm")]
@@ -817,46 +917,50 @@ def test_the_cleanup_block_ignores_slashes_around_the_prefix(
 
 
 @pytest.mark.parametrize("file", [True, False], ids=["deployment file", "run.env"])
-@per_recipe
+@per_example
 def test_the_cleanup_block_refuses_a_bare_slash_prefix(
-    tmp_path: Path, recipe: Recipe, file
+    tmp_path: Path, example: Example, file
 ) -> None:
     # "/" is the top of the bucket; the block must not delete it all
     if file:
         result, calls = run_cleanup(
-            recipe, tmp_path, deployment_json='{"hotLoad": {"pathPrefix": "/"}}'
+            example, tmp_path, deployment_json='{"hotLoad": {"pathPrefix": "/"}}'
         )
     else:
-        result, calls = run_cleanup(recipe, tmp_path, hotload_prefix_file=False, HOTLOAD_PREFIX="/")
+        result, calls = run_cleanup(
+            example, tmp_path, hotload_prefix_file=False, HOTLOAD_PREFIX="/"
+        )
     assert result.returncode != 0
     assert calls == ""
 
 
-@per_recipe
+@per_example
 def test_the_cleanup_block_prefers_the_deployment_file_to_run_env(
-    tmp_path: Path, recipe: Recipe
+    tmp_path: Path, example: Example
 ) -> None:
-    result, calls = run_cleanup(recipe, tmp_path, HOTLOAD_PREFIX="old/prefix")
+    result, calls = run_cleanup(example, tmp_path, HOTLOAD_PREFIX="old/prefix")
     assert result.returncode == 0, result.stderr
     assert "s3://bkt/hotload/" in calls and "old/prefix" not in calls
 
 
-@per_recipe
-def test_run_env_grants_the_trainer_the_example_deployments_hot_load_prefix(recipe: Recipe) -> None:
+@per_example
+def test_run_env_grants_the_trainer_the_example_deployments_hot_load_prefix(
+    example: Example,
+) -> None:
     # make-bucket-job.yaml lets the trainer write only under HOTLOAD_PREFIX, so it must be the
     # pathPrefix of the deployment that the README creates
-    example = re.search(
+    template = re.search(
         r"cp \.\./(deployment[\w.]*\.example\.json) deployment\.run\.json",
-        (recipe.path / "README.md").read_text(),
+        (example.path / "README.md").read_text(),
     ).group(1)
-    path_prefix = json.loads((recipe.path / example).read_text())["hotLoad"]["pathPrefix"]
+    path_prefix = json.loads((example.path / template).read_text())["hotLoad"]["pathPrefix"]
     result = subprocess.run(
         [
             "bash",
             "-c",
             'set -euo pipefail; set -a; . "$1"; printf "%s" "$HOTLOAD_PREFIX"',
             "-",
-            str(recipe.k8s / "run.env.example"),
+            str(example.k8s / "run.env.example"),
         ],
         capture_output=True,
         text=True,
@@ -865,20 +969,20 @@ def test_run_env_grants_the_trainer_the_example_deployments_hot_load_prefix(reci
     assert result.stdout == path_prefix
 
 
-@per_recipe
+@per_example
 def test_the_cleanup_block_explains_a_deployment_without_a_prefix(
-    tmp_path: Path, recipe: Recipe
+    tmp_path: Path, example: Example
 ) -> None:
-    result, calls = run_cleanup(recipe, tmp_path, deployment_json='{"hotLoad": {"bucket": "bkt"}}')
+    result, calls = run_cleanup(example, tmp_path, deployment_json='{"hotLoad": {"bucket": "bkt"}}')
     assert result.returncode != 0 and "no hotLoad.pathPrefix" in result.stderr
     assert "Traceback" not in result.stderr and calls == ""
 
 
-@per_recipe
-def test_the_setup_block_keeps_a_filled_in_run_env(tmp_path: Path, recipe: Recipe) -> None:
-    k8s = tmp_path / "training" / "recipes" / recipe.name / "k8s"
+@per_example
+def test_the_setup_block_keeps_a_filled_in_run_env(tmp_path: Path, example: Example) -> None:
+    k8s = tmp_path / "training" / "examples" / example.name / "k8s"
     k8s.mkdir(parents=True)
-    shutil.copy(recipe.k8s / "run.env.example", k8s / "run.env.example")
+    shutil.copy(example.k8s / "run.env.example", k8s / "run.env.example")
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     (bin_dir / "kubectl").write_text("#!/bin/sh\necho ctx\n")
@@ -887,7 +991,7 @@ def test_the_setup_block_keeps_a_filled_in_run_env(tmp_path: Path, recipe: Recip
 
     def run() -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            ["bash", "-c", readme_block(recipe, "## Running it on Kubernetes")],
+            ["bash", "-c", readme_block(example, "## Running it on Kubernetes")],
             cwd=tmp_path,
             env=env,
             capture_output=True,
@@ -901,19 +1005,42 @@ def test_the_setup_block_keeps_a_filled_in_run_env(tmp_path: Path, recipe: Recip
     assert (k8s / "run.env").read_text().endswith("DEPLOYMENT_ID=mine\n")
 
 
-@per_recipe
-def test_the_cleanup_block_accepts_a_lone_angle_bracket(tmp_path: Path, recipe: Recipe) -> None:
-    result, calls = run_cleanup(recipe, tmp_path, MODEL_SLUG="'run<v2'")
+@needs_zsh
+@per_example
+def test_the_setup_block_sets_k_and_r_when_pasted_into_zsh(
+    tmp_path: Path, example: Example
+) -> None:
+    # without interactivecomments, a stock zsh runs "# the shared files" as a command and leaves K
+    # unset, and a quote in a comment swallows the lines after it
+    k8s = tmp_path / "training" / "examples" / example.name / "k8s"
+    k8s.mkdir(parents=True)
+    shutil.copy(example.k8s / "run.env.example", k8s / "run.env.example")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "kubectl").write_text("#!/bin/sh\necho ctx\n")
+    (bin_dir / "kubectl").chmod(0o755)
+    block = readme_block(example, "## Running it on Kubernetes")
+    shown = '\nprint -r -- "set: K=$K R=$R CTX=$CTX"'
+    env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(tmp_path)}
+    result = run_block(block + shown, "zsh -i", tmp_path, env)
+    assert "command not found" not in result.stderr, result.stderr
+    k, r = (re.search(rf"^{name}=(\S+)", block, re.M).group(1) for name in ("K", "R"))
+    assert f"set: K={k} R={r} CTX=ctx" in result.stdout
+
+
+@per_example
+def test_the_cleanup_block_accepts_a_lone_angle_bracket(tmp_path: Path, example: Example) -> None:
+    result, calls = run_cleanup(example, tmp_path, MODEL_SLUG="'run<v2'")
     assert result.returncode == 0, result.stderr
-    assert f"s3://bkt/{recipe.model_prefix}/run<v2/" in calls
+    assert f"s3://bkt/{example.model_prefix}/run<v2/" in calls
 
 
 @needs_envsubst
-@per_recipe
-def test_render_refuses_an_uppercase_placeholder(tmp_path: Path, recipe: Recipe) -> None:
-    env = filled_run_env(recipe, tmp_path, **{recipe.placeholder: "'<Served Model>'"})
-    result = render(env, recipe.k8s / "trainer-job.yaml")
-    assert result.returncode == 1 and recipe.placeholder in result.stderr
+@per_example
+def test_render_refuses_an_uppercase_placeholder(tmp_path: Path, example: Example) -> None:
+    env = filled_run_env(example, tmp_path, **{example.recipe.placeholder: "'<Served Model>'"})
+    result = render(env, example.recipe.k8s / "trainer-job.yaml")
+    assert result.returncode == 1 and example.recipe.placeholder in result.stderr
 
 
 def test_no_other_directory_holds_a_copy_of_a_shared_file() -> None:
@@ -930,3 +1057,14 @@ def test_every_training_recipe_is_in_recipes() -> None:
     # a recipe that is not in RECIPES gets none of the tests above
     found = {path.parent.name for path in (ROOT / "training" / "recipes").glob("*/k8s")}
     assert found == {recipe.name for recipe in RECIPES}, "add the recipe to RECIPES"
+
+
+def test_every_example_is_in_examples() -> None:
+    # an example that is not in EXAMPLES gets none of the tests above
+    found = {path.parent.name for path in (ROOT / "training" / "examples").glob("*/README.md")}
+    assert found == {example.name for example in EXAMPLES}, "add the example to EXAMPLES"
+
+
+def test_every_training_recipe_has_an_example() -> None:
+    # the steps that run a recipe are tested through its examples
+    assert {example.recipe for example in EXAMPLES} == set(RECIPES)

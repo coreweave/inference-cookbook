@@ -7,8 +7,6 @@
 from __future__ import annotations
 
 import importlib.util
-import re
-import subprocess
 import sys
 import zipfile
 from pathlib import Path
@@ -148,25 +146,3 @@ def test_python_defaults_agree() -> None:
 
     assert launch.NemoJob(model_slug="m").python == sys.executable
     assert launch.NemoJob.from_env({"MODEL_SLUG": "m"}).python == sys.executable
-
-
-K8S = Path(__file__).resolve().parents[1] / "k8s"
-
-
-def test_run_env_fetches_the_base_model_from_where_the_stage_job_puts_it() -> None:
-    # NeMo-RL has no Hugging Face fallback, so an empty BASE_S3_URI cannot train
-    wanted = ("DEPLOYMENT_RUN", "BUCKET", "MODEL_PREFIX", "MODEL_SLUG", "BASE_S3_URI")
-    lines = [line for line in (K8S / "run.env.example").read_text().splitlines()
-             if line.split("=", 1)[0] in wanted]  # fmt: skip
-    show = 'printf "%s\\n" "$BUCKET" "$MODEL_PREFIX" "$MODEL_SLUG" "$BASE_S3_URI"'
-    bucket, prefix, slug, uri = subprocess.run(
-        ["bash", "-c", "; ".join(["set -eu", *lines, show])],
-        check=True, capture_output=True, text=True, env={"PATH": "/usr/bin:/bin"},
-    ).stdout.splitlines()
-    assert uri == f"s3://{bucket}/{prefix}/{slug}"
-    # ...which is where stage-nemotron.sh uploads the checkpoint: s3://$BUCKET/$MODEL_PREFIX/$MODEL_SLUG/
-    stage = (K8S / "stage-nemotron.sh").read_text()
-    upload = re.search(r"upload_snapshot\((.*?)\)\n", stage, re.DOTALL).group(1)
-    for arg in ('bucket=os.environ["BUCKET"]', 'path_prefix=os.environ["MODEL_PREFIX"]',
-                'identity=os.environ["MODEL_SLUG"]'):  # fmt: skip
-        assert arg in upload

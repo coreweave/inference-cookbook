@@ -22,6 +22,7 @@ body:
         - slime recipe
         - NeMo-RL recipe
         - Axolotl SFT recipe
+        - An example (name it under What happened)
         - Documentation
         - Other
     validations:

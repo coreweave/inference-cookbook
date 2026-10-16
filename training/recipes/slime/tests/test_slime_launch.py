@@ -239,28 +239,3 @@ def test_slime_dir_is_used_as_it_is(tmp_path, upstream, patched) -> None:
     job = slime_job(tmp_path, slime_dir=str(upstream), slime_commit="0" * 40)
     assert launch.prepare_slime(job) == upstream
     assert git(upstream, "rev-parse", "HEAD") == head
-
-
-def run_env_example() -> dict[str, str]:
-    values = {}
-    for line in (Path(__file__).resolve().parents[1] / "k8s" / "run.env.example").read_text().splitlines():
-        if line and not line.startswith("#") and "=" in line:
-            key, _, value = line.partition("=")
-            values[key.strip()] = value.strip()
-    return values
-
-
-def test_run_env_defaults_fit_the_image_they_name() -> None:
-    env = run_env_example()
-    image = env["TRAINER_IMAGE"]
-    assert not image.endswith(":latest"), "pin the trainer image"
-    assert env["SLIME_COMMIT"] == launch.TESTED_SLIME_COMMIT
-    if image.startswith("radixark/miles:"):
-        # numpy 2 and a Megatron that is not slime's: lift the assertion, bring slime's Megatron
-        assert env["SLIME_RELAX_NUMPY_CHECK"] == "1"
-        assert len(env["MEGATRON_COMMIT"]) == 40
-    elif image.startswith("slimerl/slime:"):
-        assert env["SLIME_RELAX_NUMPY_CHECK"] == "0" and env["MEGATRON_COMMIT"] == ""
-        assert not env["INSTANCE_TYPE"].startswith("gb"), "slimerl/slime images are amd64 only"
-    else:
-        pytest.fail(f"no rule for {image}")

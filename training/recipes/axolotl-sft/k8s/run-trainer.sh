@@ -6,7 +6,7 @@
 # Runs in the Axolotl trainer Job (axolotlai/axolotl image). Installs cwtrain into a venv of its
 # own, then starts launch.py. launch.py stages the base model, runs axolotl train (and merge-lora
 # after a LoRA run), and publishes the result into the deployment as a full hot-load snapshot.
-# For the settings, see run.env.example.
+# For the settings, see an example's k8s/run.env.example.
 set -euo pipefail
 CW_PY=${WORK:-/work}/cwtrain/bin/python
 # cwtrain gets a venv of its own; Axolotl's environment stays as the image built it

@@ -91,8 +91,8 @@ def check_helpers(utils: ModuleType, problem: str = "") -> None:
     if missing:
         raise SystemExit(
             f"{utils.__name__} has no {', '.join(missing)}{problem}: this miles moved its launcher "
-            f"helpers. Use the image run.env.example pins ({PINNED_IMAGE}), or point "
-            "run_hotload.py's command_utils() at their new module."
+            f"helpers. Use the image that the example's run.env.example pins ({PINNED_IMAGE}), "
+            "or point run_hotload.py's command_utils() at their new module."
         )
 
 
