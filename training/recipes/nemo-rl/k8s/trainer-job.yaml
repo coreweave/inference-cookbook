@@ -36,6 +36,14 @@ spec:
         - {name: BASE_S3_URI, value: "${BASE_S3_URI}"}
         - {name: NUM_STEPS, value: "${NUM_STEPS}"}
         - {name: ACTOR_GPUS, value: "${ACTOR_GPUS}"}
+        # training environment: browsecomp, dapo or math
+        - {name: TRAIN_ENV, value: "${TRAIN_ENV}"}
+        - {name: MAX_SEQUENCE_LENGTH, value: "${MAX_SEQUENCE_LENGTH}"}
+        # BrowseComp's judge and You.com search; the keys stay in Secrets
+        - {name: CWTRAIN_JUDGE_BASE_URL, value: "${JUDGE_BASE_URL}"}
+        - {name: CWTRAIN_JUDGE_MODEL, value: "${JUDGE_MODEL}"}
+        - {name: CWTRAIN_JUDGE_API_KEY_FILE, value: /secrets/judge/api_key}
+        - {name: CWTRAIN_SEARCH_API_KEY_FILE, value: /secrets/search/api_key}
         # extra hydra-style overrides for run_grpo.py, e.g. grpo.num_prompts_per_step=16
         - name: EXTRA_OVERRIDES
           value: |-
@@ -78,6 +86,8 @@ spec:
         - {name: aws, mountPath: /aws, readOnly: true}
         - {name: caios-token, mountPath: /var/run/secrets/caios, readOnly: true}
         - {name: inference-key, mountPath: /secrets/inference, readOnly: true}
+        - {name: judge-key, mountPath: /secrets/judge, readOnly: true}
+        - {name: search-key, mountPath: /secrets/search, readOnly: true}
         - {name: work, mountPath: /work}
         - {name: dshm, mountPath: /dev/shm}
         resources:
@@ -94,6 +104,12 @@ spec:
           - serviceAccountToken: {audience: "https://coreweave.com/iam", expirationSeconds: 3600, path: token}
       - name: inference-key
         secret: {secretName: ${INFERENCE_KEY_SECRET}}
+      # Optional, so that dapo and math runs need no judge or search key. A browsecomp run stops at
+      # start when either file is missing.
+      - name: judge-key
+        secret: {secretName: ${JUDGE_KEY_SECRET}, optional: true}
+      - name: search-key
+        secret: {secretName: ${SEARCH_KEY_SECRET}, optional: true}
       - name: work
         emptyDir: {sizeLimit: 600Gi}
       - name: dshm

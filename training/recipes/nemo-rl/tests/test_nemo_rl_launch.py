@@ -51,11 +51,55 @@ def test_grpo_command_applies_settings_and_overrides(tmp_path: Path) -> None:
         "policy.model_name=/w/models/Qwen3-4B",
         "grpo.max_num_steps=30",
         "cluster.gpus_per_node=8",
+        # BrowseComp is the default training environment
+        "env.should_use_nemo_gym=true",
+        "data.train.dataset_name=BrowseComp",
+        "policy.max_total_sequence_length=16384",
         'policy.generation.stop_strings=["</answer>"]',  # quotes reach Hydra
         "grpo.val_period=0",
     ]
     with pytest.raises(LaunchError, match="MODEL_SLUG is required"):
         launch.NemoJob.from_env({})
+
+
+@pytest.mark.parametrize(
+    ("env", "expected"),
+    [
+        ({"TRAIN_ENV": "dapo"}, ["env.should_use_nemo_gym=true", "policy.max_total_sequence_length=3072"]),
+        ({"TRAIN_ENV": "MATH"}, ["policy.max_total_sequence_length=3072"]),
+        (
+            {"TRAIN_ENV": "browsecomp", "MAX_SEQUENCE_LENGTH": "65536"},
+            ["env.should_use_nemo_gym=true", "data.train.dataset_name=BrowseComp",
+             "policy.max_total_sequence_length=65536"],
+        ),
+    ],
+)  # fmt: skip
+def test_train_env_selects_the_environment_and_its_length(env, expected) -> None:
+    job = launch.NemoJob.from_env({"MODEL_SLUG": "m", **env})
+    assert launch.environment_overrides(job) == expected
+
+
+def test_train_env_rejects_an_unknown_environment() -> None:
+    with pytest.raises(LaunchError, match="TRAIN_ENV must be one of"):
+        launch.NemoJob.from_env({"MODEL_SLUG": "m", "TRAIN_ENV": "gsm8k"})
+
+
+def test_the_config_defaults_to_the_glm_judge_on_wandb_inference(monkeypatch) -> None:
+    OmegaConf = pytest.importorskip("omegaconf").OmegaConf
+
+    for name in ("CWTRAIN_JUDGE_MODEL", "CWTRAIN_JUDGE_BASE_URL", "CWTRAIN_JUDGE_API_KEY_FILE"):
+        monkeypatch.delenv(name, raising=False)
+    config = OmegaConf.load(Path(__file__).resolve().parents[1] / "grpo_coreweave.yaml")
+    browsecomp = OmegaConf.to_container(config.env.nemo_gym.browsecomp, resolve=True)
+    assert browsecomp["judge_model"] == "zai-org/GLM-5.2"
+    assert browsecomp["judge_base_url"] == "https://api.inference.wandb.ai/v1"
+    assert browsecomp["judge_api_key_file"] is None
+    # the kit ships the Gym eval recipe's You.com client, which the preset copies into the harness
+    assert browsecomp["search_entrypoint"] == "/opt/cwtrain/you_search.py"
+    kit = (Path(__file__).resolve().parents[1] / "k8s" / "make-kit.sh").read_text()
+    assert "--from-file=you_search.py=" in kit
+    root = Path(__file__).resolve().parents[4]
+    assert (root / "evaluation" / "recipes" / "nemo-gym" / "you_search.py").is_file()
 
 
 def test_install_into_workers_covers_every_prebuilt_venv(tmp_path: Path, monkeypatch) -> None:

@@ -58,6 +58,8 @@ class Example:
     run_id: str  # how RUN_ID in run.env.example starts
     model_prefix: str  # MODEL_PREFIX and MODEL_SLUG in a filled-in run.env.example
     model_slug: str
+    # Secrets that its run.env.example names beyond the shared ones, which its cleanup also deletes
+    extra_secrets: tuple[str, ...] = ()
 
     @property
     def path(self) -> Path:
@@ -101,6 +103,7 @@ EXAMPLES = [
         run_id="nemotron-lightning-grpo",
         model_prefix="cookbook/filled/models",  # cookbook/${DEPLOYMENT_RUN}/models
         model_slug="NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16",
+        extra_secrets=("judge-api-key", "search-api-key"),  # BrowseComp's judge and search keys
     ),
     Example(
         name="axolotl-sft-qwen3-4b",
@@ -565,6 +568,7 @@ def test_the_cleanup_block_deletes_the_deployment_recipe_objects_and_prefixes(
     ]
     delete = "kubectl -n ns delete"
     secrets = "store admin ikey token" if example.recipe.inference_key else "store admin token"
+    secrets = " ".join([secrets, *example.extra_secrets])
     assert [line for line in lines if line.startswith("kubectl")] == [
         f"{delete} job cwtrain-job cwtrain-stage-job cwtrain-make-bucket --ignore-not-found",
         f"{delete} secret {secrets} --ignore-not-found",

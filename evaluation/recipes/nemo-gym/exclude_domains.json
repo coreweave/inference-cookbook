@@ -1,0 +1,10 @@
+{
+  "notices": [
+    {
+      "description": "Sites that publish BrowseComp questions with their answers",
+      "properties": [
+        {"type": "domain", "value": "huggingface.co"}
+      ]
+    }
+  ]
+}

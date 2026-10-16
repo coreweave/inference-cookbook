@@ -40,7 +40,7 @@ jobs:
           # nothing here pushes, so the token is not left in .git/config for later steps
           persist-credentials: false
       - name: Shell scripts parse
-        run: for f in k8s/*.sh training/recipes/*/k8s/*.sh; do bash -n "$f"; done
+        run: for f in k8s/*.sh training/recipes/*/k8s/*.sh evaluation/recipes/*/k8s/*.sh; do bash -n "$f"; done
 
   launchers:
     name: recipe launchers

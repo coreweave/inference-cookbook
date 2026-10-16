@@ -10,6 +10,9 @@ bucket. Then it replaces itself with ``examples/run_grpo.py`` and the recipe's c
 vLLM or SGLang workers: the deployment serves the rollouts and receives every refit by hot-load.
 
 Settings are the environment variables that an example's ``k8s/run.env.example`` documents.
+``TRAIN_ENV`` picks the training environment: ``browsecomp`` (the default) runs Gym's BrowseComp
+agent, with You.com search and an LLM judge; ``dapo`` runs Gym's DAPO math; ``math`` runs NeMo-RL's
+own math environment.
 ``EXTRA_OVERRIDES`` holds Hydra-style overrides. Each whitespace-separated word is one override,
 and quotes reach Hydra unchanged (``policy.generation.stop_strings=["</answer>"]``). So write lists
 without spaces (``["</answer>","<|end|>"]``).
@@ -39,6 +42,11 @@ from cwtrain.integrations.launch import (
 )
 
 TESTED = "NeMo-RL v0.7.0 (nvcr.io/nvidia/nemo-rl:v0.7.0)"
+TRAIN_ENVS = ("browsecomp", "dapo", "math")
+# Trajectory token limit for each environment when MAX_SEQUENCE_LENGTH is unset. A BrowseComp
+# trajectory holds every search result and turn; the math prompts are short. 32768 runs the
+# 8-GPU trainer out of memory: one sequence's fp32 logits need another 16 GiB on top of 60 GiB.
+SEQUENCE_LENGTHS = {"browsecomp": 16384, "dapo": 3072, "math": 3072}
 
 
 @dataclass(frozen=True)
@@ -53,6 +61,8 @@ class NemoJob:
     python: str = field(default_factory=lambda: sys.executable)
     worker_venvs: Path = Path("/opt/ray_venvs")
     base_s3_uri: str = ""
+    train_env: str = "browsecomp"
+    max_sequence_length: int = 0  # 0: SEQUENCE_LENGTHS[train_env]
     extra_overrides: tuple[str, ...] = ()
 
     @classmethod
@@ -62,6 +72,9 @@ class NemoJob:
         def text(name: str, default: str) -> str:
             return env_text(env, name, default)
 
+        train_env = text("TRAIN_ENV", "browsecomp").lower()
+        if train_env not in TRAIN_ENVS:
+            raise LaunchError(f"TRAIN_ENV must be one of {', '.join(TRAIN_ENVS)}, got {train_env!r}")
         return cls(
             model_slug=require(env, "MODEL_SLUG"),
             work=Path(text("WORK", "/work")),
@@ -72,6 +85,8 @@ class NemoJob:
             python=text("NEMO_RL_PYTHON", sys.executable),
             worker_venvs=Path(text("NEMO_RL_VENV_DIR", "/opt/ray_venvs")),
             base_s3_uri=text("BASE_S3_URI", ""),
+            train_env=train_env,
+            max_sequence_length=env_int(env, "MAX_SEQUENCE_LENGTH", 0),
             # whitespace-separated, quotes kept for Hydra's own parser
             extra_overrides=tuple((env.get("EXTRA_OVERRIDES") or "").split()),
         )
@@ -88,6 +103,17 @@ def wheel(job: NemoJob) -> Path:
     return found[-1]
 
 
+def environment_overrides(job: NemoJob) -> list[str]:
+    """The overrides that select ``job.train_env`` and its trajectory token limit."""
+    overrides = {
+        "browsecomp": ["env.should_use_nemo_gym=true", "data.train.dataset_name=BrowseComp"],
+        "dapo": ["env.should_use_nemo_gym=true"],
+        "math": [],
+    }[job.train_env]
+    length = job.max_sequence_length or SEQUENCE_LENGTHS[job.train_env]
+    return [*overrides, f"policy.max_total_sequence_length={length}"]
+
+
 def grpo_command(job: NemoJob) -> list[str]:
     """``run_grpo.py`` with the recipe's config and the job's overrides."""
     return [
@@ -98,6 +124,7 @@ def grpo_command(job: NemoJob) -> list[str]:
         f"policy.model_name={job.model_dir}",
         f"grpo.max_num_steps={job.num_steps}",
         f"cluster.gpus_per_node={job.actor_gpus}",
+        *environment_overrides(job),
         *job.extra_overrides,
     ]
 

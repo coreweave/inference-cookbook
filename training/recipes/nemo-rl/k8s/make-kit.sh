@@ -27,6 +27,7 @@ kubectl --context "$CTX" -n "$NS" create configmap "$KIT" \
   --from-file=bucket-policy.example.json="$SHARED/bucket-policy.example.json" \
   --from-file=grpo_coreweave.yaml="$HERE/../grpo_coreweave.yaml" \
   --from-file=launch.py="$HERE/../launch.py" \
+  --from-file=you_search.py="$HERE/../../../../evaluation/recipes/nemo-gym/you_search.py" \
   ${patches[@]+"${patches[@]}"} \
   --dry-run=client -o yaml | kubectl --context "$CTX" apply -f -
 echo "$KIT updated in $CTX/$NS with $(basename "$WHEEL")"

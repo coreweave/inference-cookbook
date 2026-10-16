@@ -10,11 +10,16 @@ NeMo-RL, torch or Ray at module scope. Credentials are resolved inside that acto
 
 from __future__ import annotations
 
+import base64
 import copy
+import csv
+import hashlib
+import io
 import json
 import math
 import os
 from collections.abc import Iterable, Mapping
+from datetime import date
 from itertools import islice
 from pathlib import Path
 from typing import Any
@@ -36,29 +41,230 @@ def dapo_example(row: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def write_dapo(rows: Iterable[Mapping[str, Any]], path: Path) -> None:
+def write_examples(examples: Iterable[Mapping[str, Any]], path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".tmp")
     try:
         with temporary.open("w") as output:
-            for row in rows:
-                output.write(json.dumps(dapo_example(row)) + "\n")
+            for example in examples:
+                output.write(json.dumps(example) + "\n")
         temporary.replace(path)
     finally:
         temporary.unlink(missing_ok=True)
 
 
+def write_dapo(rows: Iterable[Mapping[str, Any]], path: Path) -> None:
+    write_examples((dapo_example(row) for row in rows), path)
+
+
+# BrowseComp: OpenAI's published test set, in the format of Gym's benchmarks/browsecomp/prepare.py
+# (Gym v0.4.0, Apache-2.0), so that training prompts match the Gym benchmark's.
+BROWSECOMP_CSV_URL = (
+    "https://openaipublic.blob.core.windows.net/simple-evals/browse_comp_test_set.csv"
+)
+BROWSECOMP_ROWS = 1266
+BROWSECOMP_AGENT = "browsecomp_agent"
+BROWSECOMP_SERVER = "browsecomp_resources_server"
+JUDGE_SERVER = "judge_model"
+HARNESS_DIR = Path("resources_servers") / "browsecomp_advanced_harness"
+BROWSECOMP_SYSTEM_PROMPT = (
+    "You are a General Agent. Today's date: {date}. "
+    "Your mission is to leverage a diverse set of tools to help the user conduct "
+    "an in-depth investigation of their question, continuously reflect, and "
+    "ultimately deliver a precise answer.\n\n"
+    "Throughout the investigation, strictly observe the following principles:\n"
+    "1. Whenever you encounter uncertain information, proactively invoke search "
+    "tools to verify it.\n"
+    "2. You can only invoke one tool in each round.\n"
+    "3. Prioritize high-credibility sources (authoritative websites, academic "
+    "databases, professional media) and maintain a critical stance toward "
+    "low-credibility ones. Cite the source of any information you use with "
+    "a format [^index^].\n"
+    "4. You should not respond to the user with a counter-question, but instead "
+    "do your best to provide an accurate answer.\n"
+    "5. When providing the final answer, begin by explaining the reasoning "
+    "process. Avoid presenting only the final answer, as this makes it "
+    "difficult to understand."
+)
+BROWSECOMP_QUERY_SUFFIX = (
+    "\n\nYour response should be in the following format:\n"
+    "Explanation: {your explanation for your final answer}\n"
+    "Exact Answer: {your succinct, final answer}\n"
+    "Confidence: {your confidence score between 0% and 100% for your answer}"
+)
+BROWSECOMP_TOOLS = [
+    {
+        "type": "function",
+        "name": "search",
+        "description": (
+            "Web Search API, works like Google Search. All queries will be searched in "
+            "parallel. If you want to search with multiple keywords, put them in a single query."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "queries": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Search queries. All queries are executed in parallel.",
+                }
+            },
+            "required": ["queries"],
+        },
+        "strict": False,
+    },
+    {
+        "type": "function",
+        "name": "browse",
+        "description": (
+            "Visit specific webpage(s) and return their full text content. Use this to read "
+            "the complete content of web pages found during search."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "urls": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "URL(s) of webpage(s) to visit.",
+                },
+                "goal": {
+                    "type": "string",
+                    "description": "What specific information you are looking for.",
+                },
+            },
+            "required": ["urls"],
+        },
+        "strict": False,
+    },
+]
+# Sites that publish BrowseComp questions with their answers.
+BROWSECOMP_EXCLUDED_DOMAINS = ("huggingface.co",)
+
+
+def browsecomp_decrypt(ciphertext: str, password: str) -> str:
+    """Decrypt one BrowseComp field: base64 XORed with the SHA-256 of the row's canary."""
+    data = base64.b64decode(ciphertext)
+    digest = hashlib.sha256(password.encode()).digest()
+    key = digest * (len(data) // len(digest)) + digest[: len(data) % len(digest)]
+    return bytes(a ^ b for a, b in zip(data, key, strict=True)).decode()
+
+
+def browsecomp_rows(url: str = BROWSECOMP_CSV_URL) -> list[dict[str, str]]:
+    """Download the encrypted BrowseComp test set.
+
+    Raises:
+        ValueError: The download does not have the published number of rows.
+    """
+    import httpx
+
+    response = httpx.get(url, timeout=120, follow_redirects=True)
+    response.raise_for_status()
+    rows = list(csv.DictReader(io.StringIO(response.text)))
+    if len(rows) != BROWSECOMP_ROWS:
+        raise ValueError(f"expected {BROWSECOMP_ROWS} BrowseComp rows, got {len(rows)}")
+    return rows
+
+
+def browsecomp_example(row: Mapping[str, str], today: date | None = None) -> dict[str, Any]:
+    """Convert an encrypted BrowseComp row to a Gym example for the BrowseComp agent."""
+    problem = browsecomp_decrypt(row["problem"], row["canary"])
+    answer = browsecomp_decrypt(row["answer"], row["canary"])
+    system = BROWSECOMP_SYSTEM_PROMPT.format(date=(today or date.today()).isoformat())
+    return {
+        "agent_ref": {"name": BROWSECOMP_AGENT},
+        "responses_create_params": {
+            "input": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": problem + BROWSECOMP_QUERY_SUFFIX},
+            ],
+            "tools": copy.deepcopy(BROWSECOMP_TOOLS),
+        },
+        "question": problem,
+        "ground_truth": answer,
+    }
+
+
+def browsecomp_servers(settings: Mapping[str, Any], max_model_len: int, exclude: Path) -> dict:
+    """Gym server instances for BrowseComp training: the search tools, a judge and the agent.
+
+    Keys are placeholders here. ``actor_config`` fills them in inside the Gym actor.
+    """
+    return {
+        JUDGE_SERVER: {
+            "responses_api_models": {
+                "vllm_model": {
+                    "entrypoint": "app.py",
+                    "base_url": settings["judge_base_url"],
+                    "api_key": "unused",
+                    "model": settings["judge_model"],
+                    "return_token_id_information": False,
+                    "uses_reasoning_parser": True,
+                    # A reasoning judge needs room for its answer after the reasoning.
+                    "extra_body": {"max_tokens": 8192},
+                }
+            }
+        },
+        BROWSECOMP_SERVER: {
+            "resources_servers": {
+                "browsecomp_advanced_harness": {
+                    # The search backend: the harness's own app.py (Tavily), or a file that
+                    # actor_config copies into the harness, such as a You.com client.
+                    "entrypoint": Path(settings["search_entrypoint"]).name
+                    if settings.get("search_entrypoint")
+                    else "app.py",
+                    "domain": "agent",
+                    "verified": False,
+                    "debug": False,
+                    "tavily_api_key": "unused",
+                    "exclude_domains_file_path": str(exclude),
+                    "use_judge": True,
+                    "judge_model_server": {"type": "responses_api_models", "name": JUDGE_SERVER},
+                    "judge_responses_create_params": {"input": []},
+                }
+            }
+        },
+        BROWSECOMP_AGENT: {
+            "responses_api_agents": {
+                "browsecomp_agent": {
+                    "entrypoint": "app.py",
+                    "resources_server": {"type": "resources_servers", "name": BROWSECOMP_SERVER},
+                    "model_server": {"type": "responses_api_models", "name": "policy_model"},
+                    "max_steps": int(settings.get("max_steps") or 8),
+                    "nudge_steps": True,
+                    "max_context_tokens": max_model_len,
+                    # A context reset drops earlier turns, which breaks the trajectory's token
+                    # prefix. Training runs each trajectory in one context instead.
+                    "max_reset_count": 0,
+                    "resume_from_trajectory": False,
+                    "save_model_call_using_vllm_tokenize_endpoint": False,
+                }
+            }
+        },
+    }
+
+
+def _required_key_file(settings: Mapping[str, Any], name: str, what: str) -> str:
+    path = settings.get(name)
+    if not path:
+        raise ValueError(f"BrowseComp training requires env.nemo_gym.browsecomp.{name} ({what})")
+    if not Path(path).is_file():
+        raise ValueError(f"BrowseComp {what} file {path} does not exist; mount its Secret")
+    return str(path)
+
+
 def prepare_config(config: dict[str, Any], *, rows=None) -> dict[str, Any]:
-    """Check a CoreWeave Gym training config, and fill in the DAPO preset when it is selected.
+    """Check a CoreWeave Gym training config, and fill in a preset when one is selected.
 
     The config is returned as an unchanged copy unless the backend is ``coreweave`` and
-    ``env.should_use_nemo_gym`` is set. With ``data.train.dataset_name: DAPOMath17K``, the DAPO
-    dataset is written as Gym data and the Gym configs are set. Otherwise the config must name an
-    explicit ``NemoGymDataset`` and ``env.nemo_gym.config_paths``.
+    ``env.should_use_nemo_gym`` is set. With ``data.train.dataset_name: DAPOMath17K`` or
+    ``BrowseComp``, that dataset is written as Gym data and the Gym configs are set. BrowseComp
+    reads its judge and search settings from ``env.nemo_gym.browsecomp``. Otherwise the config
+    must name an explicit ``NemoGymDataset`` and ``env.nemo_gym.config_paths``.
 
     Args:
         config: The NeMo-RL config. It is not modified; a changed copy is returned.
-        rows: DAPO rows to use instead of downloading the dataset.
+        rows: Dataset rows (DAPO, or encrypted BrowseComp) to use instead of downloading them.
 
     Raises:
         ValueError: The config does not meet a CoreWeave Gym training requirement, such as
@@ -97,28 +303,67 @@ def prepare_config(config: dict[str, Any], *, rows=None) -> dict[str, Any]:
         {
             "return_token_id_information": True,
             "chat_template_kwargs": config["policy"]["tokenizer"].get("chat_template_kwargs"),
+            # cwtrain's Gym model caps max_tokens to the room the prompt leaves.
+            "max_model_len": int(cw["max_model_len"]),
         }
     )
     data = config["data"]
     train = data["train"]
-    if isinstance(train, dict) and train.get("dataset_name") == "DAPOMath17K":
+    preset = train.get("dataset_name") if isinstance(train, dict) else None
+    browsecomp = gym.pop("browsecomp", None)
+    if preset in ("DAPOMath17K", "BrowseComp"):
         if data.get("validation") or train.get("split_validation_size", 0):
             raise ValueError(
-                "The DAPO Gym preset requires validation disabled; use explicit Gym data"
+                f"The {preset} Gym preset requires validation disabled; use explicit Gym data"
             )
         if gym.get("config_paths"):
             raise ValueError("Custom Gym environments require an explicit NemoGymDataset")
+        max_samples = train.get("max_samples")
+        if max_samples is not None and (type(max_samples) is not int or max_samples <= 0):
+            raise ValueError("data.train.max_samples must be a positive integer")
+        directory = Path(cw.get("state_dir", "/work/hotload")) / "nemo-gym"
+    if preset == "DAPOMath17K":
         if rows is None:
             from datasets import load_dataset
 
             rows = load_dataset("BytedTsinghua-SIA/DAPO-Math-17k", split="train")
-        max_samples = train.get("max_samples")
         if max_samples is not None:
-            if type(max_samples) is not int or max_samples <= 0:
-                raise ValueError("data.train.max_samples must be a positive integer")
             rows = islice(rows, max_samples)
-        path = Path(cw.get("state_dir", "/work/hotload")) / "nemo-gym" / "dapo.jsonl"
+        path = directory / "dapo.jsonl"
         write_dapo(rows, path)
+    elif preset == "BrowseComp":
+        settings = dict(browsecomp or {})
+        for name in ("judge_model", "judge_base_url"):
+            if not settings.get(name):
+                raise ValueError(f"BrowseComp training requires env.nemo_gym.browsecomp.{name}")
+        gym["coreweave_judge_api_key_file"] = _required_key_file(
+            settings, "judge_api_key_file", "judge API key"
+        )
+        gym["coreweave_search_api_key_file"] = _required_key_file(
+            settings, "search_api_key_file", "search API key"
+        )
+        entrypoint = settings.get("search_entrypoint")
+        if entrypoint:
+            if not Path(entrypoint).is_file():
+                raise ValueError(f"BrowseComp search_entrypoint {entrypoint} does not exist")
+            gym["coreweave_search_entrypoint"] = str(entrypoint)
+        if rows is None:
+            rows = browsecomp_rows()
+        if max_samples is not None:
+            rows = islice(rows, max_samples)
+        path = directory / "browsecomp.jsonl"
+        write_examples((browsecomp_example(row) for row in rows), path)
+        exclude = directory / "exclude_domains.json"
+        domains = settings.get("exclude_domains")
+        domains = BROWSECOMP_EXCLUDED_DOMAINS if domains is None else domains
+        # The harness's exclusion-list format: notices whose domain properties are excluded.
+        exclude.write_text(
+            json.dumps(
+                {"notices": [{"properties": [{"type": "domain", "value": d} for d in domains]}]}
+            )
+        )
+        gym.update(browsecomp_servers(settings, int(cw["max_model_len"]), exclude))
+    if preset in ("DAPOMath17K", "BrowseComp"):
         data["train"] = {"dataset_name": "NemoGymDataset", "data_path": str(path)}
         data["validation"] = None
         data["max_input_seq_length"] = None
@@ -130,15 +375,18 @@ def prepare_config(config: dict[str, Any], *, rows=None) -> dict[str, Any]:
             "system_prompt_file": None,
         }
         gym["config_paths"] = [
-            "responses_api_models/vllm_model/configs/vllm_model_for_training.yaml",
-            "resources_servers/math_with_judge/configs/math_with_judge.yaml",
+            "responses_api_models/vllm_model/configs/vllm_model_for_training.yaml"
         ]
-        # This verifier config uses math-verify, with its LLM judge disabled.
+        if preset == "DAPOMath17K":
+            # This verifier config uses math-verify, with its LLM judge disabled.
+            gym["config_paths"].append(
+                "resources_servers/math_with_judge/configs/math_with_judge.yaml"
+            )
         config["grpo"]["max_val_samples"] = None
     else:
         datasets = train if isinstance(train, list) else [train]
         if any(item.get("dataset_name") != "NemoGymDataset" for item in datasets):
-            raise ValueError("Gym requires DAPOMath17K or an explicit NemoGymDataset")
+            raise ValueError("Gym requires DAPOMath17K, BrowseComp or an explicit NemoGymDataset")
         if not gym.get("config_paths"):
             raise ValueError("Custom Gym data requires env.nemo_gym.config_paths")
     return config
@@ -185,7 +433,32 @@ def actor_config(initial: dict[str, Any], environ=None) -> dict[str, Any]:
         model = initial["policy_model"]["responses_api_models"]["vllm_model"]
         model.update(entrypoint="cwtrain_app.py", tokenizer_path=tokenizer, num_workers=1)
     initial["policy_api_key"] = rollout.api_key or "unused"
+    judge_file = initial.pop("coreweave_judge_api_key_file", None)
+    search_file = initial.pop("coreweave_search_api_key_file", None)
+    search_entrypoint = initial.pop("coreweave_search_entrypoint", None)
+    if judge_file or search_file:
+        if search_entrypoint:
+            import shutil
+
+            import nemo_gym
+
+            harness_dir = nemo_gym.PARENT_DIR / HARNESS_DIR
+            shutil.copyfile(search_entrypoint, harness_dir / Path(search_entrypoint).name)
+        judge = initial[JUDGE_SERVER]["responses_api_models"]["vllm_model"]
+        judge["api_key"] = _read_key(judge_file, "judge API key")
+        harness = initial[BROWSECOMP_SERVER]["resources_servers"]["browsecomp_advanced_harness"]
+        harness["tavily_api_key"] = _read_key(search_file, "search API key")
     return initial
+
+
+def _read_key(path: str | None, what: str) -> str:
+    try:
+        key = Path(path).read_text().strip() if path else ""
+    except OSError:
+        key = ""
+    if not key:
+        raise ValueError(f"Gym actor cannot read a nonempty {what} from {path}")
+    return key
 
 
 def validate_training_output(result: Mapping[str, Any]) -> None:
