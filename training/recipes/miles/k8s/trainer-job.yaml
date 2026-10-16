@@ -3,7 +3,8 @@
 # SPDX-PackageName: inference-cookbook
 #
 # miles GRPO trainer whose rollouts come from a CoreWeave hot-load deployment.
-# Render with: ../../../../k8s/render.sh run.env trainer-job.yaml | kubectl apply -f -
+# Render it from an example's k8s/ directory, as the example README's step table does:
+# "$K/render.sh" run.env "$R/trainer-job.yaml" | kubectl apply -f -
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -19,7 +20,8 @@ spec:
     spec:
       restartPolicy: Never
       # The trainer's own principal: with Workload Identity Federation, its object storage
-      # credentials come from this service account (README, "What you need"). Empty: "default".
+      # credentials come from this service account (the example's README, "What you need").
+      # Empty: "default".
       serviceAccountName: "${TRAINER_SERVICE_ACCOUNT}"
       nodeSelector: {node.kubernetes.io/instance-type: "${INSTANCE_TYPE}"}
       tolerations:

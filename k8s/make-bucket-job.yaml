@@ -10,7 +10,7 @@
 # cluster. It is safe to run again: it keeps the bucket's other statements, and it keeps the
 # trainers and admins that an earlier run added next to this run.env's. It removes no principal.
 #
-# Render from your recipe's k8s/ directory, where your run.env is:
+# Render from your example's k8s/ directory, where your run.env is:
 #   ../../../../k8s/render.sh run.env ../../../../k8s/make-bucket-job.yaml | kubectl apply -f -
 # Requires the kit ConfigMap from make-kit.sh (KIT_NAME), which carries the policy template.
 apiVersion: batch/v1
@@ -50,7 +50,7 @@ spec:
           if trainer_arn == admin_arn:
               print("WARNING: TRAINER_PRINCIPAL_ARN is ADMIN_PRINCIPAL_ARN, so the trainer's key has all of "
                     "the admin's rights: it can delete objects, and replace this policy through your org "
-                    "access policies. Give the trainer its own principal (your recipe's README, "
+                    "access policies. Give the trainer its own principal (your example's README, "
                     "\"What you need\").")
           # Pick the endpoint in the trainer's order: CW_S3_ENDPOINT, else the endpoint in the
           # storage Secret's AWS config, else the primary CoreWeave endpoint.

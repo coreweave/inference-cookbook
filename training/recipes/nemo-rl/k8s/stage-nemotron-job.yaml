@@ -5,7 +5,8 @@
 # Stage the base model in the deployment's bucket. Downloads a Hugging Face checkpoint, removes the
 # MTP heads, and uploads it with cwtrain's snapshot uploader, which validates it as for hot-loads.
 #
-# Render with: ../../../../k8s/render.sh run.env stage-nemotron-job.yaml | kubectl apply -f -
+# Render it from an example's k8s/ directory, as the example README's step table does:
+# "$K/render.sh" run.env "$R/stage-nemotron-job.yaml" | kubectl apply -f -
 # Requires: the kit ConfigMap from make-kit.sh (KIT_NAME: wheel + scripts) and the Secret with the
 # admin's AWS config/credentials files (ADMIN_STORAGE_SECRET, keys "config" and "credentials").
 # The bucket policy does not let the trainer's key write the base model.

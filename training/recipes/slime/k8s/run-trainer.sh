@@ -5,7 +5,8 @@
 #
 # Runs inside the slime trainer Job. Installs cwtrain, then hands over to launch.py, which prepares
 # slime (pinned commit, the recipe's patches), stages the model, converts it, starts Ray and trains
-# with every weight version hot-loaded into the deployment. Settings: see run.env.example.
+# with every weight version hot-loaded into the deployment. Settings: see an example's
+# k8s/run.env.example.
 set -euo pipefail
 # An empty HOTLOAD_TIMEOUT in run.env reaches the Job as an empty value, which cwtrain rejects as a
 # number. Unset it so the hook uses its default.
