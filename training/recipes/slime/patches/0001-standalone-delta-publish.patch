@@ -3,7 +3,7 @@ Base: commit 8ee9c1e1c8871ccd6dc8ec812edfaefa3dd1156b
 Purpose: add --update-weight-standalone-publish, so slime runs its disk-delta writer and the
   post-write hook without SGLang engines of its own; nothing changes without the flag.
 License: Apache-2.0. Upstream code by Zhipu AI; changes by CoreWeave, Inc. (see REUSE.toml).
-Applied by recipes/training/slime/launch.py with `git apply`, which skips this header.
+Applied by training/recipes/slime/launch.py with `git apply`, which skips this header.
 
 diff --git a/slime/backends/megatron_utils/actor.py b/slime/backends/megatron_utils/actor.py
 index 65540e1..01a6fcf 100644

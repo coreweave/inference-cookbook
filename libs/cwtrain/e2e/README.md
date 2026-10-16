@@ -52,7 +52,7 @@ bucket: its `AllowTrainer` statement cannot delete. The workflow pins
 `cwic` to v1.44.0 and verifies the checksum of its release archive.
 
 For `CWTRAIN_E2E_DEPLOYMENT_JSON`, use the `runtime`, `resources`, `autoscaling` and `traffic`
-sections of `recipes/training/miles/deployment.example.json`. Use engine `dynamo-vllm` and an
+sections of `training/recipes/miles/deployment.example.json`. Use engine `dynamo-vllm` and an
 instance type that is available in the zone. The runner sets `runtime.version` from
 `CWTRAIN_E2E_RUNTIME_VERSION`. The ModelExpress (MX) client that performs hot-loads is built into
 the engine, so the `+crwv.N` suffix of the runtime version also selects the MX client version;

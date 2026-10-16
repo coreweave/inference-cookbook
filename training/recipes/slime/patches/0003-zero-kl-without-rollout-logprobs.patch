@@ -3,7 +3,7 @@ Base: commit 8ee9c1e1c8871ccd6dc8ec812edfaefa3dd1156b
 Purpose: when a sample has no rollout log-probs, shape slime's zero KL from the response lengths
   instead of from an empty list.
 License: Apache-2.0. Upstream code by Zhipu AI; changes by CoreWeave, Inc. (see REUSE.toml).
-Applied by recipes/training/slime/launch.py with `git apply`, which skips this header.
+Applied by training/recipes/slime/launch.py with `git apply`, which skips this header.
 
 diff --git a/slime/backends/megatron_utils/loss.py b/slime/backends/megatron_utils/loss.py
 index bbc1b7a..983de21 100644

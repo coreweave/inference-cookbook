@@ -6,9 +6,9 @@
 
 The trainer owns no inference engines. Rollouts come from a CoreWeave Dedicated Inference
 deployment, through its gateway or, for a trainer in the same cluster, its frontend Service. This
-module is the framework-agnostic part of the miles and slime rollout functions in ``recipes/``. It
-handles configuration, one ``/v1/completions`` request per GRPO group with ``n`` choices, retries,
-and filling the framework's ``Sample`` objects.
+module is the framework-agnostic part of the miles and slime rollout functions in
+``training/recipes/``. It handles configuration, one ``/v1/completions`` request per GRPO group
+with ``n`` choices, retries, and filling the framework's ``Sample`` objects.
 
 Configuration (environment of the process that runs the rollout function):
 

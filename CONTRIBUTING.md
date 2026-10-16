@@ -56,12 +56,15 @@ both and runs the same checks on Python 3.12 to 3.14 for every pull request that
 From the repository root, with the environment above active:
 
 ```bash
-pytest recipes/*/*/tests k8s/tests
-for f in k8s/*.sh recipes/*/*/k8s/*.sh; do bash -n "$f"; done
+pytest training/recipes/*/tests evaluation/recipes/*/tests k8s/tests
+for f in k8s/*.sh training/recipes/*/k8s/*.sh; do bash -n "$f"; done
 ```
 
-Recipes are grouped by use case, then named after the framework they integrate. For example,
-`recipes/training/slime/` is RL training with slime. The training recipes share their Kubernetes and
+The top-level directories group the recipes by use case: `training/recipes/` and
+`evaluation/recipes/`. A recipe is named after the framework it integrates. For example,
+`training/recipes/slime/` is RL training with slime. Examples, which run a recipe with a concrete
+model and data, will go in `training/examples/`, and case studies in `training/case-studies/`;
+each directory is created with its first entry. The training recipes share their Kubernetes and
 object storage setup in [`k8s/`](k8s/README.md) at the repository root: `render.sh`, the namespace,
 the storage Secret, the bucket and staging Jobs, and the example bucket and trainer access policies.
 A recipe's own `k8s/` directory holds what is specific to it, such as `run.env.example`,
@@ -69,11 +72,9 @@ A recipe's own `k8s/` directory holds what is specific to it, such as `run.env.e
 relative path, and embeds the flow diagram from `docs/`.
 
 Change a shared file in `k8s/` only. `k8s/tests` runs every training recipe's steps against it, and
-fails when another directory holds a copy. The one copy is
-`recipes/training/miles/bucket-policy.example.json`, which pages outside this repository link; keep
-it identical to `k8s/bucket-policy.example.json`.
+fails when another directory holds a copy.
 
-Put a new training recipe under `recipes/training/<framework>/`, with its own README, and use the
+Put a new training recipe under `training/recipes/<framework>/`, with its own README, and use the
 files in `k8s/` from there. Add it to `RECIPES` in `k8s/tests/test_k8s_steps.py`, and add a row for
 it to the table in the top-level [README](README.md).
 
@@ -88,7 +89,8 @@ configuration, trigger rules, cleanup, and how to run it from a workstation.
 ## Pull requests
 
 - Keep one logical change per pull request. Include tests with code changes. CI runs the checks
-  above on pull requests that touch `libs/cwtrain`, `recipes/`, `k8s/`, `docs/` or `.gitignore`.
+  above on pull requests that touch `libs/cwtrain`, `training/`, `evaluation/`, `k8s/`, `docs/` or
+  `.gitignore`.
 - Commit messages and pull request titles follow
   [Conventional Commits](https://www.conventionalcommits.org/): `feat:`, `fix(launch):`, `ci:`,
   `docs:`, `chore:`.

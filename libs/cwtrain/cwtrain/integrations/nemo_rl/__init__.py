@@ -12,7 +12,7 @@
   extensions (``policy.worker_extension_cls_fqn``) that add the ``export_hf_checkpoint`` RPC the
   synchronizer calls. They import only torch and safetensors so they load in the worker venv.
 
-NeMo-RL needs a small patch to know the backend; see ``recipes/training/nemo-rl/patches``.
+NeMo-RL needs a small patch to know the backend; see ``training/recipes/nemo-rl/patches``.
 
 The integration adds no dependencies: install ``cwtrain`` into NeMo-RL's environment, which
 provides NeMo-RL, torch and safetensors.

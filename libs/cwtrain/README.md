@@ -16,7 +16,7 @@ inference engines. The library covers each part of the loop:
   OpenAI-compatible endpoint, the post-write hook for slime and miles, and the generation backend
   and weight synchronizer for NeMo-RL.
 
-The [NeMo Gym evaluation recipe](https://github.com/coreweave/inference-cookbook/blob/main/recipes/evaluation/nemo-gym/README.md)
+The [NeMo Gym evaluation recipe](https://github.com/coreweave/inference-cookbook/blob/main/evaluation/recipes/nemo-gym/README.md)
 uses the library without hot-load. `InferenceClient` and `cwtrain.infra.lifecycle` create and
 clean up a temporary deployment. `RolloutConfig` holds the endpoint credentials and concurrency.
 
@@ -82,7 +82,7 @@ cwtrain.integrations.preflight`, which does the same with the hooks' environment
 ### Create the deployment
 
 Put the `CreateDeploymentRequest` body in a file, such as the miles recipe's
-[`deployment.example.json`](https://github.com/coreweave/inference-cookbook/blob/main/recipes/training/miles/deployment.example.json)
+[`deployment.example.json`](https://github.com/coreweave/inference-cookbook/blob/main/training/recipes/miles/deployment.example.json)
 with its placeholders filled in, and create the deployment:
 
 ```bash
@@ -352,9 +352,9 @@ the library raises derives from `cwtrain.errors.CWTrainError`.
 
 | Framework | Entry point | Tested with | Recipe |
 | --- | --- | --- | --- |
-| miles | `--custom-update-weight-post-write-path cwtrain.integrations.slime.hook` plus the recipe's rollout function | `radixark/miles:v0.1.1` | [`recipes/training/miles/`](https://github.com/coreweave/inference-cookbook/blob/main/recipes/training/miles/README.md) |
-| slime | same hook, `--update-weight-standalone-publish` (patch in the recipe) plus the recipe's rollout function | slime `8ee9c1e` | [`recipes/training/slime/`](https://github.com/coreweave/inference-cookbook/blob/main/recipes/training/slime/README.md) |
-| NeMo-RL | `policy.generation.backend: coreweave` (`cwtrain.integrations.nemo_rl.CoreWeaveGeneration`), `HotLoadWeightSynchronizer` attached to it, `CoreWeaveDTensorPolicyWorker` as `worker_extension_cls_fqn`; the recipe's patches register the backend and the optional NeMo Gym rollouts | NeMo-RL `v0.7.0` | [`recipes/training/nemo-rl/`](https://github.com/coreweave/inference-cookbook/blob/main/recipes/training/nemo-rl/README.md) |
+| miles | `--custom-update-weight-post-write-path cwtrain.integrations.slime.hook` plus the recipe's rollout function | `radixark/miles:v0.1.1` | [`training/recipes/miles/`](https://github.com/coreweave/inference-cookbook/blob/main/training/recipes/miles/README.md) |
+| slime | same hook, `--update-weight-standalone-publish` (patch in the recipe) plus the recipe's rollout function | slime `8ee9c1e` | [`training/recipes/slime/`](https://github.com/coreweave/inference-cookbook/blob/main/training/recipes/slime/README.md) |
+| NeMo-RL | `policy.generation.backend: coreweave` (`cwtrain.integrations.nemo_rl.CoreWeaveGeneration`), `HotLoadWeightSynchronizer` attached to it, `CoreWeaveDTensorPolicyWorker` as `worker_extension_cls_fqn`; the recipe's patches register the backend and the optional NeMo Gym rollouts | NeMo-RL `v0.7.0` | [`training/recipes/nemo-rl/`](https://github.com/coreweave/inference-cookbook/blob/main/training/recipes/nemo-rl/README.md) |
 
 Install `cwtrain` into the framework's environment. The integrations add no dependencies of their
 own: the NeMo-RL recipe, for example, installs the plain wheel into NeMo-RL's virtual environment,

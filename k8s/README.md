@@ -1,7 +1,7 @@
 # Shared Kubernetes and storage files
 
-The training recipes ([miles](../recipes/training/miles/README.md),
-[slime](../recipes/training/slime/README.md) and [NeMo-RL](../recipes/training/nemo-rl/README.md))
+The training recipes ([miles](../training/recipes/miles/README.md),
+[slime](../training/recipes/slime/README.md) and [NeMo-RL](../training/recipes/nemo-rl/README.md))
 run on Kubernetes with the files in this directory. Each recipe's own `k8s/` directory holds only
 what is specific to it: `run.env.example`, `trainer-job.yaml`, `run-trainer.sh` and `make-kit.sh`,
 and for NeMo-RL a staging Job and script of its own.
@@ -13,7 +13,7 @@ it on Kubernetes" describes. Its commands call these files by their path from th
 the setup block sets as `K`:
 
 ```bash
-cd recipes/training/miles/k8s
+cd training/recipes/miles/k8s
 K=../../../../k8s
 "$K/render.sh" run.env "$K/namespace.yaml" | kubectl apply -f -
 ```
@@ -44,10 +44,7 @@ principal and the object storage credentials.
 
 ## Changing a file
 
-Change these files here; no recipe keeps a copy. The one exception is
-`recipes/training/miles/bucket-policy.example.json`, a copy of `bucket-policy.example.json` that
-pages outside this repository link. Keep the two identical. The copy goes once those pages link the
-file here.
+Change these files here; no recipe keeps a copy.
 
 `pytest k8s/tests` runs every training recipe's steps against these files, with recording stand-ins
 for `kubectl`, `cwtrain` and `aws`. It also fails when another directory holds a copy of one of

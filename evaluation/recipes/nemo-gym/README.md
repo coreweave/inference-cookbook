@@ -14,7 +14,7 @@ The recipe uses the [cwtrain library](../../../libs/cwtrain/README.md):
 
 Gym sends the chat requests, runs the agent and scores the answers.
 
-This recipe is separate from the [NeMo-RL training recipe](../../training/nemo-rl/README.md). It
+This recipe is separate from the [NeMo-RL training recipe](../../../training/recipes/nemo-rl/README.md). It
 collects scored trajectories and does not update weights. The deployment does not need hot-load.
 Keep the deployment's weights fixed during collection, so that the results describe one policy
 version.
@@ -51,7 +51,7 @@ Start in the cookbook root. Use a fresh Gym checkout, so that an existing `env.y
 override the model config of this recipe.
 
 ```bash
-export GYM_RECIPE="$PWD/recipes/evaluation/nemo-gym"
+export GYM_RECIPE="$PWD/evaluation/recipes/nemo-gym"
 export COOKBOOK="$PWD"
 export GYM_DIR="$(mktemp -d)/Gym"
 export GYM_RUN="$(mktemp -d)"
@@ -175,7 +175,7 @@ with the same journal. It does not touch the shared model bucket.
 ## Why this is separate from NeMo-RL training
 
 Gym supplies environments, agent execution and rewards. NeMo-RL supplies the optimizer and the
-training loop. The [NeMo-RL training recipe](../../training/nemo-rl/README.md#nemo-gym-rollouts)
+training loop. The [NeMo-RL training recipe](../../../training/recipes/nemo-rl/README.md#nemo-gym-rollouts)
 connects them with `env.should_use_nemo_gym=true`.
 
 This evaluation does not request training token metadata. So successful chat and reward
