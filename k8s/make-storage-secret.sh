@@ -19,7 +19,7 @@
 #
 # With WORKLOAD_IDENTITY=1 the Secret holds no key, only the region and endpoint. Use this for a
 # trainer that runs as its own Kubernetes service account: the trainer Job exchanges the service
-# account's token for temporary credentials (your recipe's README, "What you need").
+# account's token for temporary credentials (your example's README, "What you need").
 set -euo pipefail
 CTX=${1:?kube context}; NS=${2:?namespace}; NAME=${3:?secret name}
 ENDPOINT=${4:-https://cwobject.com}; REGION=${5:-${AWS_REGION:-${AWS_DEFAULT_REGION:-}}}

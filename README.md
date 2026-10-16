@@ -36,9 +36,9 @@ NeMo Gym evaluation recipe uses it to create and clean up its deployment.
 A recipe wires one trainer or evaluation harness to Dedicated Inference: its launcher, any patches,
 and the settings and modes it supports. It runs the framework's own training or evaluation loop. An
 example runs a recipe with a concrete model, dataset and deployment, and a case study shows a real
-problem solved with Dedicated Inference, with its results. Examples and case studies will go in
-`training/examples/` and `training/case-studies/`. [CONTRIBUTING](CONTRIBUTING.md#what-goes-where)
-says what goes where.
+problem solved with Dedicated Inference, with its results. The [examples](#examples) are in
+`training/examples/`; case studies will go in `training/case-studies/`.
+[CONTRIBUTING](CONTRIBUTING.md#what-goes-where) says what goes where.
 
 | Recipe | Framework | Algorithm | Upstream changes | Tested with |
 | --- | --- | --- | --- | --- |
@@ -48,10 +48,19 @@ says what goes where.
 | [Axolotl SFT](training/recipes/axolotl-sft/README.md) | [Axolotl](https://github.com/axolotl-ai-cloud/axolotl) | SFT, full or LoRA (merged) | None: stock `axolotl train`; cwtrain publishes the result as a full snapshot | Axolotl `v0.20.0` |
 | [NeMo Gym](evaluation/recipes/nemo-gym/README.md) | [NeMo Gym](https://github.com/NVIDIA-NeMo/Gym) | Evaluation with scored rollouts | None: cwtrain provisions and cleans up the gateway and deployment; Gym runs the agent and scores responses | NeMo Gym `v0.6.0` |
 
-The training recipes run on Kubernetes. The RL recipes use DAPO-Math-17k: NeMo-RL with Nemotron
-3.5 Lightning BF16, slime and miles with Qwen3-4B. Axolotl SFT fine-tunes Qwen3-4B on
-NuminaMath-CoT. Each ships its own manifests and an example deployment request. They share the
-rest of the setup, with the example bucket policy, in [`k8s/`](k8s/README.md).
+## Examples
+
+Each example runs one training recipe on Kubernetes, end to end: what you need, the steps, and the
+cleanup. It has its own settings (`run.env.example`) and deployment request. It uses its recipe's
+manifests, and the setup that all examples share in [`k8s/`](k8s/README.md), with the example
+bucket policy.
+
+| Example | Recipe | Model | Data | Deployment |
+| --- | --- | --- | --- | --- |
+| [miles-grpo-qwen3-4b](training/examples/miles-grpo-qwen3-4b/README.md) | miles, GRPO | Qwen3-4B | DAPO-Math-17k | 2 replicas, 1 GPU each |
+| [slime-grpo-qwen3-4b](training/examples/slime-grpo-qwen3-4b/README.md) | slime, GRPO | Qwen3-4B | DAPO-Math-17k | 2 replicas, 1 GPU each |
+| [nemo-rl-grpo-nemotron-3.5-lightning-30b-a3b](training/examples/nemo-rl-grpo-nemotron-3.5-lightning-30b-a3b/README.md) | NeMo-RL, GRPO | Nemotron 3.5 Lightning 30B-A3B BF16 | DAPO-Math-17k | 1 replica, 2 H100 GPUs |
+| [axolotl-sft-qwen3-4b](training/examples/axolotl-sft-qwen3-4b/README.md) | Axolotl SFT, full or LoRA | Qwen3-4B | 2,000 rows of NuminaMath-CoT | 2 replicas, 1 GPU each |
 
 ## Before you start
 
@@ -70,7 +79,7 @@ rest of the setup, with the example bucket policy, in [`k8s/`](k8s/README.md).
   your organization's statement in the policy, or all other access to the bucket stops. The recipes'
   [`bucket-policy.example.json`](k8s/bucket-policy.example.json) has this structure.
 - A gateway, and a deployment created with engine `dynamo-vllm` and a `hotLoad` section naming the
-  bucket and path prefix for snapshots ([example request](training/recipes/miles/deployment.example.json)).
+  bucket and path prefix for snapshots ([example request](training/examples/miles-grpo-qwen3-4b/deployment.example.json)).
   The recipes use `cwtrain deployment create` to create it from such a request. You can also use
   the API, or the **Hot loading** section of the Cloud Console's create drawer. You can enable
   hot-load only when you create a deployment; you cannot add it later. All of the deployment's
@@ -98,9 +107,9 @@ export AWS_REGION=<bucket zone>                          # the bucket's Availabi
 `cwtrain` also reads `CW_API_TOKEN`, the name that the CoreWeave documentation uses, when
 `COREWEAVE_API_TOKEN` is not set.
 
-Create the deployment from a request body like a recipe's
-[`deployment.example.json`](training/recipes/miles/deployment.example.json), with every
-`<placeholder>` filled in:
+Create the deployment from a request body like an example's
+[`deployment.example.json`](training/examples/miles-grpo-qwen3-4b/deployment.example.json), with
+every `<placeholder>` filled in:
 
 ```bash
 cwtrain deployment create --file deployment.json --wait
@@ -191,6 +200,7 @@ training/recipes/miles/       GRPO with miles, with Kubernetes manifests
 training/recipes/slime/       GRPO with slime, with Kubernetes manifests and the patches slime needs
 training/recipes/nemo-rl/     GRPO with NeMo-RL, with Kubernetes manifests and the patches it needs
 training/recipes/axolotl-sft/ SFT with Axolotl, published to the deployment as a full snapshot
+training/examples/            One run of a training recipe each: model, data, deployment and steps
 evaluation/recipes/nemo-gym/  Scored evaluation with NeMo Gym against a temporary deployment
 docs/                         Diagrams
 ```
@@ -199,7 +209,8 @@ docs/                         Diagrams
 
 - Product documentation: [RL Rollouts](https://docs.coreweave.com/products/inference/rl-rollouts)
   and the [Dedicated Inference getting-started guide](https://docs.coreweave.com/products/inference/getting-started).
-- This repository: the [library README](libs/cwtrain/README.md) and each recipe's README.
+- This repository: the [library README](libs/cwtrain/README.md), and the README of each recipe
+  and example.
 - Bugs and questions about this repository: [GitHub issues](https://github.com/coreweave/inference-cookbook/issues).
 - Security issues: see [SECURITY.md](SECURITY.md). Do not open a public issue.
 - Account access, RL Rollouts enablement and GPU quota: CoreWeave support.
