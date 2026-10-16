@@ -51,7 +51,7 @@ def test_the_job_passes_rollout_concurrency_from_run_env(tmp_path: Path) -> None
     rendered = subprocess.run(
         [
             "bash",
-            str(RECIPE / "k8s" / "render.sh"),
+            str(RECIPE.parents[2] / "k8s" / "render.sh"),  # the shared k8s/, at the repository root
             str(env_file),
             str(RECIPE / "k8s" / "trainer-job.yaml"),
         ],

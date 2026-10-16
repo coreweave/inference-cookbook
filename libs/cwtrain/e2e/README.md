@@ -46,8 +46,9 @@ never changes the bucket's policy. So the bucket must already give the inference
 access to `cookbook/*`, where the staged model and the hot-load snapshots go.
 
 The E2E bucket keeps its own policy. Its token is the admin and the trainer at once: it stages the
-model, publishes snapshots and deletes its run prefix afterwards. So do not apply a recipe's
-`bucket-policy.example.json` to this bucket: its `AllowTrainer` statement cannot delete. The workflow pins
+model, publishes snapshots and deletes its run prefix afterwards. So do not apply the recipes'
+bucket policy, [`k8s/bucket-policy.example.json`](../../../k8s/bucket-policy.example.json), to this
+bucket: its `AllowTrainer` statement cannot delete. The workflow pins
 `cwic` to v1.44.0 and verifies the checksum of its release archive.
 
 For `CWTRAIN_E2E_DEPLOYMENT_JSON`, use the `runtime`, `resources`, `autoscaling` and `traffic`

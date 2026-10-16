@@ -56,20 +56,26 @@ both and runs the same checks on Python 3.12 to 3.14 for every pull request that
 From the repository root, with the environment above active:
 
 ```bash
-pytest recipes/*/*/tests
-python .github/scripts/check_shared_recipe_files.py
-for f in recipes/*/*/k8s/*.sh; do bash -n "$f"; done
+pytest recipes/*/*/tests k8s/tests
+for f in k8s/*.sh recipes/*/*/k8s/*.sh; do bash -n "$f"; done
 ```
 
 Recipes are grouped by use case, then named after the framework they integrate. For example,
-`recipes/training/slime/` is RL training with slime. Each training recipe is self-contained, so you
-can copy it and use it on its own. As a result, some setup files exist in each recipe and must stay
-byte-identical: the example bucket policy and deployment, the shared `k8s/` manifests and scripts,
-and the flow diagram. When you change one, copy it to every other training recipe.
-`check_shared_recipe_files.py` lists these files and fails when the copies differ.
+`recipes/training/slime/` is RL training with slime. The training recipes share their Kubernetes and
+object storage setup in [`k8s/`](k8s/README.md) at the repository root: `render.sh`, the namespace,
+the storage Secret, the bucket and staging Jobs, and the example bucket and trainer access policies.
+A recipe's own `k8s/` directory holds what is specific to it, such as `run.env.example`,
+`trainer-job.yaml`, `run-trainer.sh` and `make-kit.sh`. Its README calls the shared files by their
+relative path, and embeds the flow diagram from `docs/`.
 
-Put a new training recipe under `recipes/training/<framework>/`, with its own README and the
-shared files. Add a row for it to the table in the top-level [README](README.md).
+Change a shared file in `k8s/` only. `k8s/tests` runs every training recipe's steps against it, and
+fails when another directory holds a copy. The one copy is
+`recipes/training/miles/bucket-policy.example.json`, which pages outside this repository link; keep
+it identical to `k8s/bucket-policy.example.json`.
+
+Put a new training recipe under `recipes/training/<framework>/`, with its own README, and use the
+files in `k8s/` from there. Add it to `RECIPES` in `k8s/tests/test_k8s_steps.py`, and add a row for
+it to the table in the top-level [README](README.md).
 
 ### Live hot-load test
 
@@ -82,12 +88,12 @@ configuration, trigger rules, cleanup, and how to run it from a workstation.
 ## Pull requests
 
 - Keep one logical change per pull request. Include tests with code changes. CI runs the checks
-  above on pull requests that touch `libs/cwtrain` or `recipes/`.
+  above on pull requests that touch `libs/cwtrain`, `recipes/`, `k8s/`, `docs/` or `.gitignore`.
 - Commit messages and pull request titles follow
   [Conventional Commits](https://www.conventionalcommits.org/): `feat:`, `fix(launch):`, `ci:`,
   `docs:`, `chore:`.
 - Never commit deployment IDs, endpoints, tokens, or keys. For this reason, git ignores filled-in
-  copies of the recipe templates (`k8s/run.env`, `k8s/*.run.json`).
+  copies of the templates (`*.env`, `*.run.json`) in every directory.
 
 ## Releasing `cwtrain`
 

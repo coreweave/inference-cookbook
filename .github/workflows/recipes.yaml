@@ -8,34 +8,35 @@ name: recipes
 on:
   pull_request:
     paths:
+      - "k8s/**"
       - "recipes/**"
+      - "docs/**"
+      - ".gitignore"
       - "libs/cwtrain/cwtrain/integrations/launch.py"
-      - ".github/scripts/check_shared_recipe_files.py"
       - ".github/workflows/recipes.yaml"
   push:
     branches: [main]
     paths:
+      - "k8s/**"
       - "recipes/**"
+      - "docs/**"
+      - ".gitignore"
       - "libs/cwtrain/cwtrain/integrations/launch.py"
 
 permissions:
   contents: read
 
 jobs:
-  shared-files:
-    name: shared recipe files are identical
+  shell:
+    name: shell scripts parse
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # nothing here pushes, so the token is not left in .git/config for later steps
           persist-credentials: false
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.12"
-      - run: python .github/scripts/check_shared_recipe_files.py
       - name: Shell scripts parse
-        run: for f in recipes/*/*/k8s/*.sh; do bash -n "$f"; done
+        run: for f in k8s/*.sh recipes/*/*/k8s/*.sh; do bash -n "$f"; done
 
   launchers:
     name: recipe launchers
@@ -50,5 +51,5 @@ jobs:
           python-version: "3.12"
           activate-environment: true
       - run: uv pip install -e 'libs/cwtrain[dev]'
-      - run: pytest -q recipes/*/*/tests
+      - run: pytest -q recipes/*/*/tests k8s/tests
 

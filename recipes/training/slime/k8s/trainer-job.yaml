@@ -3,7 +3,7 @@
 # SPDX-PackageName: inference-cookbook
 #
 # slime GRPO trainer whose rollouts come from a CoreWeave hot-load deployment.
-# Render with: ./render.sh run.env trainer-job.yaml | kubectl apply -f -
+# Render with: ../../../../k8s/render.sh run.env trainer-job.yaml | kubectl apply -f -
 apiVersion: batch/v1
 kind: Job
 metadata:

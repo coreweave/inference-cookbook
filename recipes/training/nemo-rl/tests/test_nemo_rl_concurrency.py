@@ -20,8 +20,7 @@ from pathlib import Path
 import pytest
 
 RECIPE = Path(__file__).resolve().parents[1]
-# the deployment that the README creates; deployment.example.json is only the copy that
-# check_shared_recipe_files.py requires in every training recipe
+# the deployment that the README creates
 DEPLOYMENT = RECIPE / "deployment.nemotron.example.json"
 
 
@@ -92,7 +91,7 @@ def test_the_job_passes_rollout_concurrency_from_run_env(tmp_path: Path) -> None
     rendered = subprocess.run(
         [
             "bash",
-            str(RECIPE / "k8s" / "render.sh"),
+            str(RECIPE.parents[2] / "k8s" / "render.sh"),  # the shared k8s/, at the repository root
             str(env_file),
             str(RECIPE / "k8s" / "trainer-job.yaml"),
         ],

@@ -40,6 +40,7 @@ CLAUDE.local.md
 wandb/
 logs/
 
-# Filled-in local copies of the recipe templates (contain deployment ids, endpoints, headers)
-recipes/**/k8s/run.env
-recipes/**/k8s/*.run.json
+# Filled-in local copies of the templates (contain deployment ids, endpoints, headers), in any
+# directory: *.env.example -> *.env, *.example.json -> *.run.json
+*.env
+*.run.json
