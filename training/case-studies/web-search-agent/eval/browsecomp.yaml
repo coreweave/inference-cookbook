@@ -1,0 +1,50 @@
+# SPDX-FileCopyrightText: 2026 CoreWeave, Inc.
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-PackageName: inference-cookbook
+
+# BrowseComp on the NeMo-RL recipe's hot-load deployment. Loaded with
+# benchmarks/browsecomp/config.yaml from Gym v0.6.0, whose settings this file overrides. launch.py
+# sets the CWTRAIN_* variables.
+policy_model:
+  responses_api_models:
+    vllm_model:
+      extra_body:
+        # Per turn. The agent's whole trajectory is limited by max_context_tokens below.
+        max_tokens: 4096
+
+# The LLM judge that grades the final answers: GLM-5.2 on W&B Inference by default
+# (--judge-model, --judge-base-url).
+judge_model:
+  responses_api_models:
+    vllm_model:
+      base_url: ${oc.env:CWTRAIN_JUDGE_BASE_URL}
+      model: ${oc.env:CWTRAIN_JUDGE_MODEL}
+      api_key: ${oc.env:CWTRAIN_JUDGE_API_KEY}
+      # GLM reasons before it answers. Without a budget, a long reasoning can end the response with
+      # no answer text, and the harness then fails the task instead of grading it.
+      extra_body:
+        max_tokens: 8192
+
+browsecomp_benchmark_resources_server:
+  resources_servers:
+    browsecomp_advanced_harness:
+      # you_search.py (next to this file, copied in by `launch.py start`) serves the search and browse
+      # tools from You.com. It reads the You.com key from the harness's Tavily key setting.
+      entrypoint: you_search.py
+      search_provider: tavily
+      tavily_api_key: ${oc.env:CWTRAIN_SEARCH_API_KEY}
+      exa_api_key: null
+      exclude_domains_file_path: ${oc.env:CWTRAIN_EXCLUDE_DOMAINS_FILE}
+
+browsecomp_benchmark_agent:
+  responses_api_agents:
+    browsecomp_agent:
+      # Tool-calling turns per task (--max-steps). Gym's 400 lets one task run for an hour.
+      max_steps: ${oc.env:CWTRAIN_MAX_STEPS}
+      # The deployment's max-model-len (--max-context-tokens).
+      max_context_tokens: ${oc.env:CWTRAIN_MAX_CONTEXT_TOKENS}
+      # Reset below max_context_tokens (--context-reset-tokens). Gym's 50,000 would overflow the
+      # hot-load deployment's 32,768-token context before any reset.
+      context_reset_tokens: ${oc.env:CWTRAIN_CONTEXT_RESET_TOKENS}
+      # The CoreWeave gateway serves /v1 only, with no vLLM /tokenize endpoint.
+      save_model_call_using_vllm_tokenize_endpoint: false

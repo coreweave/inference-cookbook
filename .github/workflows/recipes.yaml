@@ -10,7 +10,6 @@ on:
     paths:
       - "k8s/**"
       - "training/**"
-      - "evaluation/**"
       - "docs/**"
       - ".gitignore"
       - "libs/cwtrain/cwtrain/integrations/launch.py"
@@ -21,7 +20,6 @@ on:
     paths:
       - "k8s/**"
       - "training/**"
-      - "evaluation/**"
       - "docs/**"
       - ".gitignore"
       - "libs/cwtrain/cwtrain/integrations/launch.py"
@@ -40,7 +38,7 @@ jobs:
           # nothing here pushes, so the token is not left in .git/config for later steps
           persist-credentials: false
       - name: Shell scripts parse
-        run: for f in k8s/*.sh training/recipes/*/k8s/*.sh; do bash -n "$f"; done
+        run: for f in k8s/*.sh training/recipes/*/k8s/*.sh training/case-studies/*/k8s/*.sh; do bash -n "$f"; done
 
   launchers:
     name: recipe launchers
@@ -56,6 +54,7 @@ jobs:
           activate-environment: true
       # the cleanup-block tests also run the block in zsh, the default shell on macOS
       - run: sudo apt-get install -y -q zsh
-      - run: uv pip install -e 'libs/cwtrain[dev]'
-      - run: pytest -q training/recipes/*/tests training/examples/*/tests evaluation/recipes/*/tests k8s/tests
+      # omegaconf: the tests merge the recipes' and examples' configs as NeMo-RL and Gym do
+      - run: uv pip install -e 'libs/cwtrain[dev]' omegaconf
+      - run: pytest -q training/recipes/*/tests training/examples/*/tests training/case-studies/*/tests k8s/tests
 

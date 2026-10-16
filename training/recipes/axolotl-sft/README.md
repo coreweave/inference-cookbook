@@ -153,8 +153,8 @@ again as its run's chain root, `<rl-run>-v000000`, before the first delta. The R
 cleanup block then removes both runs' snapshots.
 
 To evaluate the fine-tuned model, send requests to the deployment's endpoint for its
-`model_name`. The [NeMo Gym recipe](../../../evaluation/recipes/nemo-gym/README.md) describes how
-to evaluate an existing deployment.
+`model_name`. The [web-search-agent case study's evaluation](../../case-studies/web-search-agent/README.md#evaluation)
+shows how to evaluate an existing deployment with NeMo Gym.
 
 ## Pitfalls
 

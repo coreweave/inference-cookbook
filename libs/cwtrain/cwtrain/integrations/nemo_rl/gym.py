@@ -6,6 +6,15 @@
 
 This module also runs in Gym's separate CPU actor environment. So it does not import Gym,
 NeMo-RL, torch or Ray at module scope. Credentials are resolved inside that actor.
+
+A Gym environment that a recipe or example supplies can ask the actor for three things in
+``env.nemo_gym``, which stay out of the logged config until the actor applies them:
+
+- ``coreweave_secrets``: config field (a dotted path in the Gym config) -> key file. The actor
+  reads each file and sets the field, such as a judge model's ``api_key``.
+- ``coreweave_files``: path in the Gym checkout -> file to copy there, such as a resources
+  server's entrypoint.
+- ``coreweave_env``: environment variables for Gym's servers, which inherit the actor's.
 """
 
 from __future__ import annotations
@@ -97,8 +106,18 @@ def prepare_config(config: dict[str, Any], *, rows=None) -> dict[str, Any]:
         {
             "return_token_id_information": True,
             "chat_template_kwargs": config["policy"]["tokenizer"].get("chat_template_kwargs"),
+            # cwtrain's Gym model caps max_tokens to the room the prompt leaves.
+            "max_model_len": int(cw["max_model_len"]),
         }
     )
+    for field, path in (gym.get("coreweave_secrets") or {}).items():
+        if not path or not Path(path).is_file():
+            raise ValueError(f"Gym secret for {field}: key file {path} does not exist; mount it")
+    for target, source in (gym.get("coreweave_files") or {}).items():
+        if Path(target).is_absolute() or ".." in Path(target).parts:
+            raise ValueError(f"coreweave_files target {target} must be inside the Gym checkout")
+        if not Path(source).is_file():
+            raise ValueError(f"coreweave_files source {source} does not exist")
     data = config["data"]
     train = data["train"]
     if isinstance(train, dict) and train.get("dataset_name") == "DAPOMath17K":
@@ -185,7 +204,42 @@ def actor_config(initial: dict[str, Any], environ=None) -> dict[str, Any]:
         model = initial["policy_model"]["responses_api_models"]["vllm_model"]
         model.update(entrypoint="cwtrain_app.py", tokenizer_path=tokenizer, num_workers=1)
     initial["policy_api_key"] = rollout.api_key or "unused"
+    # Gym's servers inherit the actor's environment.
+    os.environ.update(
+        {str(k): str(v) for k, v in (initial.pop("coreweave_env", None) or {}).items()}
+    )
+    files = initial.pop("coreweave_files", None) or {}
+    if files:
+        import shutil
+
+        import nemo_gym
+
+        for target, source in files.items():
+            shutil.copyfile(source, nemo_gym.PARENT_DIR / target)
+    for field, path in (initial.pop("coreweave_secrets", None) or {}).items():
+        _set_field(initial, field, _read_key(path, field))
     return initial
+
+
+def _read_key(path: str | None, field: str) -> str:
+    try:
+        key = Path(path).read_text().strip() if path else ""
+    except OSError:
+        key = ""
+    if not key:
+        raise ValueError(f"Gym actor cannot read a nonempty key for {field} from {path}")
+    return key
+
+
+def _set_field(config: dict[str, Any], dotted: str, value: Any) -> None:
+    """Set ``config[a][b][c] = value`` for ``dotted == "a.b.c"``; every parent must exist."""
+    *parents, leaf = dotted.split(".")
+    node = config
+    for name in parents:
+        if not isinstance(node.get(name), dict):
+            raise ValueError(f"Gym config has no {dotted}: {name} is missing")
+        node = node[name]
+    node[leaf] = value
 
 
 def validate_training_output(result: Mapping[str, Any]) -> None:

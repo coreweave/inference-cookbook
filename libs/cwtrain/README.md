@@ -16,9 +16,10 @@ inference engines. The library covers each part of the loop:
   OpenAI-compatible endpoint, the post-write hook for slime and miles, and the generation backend
   and weight synchronizer for NeMo-RL.
 
-The [NeMo Gym evaluation recipe](https://github.com/coreweave/inference-cookbook/blob/main/evaluation/recipes/nemo-gym/README.md)
-uses the library without hot-load. `InferenceClient` and `cwtrain.infra.lifecycle` create and
-clean up a temporary deployment. `RolloutConfig` holds the endpoint credentials and concurrency.
+The [web-search-agent case study's evaluation](https://github.com/coreweave/inference-cookbook/blob/main/training/case-studies/web-search-agent/README.md#evaluation)
+runs NeMo Gym against its hot-load deployment and creates no deployment of its own.
+`RolloutConfig` holds the endpoint credentials and concurrency, and
+`cwtrain.integrations.gym_tool_calls` turns the model's tool-call text into Gym tool calls.
 
 ## Install
 

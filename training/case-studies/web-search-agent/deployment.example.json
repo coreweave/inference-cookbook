@@ -1,0 +1,38 @@
+{
+  "runtime": {
+    "engine": "dynamo-vllm",
+    "version": "0.30.0+crwv.5",
+    "engineConfig": {
+      "max-model-len": "32768",
+      "gpu-memory-utilization": "0.85",
+      "max-num-seqs": "8",
+      "reasoning-parser": "nemotron_v3"
+    }
+  },
+  "resources": {
+    "instanceType": "<H100 80GB instance type available in the gateway zone>",
+    "gpuCount": 2
+  },
+  "model": {
+    "name": "nemotron-lightning-hotload",
+    "bucket": "<existing bucket readable by the inference service>",
+    "path": "cookbook/<unique-deployment-id>/models/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16"
+  },
+  "autoscaling": {
+    "min": 4,
+    "max": 4,
+    "concurrency": 8
+  },
+  "traffic": {
+    "weight": 100
+  },
+  "name": "nemotron-lightning-hotload",
+  "gatewayIds": [
+    "<gateway uuid in one zone>"
+  ],
+  "hotLoad": {
+    "bucket": "<bucket>",
+    "pathPrefix": "hotload",
+    "transitionMode": "TRANSITION_MODE_ASYNC"
+  }
+}

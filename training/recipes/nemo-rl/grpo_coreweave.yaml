@@ -53,6 +53,9 @@ policy:
     # puts cwtrain's worker extension on the worker venv's path (launch.py unpacks it there)
     env_vars:
       PYTHONPATH: "/work/py"
+      # Lets the training step use memory that fragmentation otherwise strands, which long
+      # sequences need.
+      PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
   hf_config_overrides:
     router_aux_loss_coef: 0.0
   sequence_packing:

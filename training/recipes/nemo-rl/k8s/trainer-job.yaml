@@ -36,6 +36,11 @@ spec:
         - {name: BASE_S3_URI, value: "${BASE_S3_URI}"}
         - {name: NUM_STEPS, value: "${NUM_STEPS}"}
         - {name: ACTOR_GPUS, value: "${ACTOR_GPUS}"}
+        # the config in the kit, and a command that prepares the data before training (empty: none)
+        - {name: GRPO_CONFIG, value: "${GRPO_CONFIG}"}
+        - name: PREPARE_DATA
+          value: |-
+            ${EXTRA_PREPARE_DATA}
         # extra hydra-style overrides for run_grpo.py, e.g. grpo.num_prompts_per_step=16
         - name: EXTRA_OVERRIDES
           value: |-
@@ -78,6 +83,7 @@ spec:
         - {name: aws, mountPath: /aws, readOnly: true}
         - {name: caios-token, mountPath: /var/run/secrets/caios, readOnly: true}
         - {name: inference-key, mountPath: /secrets/inference, readOnly: true}
+        - {name: gym-secret, mountPath: /secrets/gym, readOnly: true}
         - {name: work, mountPath: /work}
         - {name: dshm, mountPath: /dev/shm}
         resources:
@@ -94,6 +100,10 @@ spec:
           - serviceAccountToken: {audience: "https://coreweave.com/iam", expirationSeconds: 3600, path: token}
       - name: inference-key
         secret: {secretName: ${INFERENCE_KEY_SECRET}}
+      # Keys that a Gym environment's config reads with coreweave_secrets, such as a judge's.
+      # Optional, so that a run without one needs no Secret.
+      - name: gym-secret
+        secret: {secretName: ${GYM_SECRET}, optional: true}
       - name: work
         emptyDir: {sizeLimit: 600Gi}
       - name: dshm

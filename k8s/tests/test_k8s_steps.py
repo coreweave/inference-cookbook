@@ -53,15 +53,18 @@ class Recipe:
 
 @dataclass(frozen=True)
 class Example:
-    name: str  # its directory under training/examples
+    name: str  # its directory under training/<kind>
     recipe: Recipe  # the recipe that it runs
     run_id: str  # how RUN_ID in run.env.example starts
     model_prefix: str  # MODEL_PREFIX and MODEL_SLUG in a filled-in run.env.example
     model_slug: str
+    # Secrets that its run.env.example names beyond the shared ones, which its cleanup also deletes
+    extra_secrets: tuple[str, ...] = ()
+    kind: str = "examples"  # or "case-studies", which run a recipe the same way
 
     @property
     def path(self) -> Path:
-        return ROOT / "training" / "examples" / self.name
+        return ROOT / "training" / self.kind / self.name
 
     @property
     def k8s(self) -> Path:
@@ -101,6 +104,15 @@ EXAMPLES = [
         run_id="nemotron-lightning-grpo",
         model_prefix="cookbook/filled/models",  # cookbook/${DEPLOYMENT_RUN}/models
         model_slug="NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16",
+    ),
+    Example(
+        name="web-search-agent",
+        recipe=NEMO_RL,
+        run_id="nemotron-lightning-grpo",
+        model_prefix="cookbook/filled/models",  # cookbook/${DEPLOYMENT_RUN}/models
+        model_slug="NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16",
+        extra_secrets=("gym-api-keys",),  # the search agent's judge and You.com keys
+        kind="case-studies",
     ),
     Example(
         name="axolotl-sft-qwen3-4b",
@@ -452,7 +464,7 @@ def test_the_recipe_readme_links_its_examples(recipe: Recipe) -> None:
     text = (recipe.path / "README.md").read_text()
     for example in EXAMPLES:
         if example.recipe == recipe:
-            assert f"](../../examples/{example.name}/README.md)" in text, example.name
+            assert f"](../../{example.kind}/{example.name}/README.md)" in text, example.name
 
 
 # two runs of this deployment, as `cwtrain hotload list` prints them (newest first)
@@ -482,7 +494,7 @@ def run_cleanup(
     hot_loads the identities that the deployment hot-loaded, and interpreter the shell that runs the
     block. The fake aws applies deletions to object_keys using S3 prefix and filter semantics, and
     records each command's argv separately so whitespace and wildcard quoting can be checked."""
-    k8s = tmp_path / "training" / "examples" / example.name / "k8s"
+    k8s = tmp_path / "training" / example.kind / example.name / "k8s"
     k8s.mkdir(parents=True)
     if git_repo:
         subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
@@ -617,6 +629,7 @@ def test_the_cleanup_block_deletes_the_deployment_recipe_objects_and_exact_snaps
     ]
     delete = "kubectl -n ns delete"
     secrets = "store admin ikey token" if example.recipe.inference_key else "store admin token"
+    secrets = " ".join([secrets, *example.extra_secrets])
     assert [line for line in lines if line.startswith("kubectl")] == [
         f"{delete} job cwtrain-job cwtrain-stage-job cwtrain-make-bucket --ignore-not-found",
         f"{delete} secret {secrets} --ignore-not-found",
@@ -1144,7 +1157,7 @@ def test_the_cleanup_block_explains_a_deployment_without_a_prefix(
 
 @per_example
 def test_the_setup_block_keeps_a_filled_in_run_env(tmp_path: Path, example: Example) -> None:
-    k8s = tmp_path / "training" / "examples" / example.name / "k8s"
+    k8s = tmp_path / "training" / example.kind / example.name / "k8s"
     k8s.mkdir(parents=True)
     shutil.copy(example.k8s / "run.env.example", k8s / "run.env.example")
     bin_dir = tmp_path / "bin"
@@ -1176,7 +1189,7 @@ def test_the_setup_block_sets_k_and_r_when_pasted_into_zsh(
 ) -> None:
     # without interactivecomments, a stock zsh runs "# the shared files" as a command and leaves K
     # unset, and a quote in a comment swallows the lines after it
-    k8s = tmp_path / "training" / "examples" / example.name / "k8s"
+    k8s = tmp_path / "training" / example.kind / example.name / "k8s"
     k8s.mkdir(parents=True)
     shutil.copy(example.k8s / "run.env.example", k8s / "run.env.example")
     bin_dir = tmp_path / "bin"
@@ -1224,9 +1237,13 @@ def test_every_training_recipe_is_in_recipes() -> None:
 
 
 def test_every_example_is_in_examples() -> None:
-    # an example that is not in EXAMPLES gets none of the tests above
-    found = {path.parent.name for path in (ROOT / "training" / "examples").glob("*/README.md")}
-    assert found == {example.name for example in EXAMPLES}, "add the example to EXAMPLES"
+    # an example or case study that is not in EXAMPLES gets none of the tests above
+    found = {
+        (path.parent.parent.name, path.parent.name)
+        for kind in ("examples", "case-studies")
+        for path in (ROOT / "training" / kind).glob("*/README.md")
+    }
+    assert found == {(example.kind, example.name) for example in EXAMPLES}, "add it to EXAMPLES"
 
 
 def test_every_training_recipe_has_an_example() -> None:

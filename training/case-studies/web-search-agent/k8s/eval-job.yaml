@@ -1,0 +1,66 @@
+# SPDX-FileCopyrightText: 2026 CoreWeave, Inc.
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-PackageName: inference-cookbook
+#
+# Gym evaluation on a CPU node, in the NeMo-RL trainer's namespace, against its hot-load deployment.
+# The pod runs the Gym servers (agent, tools, judge client) and the collector, then prints the scores.
+# Render with: ../../../../k8s/render.sh eval.env eval-job.yaml | kubectl apply -f -
+# Requires: the kit ConfigMap from make-eval-kit.sh (EVAL_KIT_NAME) and the case study's inference key
+# Secret and GYM_SECRET (judge and You.com keys), from its run.env.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: cwtrain-gym-${EVAL_NAME}
+  namespace: ${NAMESPACE}
+  labels: {app.kubernetes.io/part-of: cwtrain-recipe, app.kubernetes.io/component: gym-eval}
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels: {app.kubernetes.io/part-of: cwtrain-recipe, app.kubernetes.io/component: gym-eval}
+    spec:
+      restartPolicy: Never
+      # CPU only: keep the pod off GPU nodes.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - {key: nvidia.com/gpu.present, operator: DoesNotExist}
+      containers:
+      - name: gym
+        image: ${EVAL_IMAGE}
+        command: ["bash", "/opt/cwtrain-gym/run-eval.sh"]
+        env:
+        - {name: BENCHMARK, value: "${BENCHMARK}"}
+        - {name: LIMIT, value: "${LIMIT}"}
+        - {name: GYM_REF, value: "${GYM_REF}"}
+        - {name: MAX_CONTEXT_TOKENS, value: "${MAX_CONTEXT_TOKENS}"}
+        - {name: MAX_STEPS, value: "${MAX_STEPS}"}
+        # the target model: the hot-load deployment's endpoint and served model name
+        - {name: CWTRAIN_ROLLOUT_BASE_URL, value: "${ROLLOUT_BASE_URL}"}
+        - {name: CWTRAIN_ROLLOUT_MODEL, value: "${ROLLOUT_MODEL}"}
+        - {name: CWTRAIN_ROLLOUT_API_KEY_FILE, value: /secrets/inference/api_key}
+        - {name: CWTRAIN_ROLLOUT_CONCURRENCY, value: "${EVAL_CONCURRENCY}"}
+        # the judge; its key and the You.com key come from the mounted GYM_SECRET
+        - {name: JUDGE_BASE_URL, value: "${JUDGE_BASE_URL}"}
+        - {name: JUDGE_MODEL, value: "${JUDGE_MODEL}"}
+        - {name: PYTHONUNBUFFERED, value: "1"}
+        volumeMounts:
+        - {name: kit, mountPath: /opt/cwtrain-gym, readOnly: true}
+        - {name: inference-key, mountPath: /secrets/inference, readOnly: true}
+        - {name: gym-secret, mountPath: /secrets/gym, readOnly: true}
+        - {name: work, mountPath: /work}
+        resources:
+          requests: {cpu: "8", memory: 32Gi}
+          limits: {cpu: "16", memory: 64Gi}
+      volumes:
+      - name: kit
+        configMap: {name: ${EVAL_KIT_NAME}}
+      - name: inference-key
+        secret: {secretName: ${INFERENCE_KEY_SECRET}}
+      - name: gym-secret
+        secret: {secretName: ${GYM_SECRET}}
+      - name: work
+        emptyDir: {sizeLimit: 40Gi}

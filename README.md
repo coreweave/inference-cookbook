@@ -13,7 +13,7 @@ no inference engines of its own.
 `cwtrain` does the CoreWeave side of a run. It creates the deployment that the run samples from,
 and deletes it at the end. It publishes the trainer's weights to the deployment by checkpoint
 hot-load and samples rollouts from its endpoint. It integrates with miles, slime and NeMo-RL. The
-NeMo Gym evaluation recipe uses it to create and clean up its deployment.
+web-search-agent case study also uses it to evaluate its hot-load deployment with NeMo Gym.
 
 ![Flow of one training step: cwtrain uploads the new weights, requests a hot-load and waits until every replica serves them; the next rollouts come from the deployment's endpoint.](docs/hotload-flow.drawio.svg)
 
@@ -33,20 +33,19 @@ NeMo Gym evaluation recipe uses it to create and clean up its deployment.
 
 ## Recipes
 
-A recipe wires one trainer or evaluation harness to Dedicated Inference: its launcher, any patches,
-and the settings and modes it supports. It runs the framework's own training or evaluation loop. An
+A recipe wires one trainer to Dedicated Inference: its launcher, any patches,
+and the settings and modes it supports. It runs the framework's own training loop. An
 example runs a recipe with a concrete model, dataset and deployment, and a case study shows a real
 problem solved with Dedicated Inference, with its results. The [examples](#examples) are in
-`training/examples/`; case studies will go in `training/case-studies/`.
+`training/examples/`, and the [case studies](#case-studies) in `training/case-studies/`.
 [CONTRIBUTING](CONTRIBUTING.md#what-goes-where) says what goes where.
 
 | Recipe | Framework | Algorithm | Upstream changes | Tested with |
 | --- | --- | --- | --- | --- |
 | [miles](training/recipes/miles/README.md) | [miles](https://github.com/radixark/miles) | GRPO, synchronous or one step ahead | None: miles calls the `cwtrain` hook after each weight sync | `radixark/miles:v0.1.1` |
 | [slime](training/recipes/slime/README.md) | [slime](https://github.com/THUDM/slime) | GRPO | Three small patches, applied by the launcher, so slime publishes weights without inference engines of its own | slime `8ee9c1e` |
-| [NeMo-RL](training/recipes/nemo-rl/README.md) | [NeMo-RL](https://github.com/NVIDIA-NeMo/RL) | GRPO | Patches, applied by the launcher, that register the `coreweave` backend and optional Gym rollouts | NeMo-RL `v0.7.0` |
+| [NeMo-RL](training/recipes/nemo-rl/README.md) | [NeMo-RL](https://github.com/NVIDIA-NeMo/RL) | GRPO, with NeMo-RL's math environment or a Gym environment that an example brings | Patches, applied by the launcher, that register the `coreweave` backend and optional Gym rollouts | NeMo-RL `v0.7.0` |
 | [Axolotl SFT](training/recipes/axolotl-sft/README.md) | [Axolotl](https://github.com/axolotl-ai-cloud/axolotl) | SFT, full or LoRA (merged) | None: stock `axolotl train`; cwtrain publishes the result as a full snapshot | Axolotl `v0.20.0` |
-| [NeMo Gym](evaluation/recipes/nemo-gym/README.md) | [NeMo Gym](https://github.com/NVIDIA-NeMo/Gym) | Evaluation with scored rollouts | None: cwtrain provisions and cleans up the gateway and deployment; Gym runs the agent and scores responses | NeMo Gym `v0.6.0` |
 
 ## Examples
 
@@ -61,6 +60,16 @@ bucket policy.
 | [slime-grpo-qwen3-4b](training/examples/slime-grpo-qwen3-4b/README.md) | slime, GRPO | Qwen3-4B | DAPO-Math-17k | 2 replicas, 1 GPU each |
 | [nemo-rl-grpo-nemotron-3.5-lightning-30b-a3b](training/examples/nemo-rl-grpo-nemotron-3.5-lightning-30b-a3b/README.md) | NeMo-RL, GRPO | Nemotron 3.5 Lightning 30B-A3B BF16 | DAPO-Math-17k | 1 replica, 2 H100 GPUs |
 | [axolotl-sft-qwen3-4b](training/examples/axolotl-sft-qwen3-4b/README.md) | Axolotl SFT, full or LoRA | Qwen3-4B | 2,000 rows of NuminaMath-CoT | 2 replicas, 1 GPU each |
+
+## Case studies
+
+A case study solves a real problem with Dedicated Inference: the problem, where the data comes
+from, the setup, the results, the cost and the limitations. It runs a recipe the way an example
+does.
+
+| Case study | Problem | Recipes | Model | Deployment |
+| --- | --- | --- | --- | --- |
+| [web-search-agent](training/case-studies/web-search-agent/README.md) | Train a model to answer questions by searching the web (You.com), scored by an LLM judge | NeMo-RL GRPO with NeMo Gym; NeMo Gym evaluation on BrowseComp | Nemotron 3.5 Lightning 30B-A3B BF16 | 4 replicas, 2 H100 GPUs each |
 
 ## Before you start
 
@@ -201,7 +210,7 @@ training/recipes/slime/       GRPO with slime, with Kubernetes manifests and the
 training/recipes/nemo-rl/     GRPO with NeMo-RL, with Kubernetes manifests and the patches it needs
 training/recipes/axolotl-sft/ SFT with Axolotl, published to the deployment as a full snapshot
 training/examples/            One run of a training recipe each: model, data, deployment and steps
-evaluation/recipes/nemo-gym/  Scored evaluation with NeMo Gym against a temporary deployment
+training/case-studies/        Real problems solved with Dedicated Inference, with their evaluation and results
 docs/                         Diagrams
 ```
 

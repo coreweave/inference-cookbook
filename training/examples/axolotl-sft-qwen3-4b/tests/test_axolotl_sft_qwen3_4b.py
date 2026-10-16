@@ -29,7 +29,7 @@ def test_the_example_deployment_is_the_staged_model_under_a_name_of_its_own() ->
     ours = json.loads((EXAMPLE / "deployment.example.json").read_text())
     others = [
         json.loads(path.read_text())
-        for units in ("training/examples/*", "evaluation/recipes/*")
+        for units in ("training/examples/*", "training/case-studies/*")
         for path in ROOT.glob(f"{units}/deployment*.example.json")
         if path.parent != EXAMPLE
     ]

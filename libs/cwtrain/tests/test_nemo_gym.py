@@ -224,3 +224,70 @@ def test_actor_installs_exact_token_transport(tmp_path, monkeypatch):
     assert model["entrypoint"] == "cwtrain_app.py"
     assert model["num_workers"] == 1
     assert "cwtrain.integrations.nemo_rl.gym_model" in (server / "cwtrain_app.py").read_text()
+
+
+@pytest.fixture
+def custom(config, tmp_path):
+    """A custom Gym environment that asks the actor for a key, a file and an env variable."""
+    key, entry = tmp_path / "judge_key", tmp_path / "search_app.py"
+    key.write_text("judge-key\n")
+    entry.write_text("# a search backend\n")
+    config["data"]["train"] = {"dataset_name": "NemoGymDataset", "data_path": "/data/tasks.jsonl"}
+    config["env"]["nemo_gym"] = {
+        "config_paths": ["responses_api_models/vllm_model/configs/vllm_model_for_training.yaml"],
+        "judge_model": {"responses_api_models": {"vllm_model": {"api_key": "unused"}}},
+        "coreweave_secrets": {"judge_model.responses_api_models.vllm_model.api_key": str(key)},
+        "coreweave_files": {"resources_servers/search/search_app.py": str(entry)},
+        "coreweave_env": {"SEARCH_MAX_CHARS": 2000},
+    }
+    return config
+
+
+def test_the_policy_model_knows_the_context_limit(custom):
+    gym = prepare_config(custom)["env"]["nemo_gym"]
+    assert gym["policy_model"]["responses_api_models"]["vllm_model"]["max_model_len"] == 3072
+
+
+def test_actor_applies_secrets_files_and_env_after_transport(custom, tmp_path, monkeypatch):
+    import os
+    import sys
+    from types import SimpleNamespace
+
+    monkeypatch.delenv("SEARCH_MAX_CHARS", raising=False)
+    gym = prepare_config(custom)["env"]["nemo_gym"]
+    assert "judge-key" not in json.dumps(gym)  # only the key file's path travels
+    root = tmp_path / "gym"
+    (root / "resources_servers" / "search").mkdir(parents=True)
+    monkeypatch.setitem(sys.modules, "nemo_gym", SimpleNamespace(PARENT_DIR=root))
+    gym.pop("coreweave_tokenizer")
+    initial = dict(gym, policy_base_url=["https://example.test/v1"], policy_model_name="m")
+    result = actor_config(initial, {})
+    assert result["judge_model"]["responses_api_models"]["vllm_model"]["api_key"] == "judge-key"
+    copied = root / "resources_servers" / "search" / "search_app.py"
+    assert copied.read_text() == "# a search backend\n"
+    assert os.environ["SEARCH_MAX_CHARS"] == "2000"
+    assert not any(key.startswith("coreweave_") for key in result)
+
+
+@pytest.mark.parametrize(
+    ("directive", "value", "error"),
+    [
+        ("coreweave_secrets", {"judge.api_key": "/absent/key"}, "does not exist"),
+        ("coreweave_files", {"../outside.py": __file__}, "inside the Gym checkout"),
+        ("coreweave_files", {"resources_servers/x/app.py": "/absent.py"}, "does not exist"),
+    ],
+)
+def test_rejects_unusable_directives(custom, directive, value, error):
+    custom["env"]["nemo_gym"][directive] = value
+    with pytest.raises(ValueError, match=error):
+        prepare_config(custom)
+
+
+def test_actor_rejects_a_secret_for_a_missing_field(custom, tmp_path):
+    custom["env"]["nemo_gym"].pop("judge_model")
+    gym = prepare_config(custom)["env"]["nemo_gym"]
+    gym.pop("coreweave_tokenizer")
+    gym.pop("coreweave_files")
+    initial = dict(gym, policy_base_url=["https://example.test/v1"], policy_model_name="m")
+    with pytest.raises(ValueError, match="judge_model is missing"):
+        actor_config(initial, {})
