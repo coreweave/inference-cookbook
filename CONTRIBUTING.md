@@ -30,10 +30,11 @@ To place a change:
 The first examples run their recipes' defaults: the dataset that the miles and slime launchers
 download, the Axolotl config, and the NeMo-RL recipe's Nemotron staging Job. An example that needs
 other data or another config adds a setting for it to the recipe, tested there, and sets it in its
-`run.env.example`. The NeMo-RL example does this: it brings its own config, data script and keys
-through the recipe's `KIT_EXTRA_FILES`, `GRPO_CONFIG`, `EXTRA_PREPARE_DATA` and `GYM_SECRET`. `training/case-studies/` does not exist yet; the pull request that
-adds the first case study creates it. `cwtrain.integrations.nemo_rl.gym` still holds the
-DAPO-Math-17k preset for NeMo-RL's Gym rollouts.
+`run.env.example`. The [web-search-agent](training/case-studies/web-search-agent/README.md) case
+study does this: it brings its own config, data script and keys through the NeMo-RL recipe's
+`KIT_EXTRA_FILES`, `GRPO_CONFIG`, `EXTRA_PREPARE_DATA` and `GYM_SECRET`.
+`cwtrain.integrations.nemo_rl.gym` still holds the DAPO-Math-17k preset for NeMo-RL's Gym
+rollouts.
 
 ## Contributor License Agreement
 
@@ -87,7 +88,7 @@ both and runs the same checks on Python 3.12 to 3.14 for every pull request that
 From the repository root, with the environment above active:
 
 ```bash
-pytest training/recipes/*/tests training/examples/*/tests evaluation/recipes/*/tests k8s/tests
+pytest training/recipes/*/tests training/examples/*/tests training/case-studies/*/tests evaluation/recipes/*/tests k8s/tests
 for f in k8s/*.sh training/recipes/*/k8s/*.sh; do bash -n "$f"; done
 ```
 

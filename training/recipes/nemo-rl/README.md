@@ -24,12 +24,14 @@ frameworks expose a post-write hook. NeMo-RL has two seams instead, and this rec
 
 ## Running it
 
-Each example runs this recipe end to end on Kubernetes, with what you need, the steps and the
-cleanup:
+Each example and case study runs this recipe end to end on Kubernetes, with what you need, the
+steps and the cleanup:
 
 - [`nemo-rl-grpo-nemotron-3.5-lightning-30b-a3b`](../../examples/nemo-rl-grpo-nemotron-3.5-lightning-30b-a3b/README.md):
-  GRPO on Nemotron 3.5 Lightning as a Gym search agent on SimpleQA, with You.com search and an
-  LLM judge.
+  GRPO on Nemotron 3.5 Lightning with the DAPO-Math-17k prompts.
+- [`web-search-agent`](../../case-studies/web-search-agent/README.md) (case study): Nemotron 3.5
+  Lightning trained as a Gym search agent on SimpleQA, with You.com search and an LLM judge, and
+  evaluated on BrowseComp.
 
 An example's `run.env` holds the settings that this README names. This recipe's `k8s/` directory
 holds the trainer Job (`trainer-job.yaml`), the script that the Job runs (`run-trainer.sh`), the Job
@@ -289,7 +291,7 @@ the optimizer state exists, after the first step. The config sets
 `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` for the policy workers, so fragmentation leaves
 no memory unusable.
 
-The [example](../../examples/nemo-rl-grpo-nemotron-3.5-lightning-30b-a3b/README.md#training-environment)
+The [web-search-agent case study](../../case-studies/web-search-agent/README.md#training-environment)
 trains Gym's BrowseComp agent this way, on SimpleQA, with You.com search and an LLM judge.
 
 ### Exact tokens across turns

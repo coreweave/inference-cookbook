@@ -59,7 +59,7 @@ Three inputs change what runs. Set them in `eval.env` (the Job's settings) or pa
 `RolloutConfig` for the endpoint, model, key file and collection concurrency. For BrowseComp, it
 copies this recipe's [`you_search.py`](you_search.py) into Gym's BrowseComp harness. It serves the
 harness's `search` and `browse` tools from the You.com Search and Contents APIs, in place of
-Tavily. The NeMo-RL example bundles the same file in its kit for search-agent training.
+Tavily. The [web-search-agent](../../../training/case-studies/web-search-agent/README.md) case study bundles the same file in its kit for search-agent training.
 `YOU_SEARCH_MAX_CHARS`, when set, caps each result's page text and snippets to that many
 characters; the evaluation keeps them whole.
 
@@ -91,7 +91,7 @@ BrowseComp tasks, all graded.
   gateway, the Gym repository and the judge and search APIs. `kubectl`, `envsubst` and `uv` on your
   machine.
 - The NeMo-RL recipe's inference key Secret (`INFERENCE_KEY_SECRET`).
-- For BrowseComp: the NeMo-RL example's judge and You.com key Secret (`GYM_SECRET`), with a
+- For BrowseComp: the web-search-agent case study's judge and You.com key Secret (`GYM_SECRET`), with a
   [W&B API key](https://wandb.ai/authorize) for W&B Inference under `judge_api_key` and a
   [You.com API](https://you.com/platform) key under `search_api_key`. A judge on another endpoint
   takes its key the same way.

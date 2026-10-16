@@ -37,7 +37,7 @@ A recipe wires one trainer or evaluation harness to Dedicated Inference: its lau
 and the settings and modes it supports. It runs the framework's own training or evaluation loop. An
 example runs a recipe with a concrete model, dataset and deployment, and a case study shows a real
 problem solved with Dedicated Inference, with its results. The [examples](#examples) are in
-`training/examples/`; case studies will go in `training/case-studies/`.
+`training/examples/`, and the [case studies](#case-studies) in `training/case-studies/`.
 [CONTRIBUTING](CONTRIBUTING.md#what-goes-where) says what goes where.
 
 | Recipe | Framework | Algorithm | Upstream changes | Tested with |
@@ -59,8 +59,18 @@ bucket policy.
 | --- | --- | --- | --- | --- |
 | [miles-grpo-qwen3-4b](training/examples/miles-grpo-qwen3-4b/README.md) | miles, GRPO | Qwen3-4B | DAPO-Math-17k | 2 replicas, 1 GPU each |
 | [slime-grpo-qwen3-4b](training/examples/slime-grpo-qwen3-4b/README.md) | slime, GRPO | Qwen3-4B | DAPO-Math-17k | 2 replicas, 1 GPU each |
-| [nemo-rl-grpo-nemotron-3.5-lightning-30b-a3b](training/examples/nemo-rl-grpo-nemotron-3.5-lightning-30b-a3b/README.md) | NeMo-RL, GRPO | Nemotron 3.5 Lightning 30B-A3B BF16 | SimpleQA, as a Gym search agent | 4 replicas, 2 H100 GPUs each |
+| [nemo-rl-grpo-nemotron-3.5-lightning-30b-a3b](training/examples/nemo-rl-grpo-nemotron-3.5-lightning-30b-a3b/README.md) | NeMo-RL, GRPO | Nemotron 3.5 Lightning 30B-A3B BF16 | DAPO-Math-17k | 1 replica, 2 H100 GPUs |
 | [axolotl-sft-qwen3-4b](training/examples/axolotl-sft-qwen3-4b/README.md) | Axolotl SFT, full or LoRA | Qwen3-4B | 2,000 rows of NuminaMath-CoT | 2 replicas, 1 GPU each |
+
+## Case studies
+
+A case study solves a real problem with Dedicated Inference: the problem, where the data comes
+from, the setup, the results, the cost and the limitations. It runs a recipe the way an example
+does.
+
+| Case study | Problem | Recipes | Model | Deployment |
+| --- | --- | --- | --- | --- |
+| [web-search-agent](training/case-studies/web-search-agent/README.md) | Train a model to answer questions by searching the web (You.com), scored by an LLM judge | NeMo-RL GRPO with NeMo Gym; NeMo Gym evaluation on BrowseComp | Nemotron 3.5 Lightning 30B-A3B BF16 | 4 replicas, 2 H100 GPUs each |
 
 ## Before you start
 
