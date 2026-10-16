@@ -51,55 +51,11 @@ def test_grpo_command_applies_settings_and_overrides(tmp_path: Path) -> None:
         "policy.model_name=/w/models/Qwen3-4B",
         "grpo.max_num_steps=30",
         "cluster.gpus_per_node=8",
-        # SimpleQA is the default training environment
-        "env.should_use_nemo_gym=true",
-        "data.train.dataset_name=SimpleQA",
-        "policy.max_total_sequence_length=16384",
         'policy.generation.stop_strings=["</answer>"]',  # quotes reach Hydra
         "grpo.val_period=0",
     ]
     with pytest.raises(LaunchError, match="MODEL_SLUG is required"):
         launch.NemoJob.from_env({})
-
-
-@pytest.mark.parametrize(
-    ("env", "expected"),
-    [
-        ({"TRAIN_ENV": "dapo"}, ["env.should_use_nemo_gym=true", "policy.max_total_sequence_length=3072"]),
-        ({"TRAIN_ENV": "MATH"}, ["policy.max_total_sequence_length=3072"]),
-        (
-            {"TRAIN_ENV": "browsecomp", "MAX_SEQUENCE_LENGTH": "65536"},
-            ["env.should_use_nemo_gym=true", "data.train.dataset_name=BrowseComp",
-             "policy.max_total_sequence_length=65536"],
-        ),
-    ],
-)  # fmt: skip
-def test_train_env_selects_the_environment_and_its_length(env, expected) -> None:
-    job = launch.NemoJob.from_env({"MODEL_SLUG": "m", **env})
-    assert launch.environment_overrides(job) == expected
-
-
-def test_train_env_rejects_an_unknown_environment() -> None:
-    with pytest.raises(LaunchError, match="TRAIN_ENV must be one of"):
-        launch.NemoJob.from_env({"MODEL_SLUG": "m", "TRAIN_ENV": "gsm8k"})
-
-
-def test_the_config_defaults_to_the_glm_judge_on_wandb_inference(monkeypatch) -> None:
-    OmegaConf = pytest.importorskip("omegaconf").OmegaConf
-
-    for name in ("CWTRAIN_JUDGE_MODEL", "CWTRAIN_JUDGE_BASE_URL", "CWTRAIN_JUDGE_API_KEY_FILE"):
-        monkeypatch.delenv(name, raising=False)
-    config = OmegaConf.load(Path(__file__).resolve().parents[1] / "grpo_coreweave.yaml")
-    browsecomp = OmegaConf.to_container(config.env.nemo_gym.search, resolve=True)
-    assert browsecomp["judge_model"] == "zai-org/GLM-5.2"
-    assert browsecomp["judge_base_url"] == "https://api.inference.wandb.ai/v1"
-    assert browsecomp["judge_api_key_file"] is None
-    # the kit ships the Gym eval recipe's You.com client, which the preset copies into the harness
-    assert browsecomp["search_entrypoint"] == "/opt/cwtrain/you_search.py"
-    kit = (Path(__file__).resolve().parents[1] / "k8s" / "make-kit.sh").read_text()
-    assert "--from-file=you_search.py=" in kit
-    root = Path(__file__).resolve().parents[4]
-    assert (root / "evaluation" / "recipes" / "nemo-gym" / "you_search.py").is_file()
 
 
 def test_install_into_workers_covers_every_prebuilt_venv(tmp_path: Path, monkeypatch) -> None:
@@ -152,6 +108,72 @@ def test_main_patches_installs_stages_then_hands_over(
     assert execs[0][:2] == ["/venv/bin/python", "examples/run_grpo.py"]
     # GRPO here is synchronous, so the trainer asks for a clean prompt cache unless told otherwise
     assert launch.os.environ["CWTRAIN_HOTLOAD_PROMPT_CACHE_POLICY"] == expected
+
+
+def test_main_prepares_data_then_trains_with_the_example_config(tmp_path: Path, monkeypatch) -> None:
+    kit = make_kit(tmp_path)
+    (kit / "grpo_search.yaml").write_text("defaults: grpo_coreweave.yaml\n")
+    model = tmp_path / "w" / "models" / "m"
+    model.mkdir(parents=True)
+    (model / "config.json").write_text("{}")
+    monkeypatch.setattr(launch, "git_describe", lambda repo: "v0.7.0")
+    monkeypatch.setattr(launch, "apply_patches", lambda *a, **kw: None)
+    monkeypatch.setattr(launch, "install_into_workers", lambda *a, **kw: None)
+    runs: list[list[str]] = []
+    monkeypatch.setattr(launch, "run", lambda cmd, **kw: runs.append([str(c) for c in cmd]))
+    execs: list[list[str]] = []
+    monkeypatch.setattr(launch.os, "execvp", lambda path, args: execs.append(args))
+    monkeypatch.setattr(launch.os, "chdir", lambda path: None)
+    launch.main(
+        {"MODEL_SLUG": "m", "WORK": str(tmp_path / "w"), "CWTRAIN_KIT_DIR": str(kit),
+         "NEMO_RL_PYTHON": "/venv/bin/python", "GRPO_CONFIG": "grpo_search.yaml",
+         # render.sh flattens the Job's block scalar to one line; shell quoting groups words
+         "PREPARE_DATA": "/kit/prepare.py --dataset simpleqa --note 'two words'"}
+    )  # fmt: skip
+    assert runs == [["/venv/bin/python", "/kit/prepare.py", "--dataset", "simpleqa", "--note", "two words"]]
+    assert execs[0][2:4] == ["--config", str(kit / "grpo_search.yaml")]
+
+
+def test_main_runs_no_preparation_by_default(tmp_path: Path) -> None:
+    job = launch.NemoJob.from_env({"MODEL_SLUG": "m", "PREPARE_DATA": "  \n"})
+    assert job.prepare_data == () and job.grpo_config == "grpo_coreweave.yaml"
+
+
+def test_a_grpo_config_missing_from_the_kit_stops_before_patching(tmp_path: Path, monkeypatch) -> None:
+    kit = make_kit(tmp_path)
+    patched: list[str] = []
+    monkeypatch.setattr(launch, "apply_patches", lambda *a, **kw: patched.append("x"))
+    with pytest.raises(LaunchError, match="GRPO_CONFIG grpo_search.yaml is not in the kit.*KIT_EXTRA_FILES"):
+        launch.main({"MODEL_SLUG": "m", "CWTRAIN_KIT_DIR": str(kit), "GRPO_CONFIG": "grpo_search.yaml"})
+    assert patched == []
+
+
+def test_make_kit_bundles_extra_files_under_their_names(tmp_path: Path) -> None:
+    import os
+    import subprocess
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log = tmp_path / "kubectl.log"
+    # a kubectl that records its arguments, one per line, instead of reaching a cluster
+    (bin_dir / "kubectl").write_text(f'#!/usr/bin/env bash\nprintf "%s\\n" "$@" >> {log}\n')
+    (bin_dir / "kubectl").chmod(0o755)
+    wheel = tmp_path / "cwtrain-0.1.0-py3-none-any.whl"
+    wheel.write_text("")
+    extra = tmp_path / "example"
+    extra.mkdir()
+    (extra / "grpo_search.yaml").write_text("")
+    (extra / "prepare.py").write_text("")
+    script = Path(__file__).resolve().parents[1] / "k8s" / "make-kit.sh"
+    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "CWTRAIN_WHEEL": str(wheel),
+           "KIT_EXTRA_FILES": f"{extra / 'grpo_search.yaml'}\n{extra / 'prepare.py'}"}  # fmt: skip
+    subprocess.run(["bash", str(script), "ctx", "ns"], check=True, env=env, capture_output=True)
+    args = log.read_text().splitlines()
+    assert f"--from-file=grpo_search.yaml={extra / 'grpo_search.yaml'}" in args
+    assert f"--from-file=prepare.py={extra / 'prepare.py'}" in args
+    env["KIT_EXTRA_FILES"] = str(extra / "absent.py")
+    failed = subprocess.run(["bash", str(script), "ctx", "ns"], env=env, capture_output=True, text=True)
+    assert failed.returncode != 0 and "absent.py is not a file" in failed.stderr
 
 
 def test_main_refuses_to_train_without_a_model(tmp_path: Path, monkeypatch) -> None:

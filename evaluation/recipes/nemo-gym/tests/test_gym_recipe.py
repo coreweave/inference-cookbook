@@ -182,7 +182,7 @@ def test_the_eval_job_runs_on_cpu_and_reuses_the_trainer_secrets():
     job = (K8S / "eval-job.yaml").read_text()
     assert "nvidia.com/gpu.present, operator: DoesNotExist" in job
     assert "nvidia.com/gpu:" not in job  # requests no GPU
-    for secret in ("INFERENCE_KEY_SECRET", "JUDGE_KEY_SECRET", "SEARCH_KEY_SECRET"):
+    for secret in ("INFERENCE_KEY_SECRET", "GYM_SECRET"):
         assert "${" + secret + "}" in job
     example = (K8S / "eval.env.example").read_text()
     assert "BENCHMARK=browsecomp" in example and "JUDGE_MODEL=zai-org/GLM-5.2" in example

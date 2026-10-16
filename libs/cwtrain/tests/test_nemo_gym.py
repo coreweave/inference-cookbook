@@ -226,164 +226,68 @@ def test_actor_installs_exact_token_transport(tmp_path, monkeypatch):
     assert "cwtrain.integrations.nemo_rl.gym_model" in (server / "cwtrain_app.py").read_text()
 
 
-def encrypted(text: str, canary: str) -> str:
-    import base64
-    import hashlib
-
-    data = text.encode()
-    digest = hashlib.sha256(canary.encode()).digest()
-    key = (digest * (len(data) // len(digest) + 1))[: len(data)]
-    return base64.b64encode(bytes(a ^ b for a, b in zip(data, key, strict=True))).decode()
-
-
 @pytest.fixture
-def browsecomp(config, tmp_path):
-    judge, search = tmp_path / "judge", tmp_path / "search"
-    judge.write_text("judge-key\n")
-    search.write_text("you-key\n")
-    entrypoint = tmp_path / "you_search.py"
-    entrypoint.write_text("# a search backend\n")
-    config["data"]["train"]["dataset_name"] = "BrowseComp"
+def custom(config, tmp_path):
+    """A custom Gym environment that asks the actor for a key, a file and an env variable."""
+    key, entry = tmp_path / "judge_key", tmp_path / "search_app.py"
+    key.write_text("judge-key\n")
+    entry.write_text("# a search backend\n")
+    config["data"]["train"] = {"dataset_name": "NemoGymDataset", "data_path": "/data/tasks.jsonl"}
     config["env"]["nemo_gym"] = {
-        "search": {
-            "judge_model": "zai-org/GLM-5.2",
-            "judge_base_url": "https://api.inference.wandb.ai/v1",
-            "judge_api_key_file": str(judge),
-            "search_api_key_file": str(search),
-            "search_entrypoint": str(entrypoint),
-            "search_env": {"YOU_SEARCH_MAX_CHARS": 2000},
-            "max_steps": 6,
-        }
+        "config_paths": ["responses_api_models/vllm_model/configs/vllm_model_for_training.yaml"],
+        "judge_model": {"responses_api_models": {"vllm_model": {"api_key": "unused"}}},
+        "coreweave_secrets": {"judge_model.responses_api_models.vllm_model.api_key": str(key)},
+        "coreweave_files": {"resources_servers/search/search_app.py": str(entry)},
+        "coreweave_env": {"SEARCH_MAX_CHARS": 2000},
     }
-    rows = [
-        {"problem": encrypted(f"Who wrote book {i}?", "c"), "answer": encrypted(f"A{i}", "c"),
-         "canary": "c"}
-        for i in range(3)
-    ]  # fmt: skip
-    return config, rows
+    return config
 
 
-def test_browsecomp_preset_writes_tasks_and_servers(browsecomp):
-    from pathlib import Path
-
-    config, rows = browsecomp
-    result = prepare_config(config, rows=rows)
-    lines = Path(result["data"]["train"]["data_path"]).read_text().splitlines()
-    row = json.loads(lines[0])
-    assert len(lines) == 3
-    assert row["agent_ref"]["name"] == "browsecomp_agent"
-    assert row["question"] == "Who wrote book 0?" and row["ground_truth"] == "A0"
-    assert row["responses_create_params"]["input"][1]["content"].startswith("Who wrote book 0?")
-    assert [t["name"] for t in row["responses_create_params"]["tools"]] == ["search", "browse"]
-    gym = result["env"]["nemo_gym"]
-    assert "search" not in gym  # consumed, not passed on to Gym
-    judge = gym["judge_model"]["responses_api_models"]["vllm_model"]
-    assert judge["model"] == "zai-org/GLM-5.2" and judge["api_key"] == "unused"
-    assert judge["extra_body"]["max_tokens"] == 8192
-    harness = gym["browsecomp_resources_server"]["resources_servers"]["browsecomp_advanced_harness"]
-    assert harness["entrypoint"] == "you_search.py"
-    assert json.loads(Path(harness["exclude_domains_file_path"]).read_text())["notices"]
-    agent = gym["browsecomp_agent"]["responses_api_agents"]["browsecomp_agent"]
-    assert agent["max_steps"] == 6 and agent["max_reset_count"] == 0
-    assert agent["max_context_tokens"] == 3072
-    assert gym["config_paths"] == [
-        "responses_api_models/vllm_model/configs/vllm_model_for_training.yaml"
-    ]
-    # Keys travel as file paths; the actor reads them.
-    assert "judge-key" not in json.dumps(result) and "you-key" not in json.dumps(result)
+def test_the_policy_model_knows_the_context_limit(custom):
+    gym = prepare_config(custom)["env"]["nemo_gym"]
+    assert gym["policy_model"]["responses_api_models"]["vllm_model"]["max_model_len"] == 3072
 
 
-def test_browsecomp_sample_limit(browsecomp):
-    from pathlib import Path
-
-    config, rows = browsecomp
-    config["data"]["train"]["max_samples"] = 1
-    result = prepare_config(config, rows=rows)
-    assert len(Path(result["data"]["train"]["data_path"]).read_text().splitlines()) == 1
-
-
-@pytest.mark.parametrize("missing", ["judge_api_key_file", "search_api_key_file", "judge_model"])
-def test_browsecomp_requires_judge_and_search_settings(browsecomp, missing):
-    config, rows = browsecomp
-    config["env"]["nemo_gym"]["search"].pop(missing)
-    with pytest.raises(ValueError, match=missing):
-        prepare_config(config, rows=rows)
-
-
-def test_browsecomp_rejects_an_unmounted_key_file(browsecomp, tmp_path):
-    config, rows = browsecomp
-    config["env"]["nemo_gym"]["search"]["search_api_key_file"] = str(tmp_path / "absent")
-    with pytest.raises(ValueError, match="mount its Secret"):
-        prepare_config(config, rows=rows)
-
-
-def test_actor_reads_judge_and_search_keys_and_installs_you_com(browsecomp, tmp_path, monkeypatch):
+def test_actor_applies_secrets_files_and_env_after_transport(custom, tmp_path, monkeypatch):
     import os
     import sys
-
-    monkeypatch.delenv("YOU_SEARCH_MAX_CHARS", raising=False)
     from types import SimpleNamespace
 
-    from cwtrain.integrations.nemo_rl.gym import HARNESS_DIR
-
-    config, rows = browsecomp
-    gym = prepare_config(config, rows=rows)["env"]["nemo_gym"]
+    monkeypatch.delenv("SEARCH_MAX_CHARS", raising=False)
+    gym = prepare_config(custom)["env"]["nemo_gym"]
+    assert "judge-key" not in json.dumps(gym)  # only the key file's path travels
     root = tmp_path / "gym"
-    (root / HARNESS_DIR).mkdir(parents=True)
-    (root / HARNESS_DIR / "app.py").write_text("")
+    (root / "resources_servers" / "search").mkdir(parents=True)
     monkeypatch.setitem(sys.modules, "nemo_gym", SimpleNamespace(PARENT_DIR=root))
     gym.pop("coreweave_tokenizer")
     initial = dict(gym, policy_base_url=["https://example.test/v1"], policy_model_name="m")
     result = actor_config(initial, {})
-    judge = result["judge_model"]["responses_api_models"]["vllm_model"]
-    harness = result["browsecomp_resources_server"]["resources_servers"][
-        "browsecomp_advanced_harness"
-    ]
-    assert judge["api_key"] == "judge-key"
-    assert harness["tavily_api_key"] == "you-key"
-    assert os.environ["YOU_SEARCH_MAX_CHARS"] == "2000"  # Gym's servers inherit it
-    assert (root / HARNESS_DIR / "you_search.py").read_text() == "# a search backend\n"
+    assert result["judge_model"]["responses_api_models"]["vllm_model"]["api_key"] == "judge-key"
+    copied = root / "resources_servers" / "search" / "search_app.py"
+    assert copied.read_text() == "# a search backend\n"
+    assert os.environ["SEARCH_MAX_CHARS"] == "2000"
     assert not any(key.startswith("coreweave_") for key in result)
-    Path_ = type(tmp_path)
-    Path_(gym["coreweave_search_api_key_file"]).write_text("")
-    with pytest.raises(ValueError, match="search API key"):
-        actor_config(dict(initial), {})
 
 
-def test_browsecomp_decrypts_the_published_format():
-    from cwtrain.integrations.nemo_rl.gym import browsecomp_decrypt
-
-    assert browsecomp_decrypt(encrypted("a long answer " * 5, "canary"), "canary") == (
-        "a long answer " * 5
-    )
-
-
-def test_browsecomp_uses_the_harness_app_without_a_search_entrypoint(browsecomp):
-    config, rows = browsecomp
-    config["env"]["nemo_gym"]["search"].pop("search_entrypoint")
-    gym = prepare_config(config, rows=rows)["env"]["nemo_gym"]
-    harness = gym["browsecomp_resources_server"]["resources_servers"]["browsecomp_advanced_harness"]
-    assert harness["entrypoint"] == "app.py" and "coreweave_search_entrypoint" not in gym
+@pytest.mark.parametrize(
+    ("directive", "value", "error"),
+    [
+        ("coreweave_secrets", {"judge.api_key": "/absent/key"}, "does not exist"),
+        ("coreweave_files", {"../outside.py": __file__}, "inside the Gym checkout"),
+        ("coreweave_files", {"resources_servers/x/app.py": "/absent.py"}, "does not exist"),
+    ],
+)
+def test_rejects_unusable_directives(custom, directive, value, error):
+    custom["env"]["nemo_gym"][directive] = value
+    with pytest.raises(ValueError, match=error):
+        prepare_config(custom)
 
 
-def test_browsecomp_rejects_a_missing_search_entrypoint(browsecomp, tmp_path):
-    config, rows = browsecomp
-    config["env"]["nemo_gym"]["search"]["search_entrypoint"] = str(tmp_path / "absent.py")
-    with pytest.raises(ValueError, match="search_entrypoint"):
-        prepare_config(config, rows=rows)
-
-
-def test_simpleqa_preset_uses_the_search_agent(browsecomp):
-    from pathlib import Path
-
-    config, _ = browsecomp
-    config["data"]["train"]["dataset_name"] = "SimpleQA"
-    rows = [{"metadata": "{}", "problem": "Who wrote Hamlet?", "answer": "William Shakespeare"}]
-    result = prepare_config(config, rows=rows)
-    path = Path(result["data"]["train"]["data_path"])
-    row = json.loads(path.read_text())
-    assert path.name == "simpleqa.jsonl"
-    assert row["agent_ref"]["name"] == "browsecomp_agent"
-    assert row["question"] == "Who wrote Hamlet?" and row["ground_truth"] == "William Shakespeare"
-    assert row["responses_create_params"]["input"][1]["content"].startswith("Who wrote Hamlet?")
-    assert "judge_model" in result["env"]["nemo_gym"]
+def test_actor_rejects_a_secret_for_a_missing_field(custom, tmp_path):
+    custom["env"]["nemo_gym"].pop("judge_model")
+    gym = prepare_config(custom)["env"]["nemo_gym"]
+    gym.pop("coreweave_tokenizer")
+    gym.pop("coreweave_files")
+    initial = dict(gym, policy_base_url=["https://example.test/v1"], policy_model_name="m")
+    with pytest.raises(ValueError, match="judge_model is missing"):
+        actor_config(initial, {})

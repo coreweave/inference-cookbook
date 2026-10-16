@@ -44,7 +44,7 @@ problem solved with Dedicated Inference, with its results. The [examples](#examp
 | --- | --- | --- | --- | --- |
 | [miles](training/recipes/miles/README.md) | [miles](https://github.com/radixark/miles) | GRPO, synchronous or one step ahead | None: miles calls the `cwtrain` hook after each weight sync | `radixark/miles:v0.1.1` |
 | [slime](training/recipes/slime/README.md) | [slime](https://github.com/THUDM/slime) | GRPO | Three small patches, applied by the launcher, so slime publishes weights without inference engines of its own | slime `8ee9c1e` |
-| [NeMo-RL](training/recipes/nemo-rl/README.md) | [NeMo-RL](https://github.com/NVIDIA-NeMo/RL) | GRPO with a Gym search agent on SimpleQA (default) or BrowseComp, or DAPO math | Patches, applied by the launcher, that register the `coreweave` backend and Gym rollouts | NeMo-RL `v0.7.0` |
+| [NeMo-RL](training/recipes/nemo-rl/README.md) | [NeMo-RL](https://github.com/NVIDIA-NeMo/RL) | GRPO, with NeMo-RL's math environment or a Gym environment that an example brings | Patches, applied by the launcher, that register the `coreweave` backend and optional Gym rollouts | NeMo-RL `v0.7.0` |
 | [Axolotl SFT](training/recipes/axolotl-sft/README.md) | [Axolotl](https://github.com/axolotl-ai-cloud/axolotl) | SFT, full or LoRA (merged) | None: stock `axolotl train`; cwtrain publishes the result as a full snapshot | Axolotl `v0.20.0` |
 | [NeMo Gym](evaluation/recipes/nemo-gym/README.md) | [NeMo Gym](https://github.com/NVIDIA-NeMo/Gym) | Evaluation with scored rollouts: BrowseComp with an LLM judge | None: Gym runs on CPU against the NeMo-RL recipe's hot-load deployment, runs the agent and scores responses | NeMo Gym `v0.6.0` |
 

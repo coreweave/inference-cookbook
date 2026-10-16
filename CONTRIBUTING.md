@@ -28,9 +28,10 @@ To place a change:
 - If it fits none of these, such as a training loop of your own, open an issue before you start.
 
 The first examples run their recipes' defaults: the dataset that the miles and slime launchers
-download, the NeMo-RL and Axolotl configs, and the NeMo-RL recipe's Nemotron staging Job. An example
-that needs other data or another config adds a setting for it to the recipe, tested there, and
-sets it in its `run.env.example`. `training/case-studies/` does not exist yet; the pull request that
+download, the Axolotl config, and the NeMo-RL recipe's Nemotron staging Job. An example that needs
+other data or another config adds a setting for it to the recipe, tested there, and sets it in its
+`run.env.example`. The NeMo-RL example does this: it brings its own config, data script and keys
+through the recipe's `KIT_EXTRA_FILES`, `GRPO_CONFIG`, `EXTRA_PREPARE_DATA` and `GYM_SECRET`. `training/case-studies/` does not exist yet; the pull request that
 adds the first case study creates it. `cwtrain.integrations.nemo_rl.gym` still holds the
 DAPO-Math-17k preset for NeMo-RL's Gym rollouts.
 

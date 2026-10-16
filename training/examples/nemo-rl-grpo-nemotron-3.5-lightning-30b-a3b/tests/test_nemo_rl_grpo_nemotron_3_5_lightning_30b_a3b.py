@@ -139,3 +139,142 @@ def test_the_deployment_runs_a_whole_step_at_once_on_eight_h100s() -> None:
     assert deployment["resources"]["gpuCount"] * autoscaling["min"] == 8  # eight H100s
     sequences = grpo_setting("num_prompts_per_step") * grpo_setting("num_generations_per_prompt")
     assert autoscaling["min"] * autoscaling["concurrency"] >= sequences
+
+
+def kit_files() -> dict[str, Path]:
+    """The files that run.env's KIT_EXTRA_FILES adds to the kit, by their name there."""
+    paths = run_env_example()["KIT_EXTRA_FILES"].split()
+    return {Path(p).name: (EXAMPLE / "k8s" / p).resolve() for p in paths}
+
+
+def search_config() -> dict:
+    """grpo_search_agent.yaml over grpo_coreweave.yaml, as NeMo-RL merges them (without its base)."""
+    from omegaconf import OmegaConf
+
+    recipe = OmegaConf.load(RECIPE / "grpo_coreweave.yaml")
+    recipe.pop("defaults")
+    example = OmegaConf.load(EXAMPLE / "grpo_search_agent.yaml")
+    assert example.pop("defaults") == "grpo_coreweave.yaml"
+    merged = OmegaConf.merge(recipe, example)
+    return OmegaConf.to_container(merged, resolve=False)
+
+
+def test_the_kit_carries_what_run_env_and_the_config_name() -> None:
+    files = kit_files()
+    assert all(path.is_file() for path in files.values()), files
+    settings = run_env_example()
+    assert settings["GRPO_CONFIG"] in files
+    script = settings["EXTRA_PREPARE_DATA"].split()[0]
+    assert script.startswith("/opt/cwtrain/") and Path(script).name in files
+    # every kit path that the config reads is in the kit
+    text = (EXAMPLE / "grpo_search_agent.yaml").read_text()
+    for name in re.findall(r"/opt/cwtrain/([\w.-]+)", text):
+        assert name in files, f"grpo_search_agent.yaml reads /opt/cwtrain/{name}, not in the kit"
+
+
+def test_the_config_and_the_data_script_agree() -> None:
+    prepare = load_prepare()
+    config = search_config()
+    assert config["data"]["train"]["data_path"] == str(prepare.OUTPUT)
+    assert prepare.AGENT in config["env"]["nemo_gym"]
+    assert config["policy"]["max_total_sequence_length"] == 16384
+    # within the deployment's context
+    deployment = json.loads(DEPLOYMENT.read_text())
+    assert 16384 <= int(deployment["runtime"]["engineConfig"]["max-model-len"])
+
+
+def test_cwtrain_accepts_the_config_and_the_actor_gets_the_keys(tmp_path, monkeypatch) -> None:
+    import sys
+    from types import SimpleNamespace
+
+    gym_module = pytest.importorskip("cwtrain.integrations.nemo_rl.gym")
+    config = search_config()
+    # the mounted Secret and kit, here under tmp_path
+    secrets = {"judge_api_key": "judge-key", "search_api_key": "you-key"}
+    for name, value in secrets.items():
+        (tmp_path / name).write_text(value + "\n")
+    gym = config["env"]["nemo_gym"]
+    gym["coreweave_secrets"] = {
+        field: str(tmp_path / Path(path).name) for field, path in gym["coreweave_secrets"].items()
+    }
+    gym["coreweave_files"] = {
+        target: str(kit_files()[Path(source).name]) for target, source in gym["coreweave_files"].items()
+    }
+    coreweave = config["policy"]["generation"]["coreweave_cfg"]
+    coreweave.update(api_key_file=str(tmp_path / "judge_api_key"), max_model_len=16384)
+    config["policy"]["max_total_sequence_length"] = 16384
+    gym["browsecomp_agent"]["responses_api_agents"]["browsecomp_agent"]["max_context_tokens"] = 16384
+    monkeypatch.setenv("CWTRAIN_HOTLOAD_WAIT", "1")
+    prepared = gym_module.prepare_config(config)["env"]["nemo_gym"]
+    assert "judge-key" not in json.dumps(prepared) and "you-key" not in json.dumps(prepared)
+    root = tmp_path / "gym"
+    (root / "resources_servers" / "browsecomp_advanced_harness").mkdir(parents=True)
+    monkeypatch.setitem(sys.modules, "nemo_gym", SimpleNamespace(PARENT_DIR=root))
+    monkeypatch.delenv("YOU_SEARCH_MAX_CHARS", raising=False)
+    prepared.pop("coreweave_tokenizer")
+    initial = dict(prepared, policy_base_url=["https://example.test/v1"], policy_model_name="m")
+    result = gym_module.actor_config(initial, {})
+    judge = result["judge_model"]["responses_api_models"]["vllm_model"]
+    harness = result["browsecomp_resources_server"]["resources_servers"]["browsecomp_advanced_harness"]
+    assert (judge["api_key"], harness["tavily_api_key"]) == ("judge-key", "you-key")
+    assert (root / "resources_servers" / "browsecomp_advanced_harness" / harness["entrypoint"]).is_file()
+    assert __import__("os").environ["YOU_SEARCH_MAX_CHARS"] == "2000"
+
+
+def load_prepare():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("prepare_search_data", EXAMPLE / "prepare_search_data.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def encrypt(plaintext: str, password: str) -> str:
+    """BrowseComp's encryption, the inverse of prepare_search_data.decrypt."""
+    import base64
+    import hashlib
+
+    data = plaintext.encode()
+    digest = hashlib.sha256(password.encode()).digest()
+    key = digest * (len(data) // len(digest)) + digest[: len(data) % len(digest)]
+    return base64.b64encode(bytes(a ^ b for a, b in zip(data, key, strict=True))).decode()
+
+
+@pytest.mark.parametrize("dataset", ["simpleqa", "browsecomp"])
+def test_the_data_script_writes_the_benchmark_prompt(tmp_path, dataset, capsys) -> None:
+    prepare = load_prepare()
+    question, answer = "Who wrote the first draft?", "Ada Lovelace"
+    if dataset == "browsecomp":
+        rows = [{"problem": encrypt(question, "c"), "answer": encrypt(answer, "c"), "canary": "c"}] * 3
+    else:
+        rows = [{"problem": question, "answer": answer}] * 3
+    output = tmp_path / "search.jsonl"
+    prepare.main(["--dataset", dataset, "--max-samples", "2", "--output", str(output)], rows=rows)
+    lines = [json.loads(line) for line in output.read_text().splitlines()]
+    assert len(lines) == 2 and "wrote 2" in capsys.readouterr().out
+    item = lines[0]
+    assert (item["question"], item["ground_truth"]) == (question, answer)
+    assert item["agent_ref"] == {"name": "browsecomp_agent"}
+    system, user = item["responses_create_params"]["input"]
+    assert system["role"] == "system" and "Today's date" in system["content"]
+    assert user["content"].startswith(question) and "Exact Answer:" in user["content"]
+    assert [tool["name"] for tool in item["responses_create_params"]["tools"]] == ["search", "browse"]
+
+
+def test_the_data_script_rejects_a_short_download(monkeypatch) -> None:
+    prepare = load_prepare()
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return b"problem,answer\nq,a\n"
+
+    monkeypatch.setattr(prepare.urllib.request, "urlopen", lambda url, timeout: Response())
+    with pytest.raises(ValueError, match="expected 4326 simpleqa rows, got 1"):
+        prepare.download("simpleqa")

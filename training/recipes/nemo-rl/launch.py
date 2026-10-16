@@ -10,9 +10,9 @@ bucket. Then it replaces itself with ``examples/run_grpo.py`` and the recipe's c
 vLLM or SGLang workers: the deployment serves the rollouts and receives every refit by hot-load.
 
 Settings are the environment variables that an example's ``k8s/run.env.example`` documents.
-``TRAIN_ENV`` picks the training environment: ``simpleqa`` (the default) and ``browsecomp`` run
-Gym's BrowseComp agent on SimpleQA or BrowseComp questions, with You.com search and an LLM judge;
-``dapo`` runs Gym's DAPO math; ``math`` runs NeMo-RL's own math environment.
+``GRPO_CONFIG`` names the config in the kit (default ``grpo_coreweave.yaml``); an example can bundle
+its own, which inherits the recipe's. ``PREPARE_DATA``, when set, is a command that the launcher runs
+with the NeMo-RL venv's interpreter before training, such as an example's data preparation.
 ``EXTRA_OVERRIDES`` holds Hydra-style overrides. Each whitespace-separated word is one override,
 and quotes reach Hydra unchanged (``policy.generation.stop_strings=["</answer>"]``). So write lists
 without spaces (``["</answer>","<|end|>"]``).
@@ -21,6 +21,7 @@ without spaces (``["</answer>","<|end|>"]``).
 from __future__ import annotations
 
 import os
+import shlex
 import sys
 import zipfile
 from collections.abc import Mapping
@@ -42,12 +43,6 @@ from cwtrain.integrations.launch import (
 )
 
 TESTED = "NeMo-RL v0.7.0 (nvcr.io/nvidia/nemo-rl:v0.7.0)"
-TRAIN_ENVS = ("simpleqa", "browsecomp", "dapo", "math")
-# Trajectory token limit for each environment when MAX_SEQUENCE_LENGTH is unset. A search-agent
-# trajectory holds every search result and turn; the math prompts are short. One sequence's fp32
-# logits take about 0.5 MiB per token on top of 64 GiB of training state per GPU once the
-# optimizer state exists, so 16384 is the longest that fits the 8-GPU trainer.
-SEQUENCE_LENGTHS = {"simpleqa": 16384, "browsecomp": 16384, "dapo": 3072, "math": 3072}
 
 
 @dataclass(frozen=True)
@@ -62,8 +57,8 @@ class NemoJob:
     python: str = field(default_factory=lambda: sys.executable)
     worker_venvs: Path = Path("/opt/ray_venvs")
     base_s3_uri: str = ""
-    train_env: str = "simpleqa"
-    max_sequence_length: int = 0  # 0: SEQUENCE_LENGTHS[train_env]
+    grpo_config: str = "grpo_coreweave.yaml"  # a file in the kit
+    prepare_data: tuple[str, ...] = ()  # a Python script and its arguments, run before training
     extra_overrides: tuple[str, ...] = ()
 
     @classmethod
@@ -73,9 +68,6 @@ class NemoJob:
         def text(name: str, default: str) -> str:
             return env_text(env, name, default)
 
-        train_env = text("TRAIN_ENV", "simpleqa").lower()
-        if train_env not in TRAIN_ENVS:
-            raise LaunchError(f"TRAIN_ENV must be one of {', '.join(TRAIN_ENVS)}, got {train_env!r}")
         return cls(
             model_slug=require(env, "MODEL_SLUG"),
             work=Path(text("WORK", "/work")),
@@ -86,8 +78,8 @@ class NemoJob:
             python=text("NEMO_RL_PYTHON", sys.executable),
             worker_venvs=Path(text("NEMO_RL_VENV_DIR", "/opt/ray_venvs")),
             base_s3_uri=text("BASE_S3_URI", ""),
-            train_env=train_env,
-            max_sequence_length=env_int(env, "MAX_SEQUENCE_LENGTH", 0),
+            grpo_config=text("GRPO_CONFIG", "grpo_coreweave.yaml"),
+            prepare_data=tuple(shlex.split(env.get("PREPARE_DATA") or "")),
             # whitespace-separated, quotes kept for Hydra's own parser
             extra_overrides=tuple((env.get("EXTRA_OVERRIDES") or "").split()),
         )
@@ -104,29 +96,16 @@ def wheel(job: NemoJob) -> Path:
     return found[-1]
 
 
-def environment_overrides(job: NemoJob) -> list[str]:
-    """The overrides that select ``job.train_env`` and its trajectory token limit."""
-    overrides = {
-        "simpleqa": ["env.should_use_nemo_gym=true", "data.train.dataset_name=SimpleQA"],
-        "browsecomp": ["env.should_use_nemo_gym=true", "data.train.dataset_name=BrowseComp"],
-        "dapo": ["env.should_use_nemo_gym=true"],
-        "math": [],
-    }[job.train_env]
-    length = job.max_sequence_length or SEQUENCE_LENGTHS[job.train_env]
-    return [*overrides, f"policy.max_total_sequence_length={length}"]
-
-
 def grpo_command(job: NemoJob) -> list[str]:
     """``run_grpo.py`` with the recipe's config and the job's overrides."""
     return [
         job.python,
         "examples/run_grpo.py",
         "--config",
-        str(job.kit / "grpo_coreweave.yaml"),
+        str(job.kit / job.grpo_config),
         f"policy.model_name={job.model_dir}",
         f"grpo.max_num_steps={job.num_steps}",
         f"cluster.gpus_per_node={job.actor_gpus}",
-        *environment_overrides(job),
         *job.extra_overrides,
     ]
 
@@ -163,6 +142,11 @@ def install_into_workers(job: NemoJob, whl: Path) -> list[Path]:
 
 def main(environ: Mapping[str, str] | None = None) -> None:
     job = NemoJob.from_env(environ)
+    if not (job.kit / job.grpo_config).is_file():
+        raise LaunchError(
+            f"GRPO_CONFIG {job.grpo_config} is not in the kit {job.kit}; add it to KIT_EXTRA_FILES "
+            "and run make-kit.sh again"
+        )
 
     say(f"== patch NeMo-RL ({git_describe(job.nemo_rl_dir)})")
     apply_patches(job.nemo_rl_dir, require_patches(job.kit), tested=TESTED)
@@ -179,6 +163,11 @@ def main(environ: Mapping[str, str] | None = None) -> None:
             "(s3://<bucket>/<model prefix>/<model slug>, where stage-nemotron-job.yaml uploads it), "
             "or mount the checkpoint there"
         )
+
+    if job.prepare_data:
+        say("== prepare data")
+        # The venv's interpreter, so that the command can use cwtrain and NeMo-RL's packages.
+        run([job.python, *job.prepare_data])
 
     say("== train")
     # Use the venv's interpreter, not uv run: uv run re-syncs the venv and drops cwtrain.

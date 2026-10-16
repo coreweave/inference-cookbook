@@ -13,10 +13,8 @@ VENV_PY=${NEMO_RL_PYTHON:-/opt/nemo_rl_venv/bin/python}
 uv pip install --quiet --python "$VENV_PY" /opt/cwtrain/cwtrain-*.whl
 # A setting missing from run.env reaches the Job as an empty value. Unset it, so that the default
 # in grpo_coreweave.yaml applies.
-for name in CWTRAIN_ROLLOUT_CONCURRENCY CWTRAIN_JUDGE_BASE_URL CWTRAIN_JUDGE_MODEL; do
-  value=${!name:-}
-  [[ -n "${value//[[:space:]]/}" ]] || unset "$name"
-done
+concurrency=${CWTRAIN_ROLLOUT_CONCURRENCY:-}
+[[ -n "${concurrency//[[:space:]]/}" ]] || unset CWTRAIN_ROLLOUT_CONCURRENCY
 # cwtrain does not accept an empty HOTLOAD_TIMEOUT as a number. Unset it, so that the hook uses its
 # default.
 hotload_timeout=${CWTRAIN_HOTLOAD_TIMEOUT:-}

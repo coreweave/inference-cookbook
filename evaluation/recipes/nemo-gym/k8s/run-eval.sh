@@ -26,8 +26,8 @@ args=(--gym-dir "$GYM_DIR" --benchmark "$BENCHMARK")
 start=("${args[@]}" --judge-model "${JUDGE_MODEL:-zai-org/GLM-5.2}"
        --judge-base-url "${JUDGE_BASE_URL:-https://api.inference.wandb.ai/v1}"
        --max-context-tokens "${MAX_CONTEXT_TOKENS:-32768}" --max-steps "${MAX_STEPS:-50}")
-[ ! -s /secrets/judge/api_key ] || start+=(--judge-api-key-file /secrets/judge/api_key)
-[ ! -s /secrets/search/api_key ] || start+=(--search-api-key-file /secrets/search/api_key)
+[ ! -s /secrets/gym/judge_api_key ] || start+=(--judge-api-key-file /secrets/gym/judge_api_key)
+[ ! -s /secrets/gym/search_api_key ] || start+=(--search-api-key-file /secrets/gym/search_api_key)
 # Own process group, so that stopping it also stops Gym's server processes and Ray.
 setsid "$PY" /work/recipe/launch.py start "${start[@]}" > "$OUT/servers.log" 2>&1 &
 servers=$!

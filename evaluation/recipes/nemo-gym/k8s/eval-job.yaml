@@ -43,15 +43,14 @@ spec:
         - {name: CWTRAIN_ROLLOUT_MODEL, value: "${ROLLOUT_MODEL}"}
         - {name: CWTRAIN_ROLLOUT_API_KEY_FILE, value: /secrets/inference/api_key}
         - {name: CWTRAIN_ROLLOUT_CONCURRENCY, value: "${EVAL_CONCURRENCY}"}
-        # the judge; its key and the You.com key come from the mounted Secrets
+        # the judge; its key and the You.com key come from the mounted GYM_SECRET
         - {name: JUDGE_BASE_URL, value: "${JUDGE_BASE_URL}"}
         - {name: JUDGE_MODEL, value: "${JUDGE_MODEL}"}
         - {name: PYTHONUNBUFFERED, value: "1"}
         volumeMounts:
         - {name: kit, mountPath: /opt/cwtrain-gym, readOnly: true}
         - {name: inference-key, mountPath: /secrets/inference, readOnly: true}
-        - {name: judge-key, mountPath: /secrets/judge, readOnly: true}
-        - {name: search-key, mountPath: /secrets/search, readOnly: true}
+        - {name: gym-secret, mountPath: /secrets/gym, readOnly: true}
         - {name: work, mountPath: /work}
         resources:
           requests: {cpu: "8", memory: 32Gi}
@@ -61,9 +60,7 @@ spec:
         configMap: {name: ${EVAL_KIT_NAME}}
       - name: inference-key
         secret: {secretName: ${INFERENCE_KEY_SECRET}}
-      - name: judge-key
-        secret: {secretName: ${JUDGE_KEY_SECRET}}
-      - name: search-key
-        secret: {secretName: ${SEARCH_KEY_SECRET}}
+      - name: gym-secret
+        secret: {secretName: ${GYM_SECRET}}
       - name: work
         emptyDir: {sizeLimit: 40Gi}

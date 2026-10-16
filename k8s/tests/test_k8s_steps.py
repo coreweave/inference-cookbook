@@ -103,7 +103,7 @@ EXAMPLES = [
         run_id="nemotron-lightning-grpo",
         model_prefix="cookbook/filled/models",  # cookbook/${DEPLOYMENT_RUN}/models
         model_slug="NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16",
-        extra_secrets=("judge-api-key", "search-api-key"),  # BrowseComp's judge and search keys
+        extra_secrets=("gym-api-keys",),  # the search agent's judge and You.com keys
     ),
     Example(
         name="axolotl-sft-qwen3-4b",

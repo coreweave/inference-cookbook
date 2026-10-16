@@ -7,6 +7,9 @@
 # (default "cwtrain-kit") mounted at /opt/cwtrain by the Jobs. Rebuild the wheel first:
 # (cd libs/cwtrain && uv build --wheel).
 #
+# An example adds its own files, such as a config that inherits grpo_coreweave.yaml or a data
+# preparation script, with KIT_EXTRA_FILES: whitespace-separated paths, each bundled under its name.
+#
 # Usage: make-kit.sh <kube-context> <namespace> [configmap name, default cwtrain-kit]
 set -euo pipefail
 CTX=${1:?kube context}; NS=${2:?namespace}; KIT=${3:-cwtrain-kit}
@@ -19,6 +22,11 @@ patches=()
 for f in "$HERE"/../patches/*.patch; do
   [ -e "$f" ] && patches+=(--from-file="$(basename "$f")=$f")
 done
+extra=()
+for f in ${KIT_EXTRA_FILES:-}; do
+  [ -f "$f" ] || { echo "KIT_EXTRA_FILES: $f is not a file" >&2; exit 1; }
+  extra+=(--from-file="$(basename "$f")=$f")
+done
 kubectl --context "$CTX" -n "$NS" create configmap "$KIT" \
   --from-file="$(basename "$WHEEL")=$WHEEL" \
   --from-file=stage-model.sh="$HERE/stage-nemotron.sh" \
@@ -27,7 +35,7 @@ kubectl --context "$CTX" -n "$NS" create configmap "$KIT" \
   --from-file=bucket-policy.example.json="$SHARED/bucket-policy.example.json" \
   --from-file=grpo_coreweave.yaml="$HERE/../grpo_coreweave.yaml" \
   --from-file=launch.py="$HERE/../launch.py" \
-  --from-file=you_search.py="$HERE/../../../../evaluation/recipes/nemo-gym/you_search.py" \
   ${patches[@]+"${patches[@]}"} \
+  ${extra[@]+"${extra[@]}"} \
   --dry-run=client -o yaml | kubectl --context "$CTX" apply -f -
 echo "$KIT updated in $CTX/$NS with $(basename "$WHEEL")"

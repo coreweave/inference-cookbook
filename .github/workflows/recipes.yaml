@@ -56,6 +56,7 @@ jobs:
           activate-environment: true
       # the cleanup-block tests also run the block in zsh, the default shell on macOS
       - run: sudo apt-get install -y -q zsh
-      - run: uv pip install -e 'libs/cwtrain[dev]'
+      # omegaconf: the tests merge the recipes' and examples' configs as NeMo-RL and Gym do
+      - run: uv pip install -e 'libs/cwtrain[dev]' omegaconf
       - run: pytest -q training/recipes/*/tests training/examples/*/tests evaluation/recipes/*/tests k8s/tests
 

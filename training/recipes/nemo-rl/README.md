@@ -10,12 +10,12 @@ NeMo-RL starts no inference engines:
 
 Training pauses until every replica serves the new version, so the next rollout is on-policy.
 
-By default the recipe trains the policy on [SimpleQA](https://openai.com/index/introducing-simpleqa/)
-through [NeMo Gym](https://github.com/NVIDIA-NeMo/Gym), with Gym's BrowseComp agent. The agent
-searches and reads the web through You.com, and an LLM judge (GLM-5.2 on W&B Inference by default)
-scores each final answer. The [NeMo Gym evaluation recipe](../../../evaluation/recipes/nemo-gym/README.md)
-scores the policy on BrowseComp with the same agent, tools and judge. `TRAIN_ENV` in `run.env`
-switches to BrowseComp or DAPO math instead. See [Training environment](#training-environment).
+The recipe's config trains on DAPO math, with NeMo-RL's math environment or through
+[NeMo Gym](https://github.com/NVIDIA-NeMo/Gym). An example can bring its own Gym environment: its
+own config, data preparation and keys, which the recipe runs as they are. See
+[Training environment](#training-environment). The
+[NeMo Gym evaluation recipe](../../../evaluation/recipes/nemo-gym/README.md) scores the deployment's
+policy on BrowseComp.
 
 ![One training step: the trainer exports weights, the cwtrain synchronizer uploads a full or delta snapshot to Object Storage, creates a hot-load and polls until every replica is READY; the next rollout batch samples fresh weights from the OpenAI-compatible endpoint.](../../../docs/hotload-flow.drawio.svg)
 
@@ -28,8 +28,8 @@ Each example runs this recipe end to end on Kubernetes, with what you need, the 
 cleanup:
 
 - [`nemo-rl-grpo-nemotron-3.5-lightning-30b-a3b`](../../examples/nemo-rl-grpo-nemotron-3.5-lightning-30b-a3b/README.md):
-  GRPO on Nemotron 3.5 Lightning as a Gym search agent on SimpleQA (the recipe's default
-  `TRAIN_ENV`).
+  GRPO on Nemotron 3.5 Lightning as a Gym search agent on SimpleQA, with You.com search and an
+  LLM judge.
 
 An example's `run.env` holds the settings that this README names. This recipe's `k8s/` directory
 holds the trainer Job (`trainer-job.yaml`), the script that the Job runs (`run-trainer.sh`), the Job
@@ -245,70 +245,52 @@ GPU backend.
 
 ## Training environment
 
-`TRAIN_ENV` in `run.env` selects what the policy trains on. The launcher turns it into Hydra
-overrides before `EXTRA_OVERRIDES`, so an override there still wins.
+[`grpo_coreweave.yaml`](grpo_coreweave.yaml) trains on DAPO-Math-17k with NeMo-RL's own math
+environment and math-verify rewards. With `env.should_use_nemo_gym=true` in `EXTRA_OVERRIDES`, it
+runs Gym's `math_with_judge_simple_agent` on the same questions instead (math-verify, with the LLM
+judge off): cwtrain writes them as a `NemoGymDataset` under `/work/hotload/nemo-gym`.
 
-| `TRAIN_ENV` | Environment | Reward | Default `MAX_SEQUENCE_LENGTH` |
-| --- | --- | --- | --- |
-| `simpleqa` (default) | Gym's BrowseComp agent with web search and browse tools, on SimpleQA | LLM judge compares the final answer with the ground truth | 16384 |
-| `browsecomp` | The same agent and judge, on BrowseComp | LLM judge | 16384 |
-| `dapo` | Gym's `math_with_judge_simple_agent` on DAPO-Math-17k | math-verify (its LLM judge is off) | 3072 |
-| `math` | NeMo-RL's own math environment on DAPO-Math-17k, without Gym | math-verify | 3072 |
-
-The Gym environments use NeMo-RL's bundled Gym revision and actor environments. Gym owns sampling
-and rewards. NeMo-RL owns optimization. cwtrain keeps the blocking checkpoint hot-load between
+Gym environments use NeMo-RL's bundled Gym revision and actor environments. Gym owns sampling and
+rewards. NeMo-RL owns optimization. cwtrain keeps the blocking checkpoint hot-load between
 batches. Asynchronous GRPO and nonblocking hot-load are rejected. The Gym actor resolves every
 credential itself, so no key is in its serialized config or Ray runtime environment.
 
-### Search agent (SimpleQA and BrowseComp)
+### An example's own environment
 
-The launcher downloads OpenAI's published question set and writes it as a `NemoGymDataset` under
-`/work/hotload/nemo-gym`: SimpleQA's 4,326 short fact-seeking questions, or BrowseComp's 1,266
-(decrypted). The prompts and tools are the same as Gym's `benchmarks/browsecomp` benchmark.
-`++data.train.max_samples=<n>` limits the questions.
+An example that trains on other data or another environment sets these in its `run.env`. The
+recipe stays as it is.
 
-SimpleQA is the default because GRPO learns only from a group of trajectories whose rewards differ.
-The agent answers many SimpleQA questions in a few tool calls, so groups get mixed rewards. A
-BrowseComp question takes tens to hundreds of tool calls, more than a 16,384-token trajectory holds,
-so its rewards stay at 0 and the step learns nothing. BrowseComp stays the evaluation. Both sets
-have only a test split, so a model trained on one can no longer be evaluated on it.
-
-To score the deployment's current policy, run the
-[NeMo Gym evaluation recipe](../../../evaluation/recipes/nemo-gym/README.md) against this
-deployment while no trainer Job runs. It uses the same tools and judge, on CPU, and creates no
-deployment of its own.
-
-| Setting (`run.env`) | Default | What it sets |
+| Setting (`run.env`) | Default | What it does |
 | --- | --- | --- |
-| `JUDGE_BASE_URL` | `https://api.inference.wandb.ai/v1` | the judge's OpenAI-compatible endpoint |
-| `JUDGE_MODEL` | `zai-org/GLM-5.2` | the judge model |
-| `JUDGE_KEY_SECRET` | `judge-api-key` | the Secret with the judge key, under `api_key` |
-| `SEARCH_KEY_SECRET` | `search-api-key` | the Secret with the You.com key, under `api_key` |
-| `MAX_SEQUENCE_LENGTH` | 16384 | tokens per trajectory: prompt, turns and tool results |
+| `KIT_EXTRA_FILES` | empty | files that `make-kit.sh` adds to the kit at `/opt/cwtrain`, such as the example's config and scripts (whitespace-separated paths) |
+| `GRPO_CONFIG` | `grpo_coreweave.yaml` | the config in the kit that `run_grpo.py` runs. An example's config names `defaults: "grpo_coreweave.yaml"` and overrides what it needs |
+| `EXTRA_PREPARE_DATA` | empty | a Python script in the kit and its arguments. The launcher runs it with the NeMo-RL venv's interpreter before training, for example to download and write the example's data |
+| `GYM_SECRET` | none | a Secret mounted at `/secrets/gym`, with the keys that the environment's servers need. The Job mounts it as optional |
+
+A Gym environment is a `NemoGymDataset` with `env.nemo_gym.config_paths` and the server
+instances it adds in `env.nemo_gym`. Three entries there ask the Gym actor for what the servers need
+before they start. They stay out of the logged config, and the actor applies them after Ray sends
+it the config:
+
+- `coreweave_secrets`: a dotted field of the Gym config, such as
+  `judge_model.responses_api_models.vllm_model.api_key`, and the key file to fill it from, such as
+  `/secrets/gym/judge_api_key`.
+- `coreweave_files`: a path in the Gym checkout and the file to copy there, such as a resources
+  server's entrypoint from the kit.
+- `coreweave_env`: environment variables for Gym's servers.
+
+cwtrain checks at start that every key file and source file exists, so a missing Secret
+stops the run before training.
 
 The training step needs about 0.5 MiB per token of a sequence for its fp32 logits, on top of 64 GiB
-of weights, gradients and optimizer state per GPU. On the eight-H100 trainer, 16,384 tokens fits
-every step; a longer sequence runs out of GPU memory once the optimizer state exists, after the
-first step. The config sets `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` for the policy
-workers, so fragmentation leaves no memory unusable. Raise `MAX_SEQUENCE_LENGTH` only with more
-trainer memory.
+of weights, gradients and optimizer state per GPU. On the eight-H100 trainer, 16,384 tokens
+(`policy.max_total_sequence_length`) fits every step; a longer sequence runs out of GPU memory once
+the optimizer state exists, after the first step. The config sets
+`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` for the policy workers, so fragmentation leaves
+no memory unusable.
 
-`env.nemo_gym.search.max_steps` in `grpo_coreweave.yaml` limits the tool-calling turns per
-trajectory (12). `env.nemo_gym.search.search_env` sets `YOU_SEARCH_MAX_CHARS` (2,000), the
-characters kept of each search or browse result, so that about ten tool calls fit in a trajectory.
-`env.nemo_gym.search.exclude_domains` lists the sites that the tools never return (default
-`huggingface.co`, which publishes the questions with their answers).
-
-Gym's BrowseComp harness calls Tavily. The kit carries the Gym eval recipe's
-[`you_search.py`](../../../evaluation/recipes/nemo-gym/you_search.py), and
-`env.nemo_gym.search.search_entrypoint` points at it. The Gym actor copies it into the harness
-and runs the harness with it. It serves the same `search` and `browse` tools from the You.com Search
-API (with live-crawled page text) and Contents API. The harness's page handling and judge prompt
-stay unchanged.
-
-A trajectory runs in one context: the agent's context resets are off, because a reset drops
-earlier turns and so changes the trajectory's tokens. A trajectory that reaches
-`MAX_SEQUENCE_LENGTH` ends there.
+The [example](../../examples/nemo-rl-grpo-nemotron-3.5-lightning-30b-a3b/README.md#training-environment)
+trains Gym's BrowseComp agent this way, on SimpleQA, with You.com search and an LLM judge.
 
 ### Exact tokens across turns
 
@@ -336,14 +318,13 @@ Limits of the adapter:
 
 ### Validation
 
-That run used `TRAIN_ENV=dapo`. A `TRAIN_ENV=browsecomp` run on 16 questions also completed two GRPO
-steps of 32 trajectories each, on one eight-H100 node against four two-H100 inference replicas.
-
-An end-to-end run with Nemotron 3.5 Lightning BF16 completed two GRPO steps of 32 Gym trajectories
-each. It used eight trainer H100s and a two-H100 inference replica. The first full checkpoint and
-the trained delta between steps both hot-loaded. The serving replica's identity was verified before
-sampling. The Job exited successfully, and generation still worked after the trained delta was
-applied. This is a smoke test of training and weight propagation, not a model-quality benchmark.
+An end-to-end run with Nemotron 3.5 Lightning BF16 completed two GRPO steps of 32 Gym DAPO
+trajectories each. It used eight trainer H100s and a two-H100 inference replica. The first full
+checkpoint and the trained delta between steps both hot-loaded. The serving replica's identity was
+verified before sampling. The Job exited successfully, and generation still worked after the
+trained delta was applied. This is a smoke test of training and weight propagation, not a
+model-quality benchmark. The example's search agent also completed GRPO steps of 32 trajectories,
+on one eight-H100 node against four two-H100 inference replicas.
 
 For a short validation run, add `++data.train.max_samples=32` and `grpo.max_num_steps=2` to
 `EXTRA_OVERRIDES`. The sample limit is optional. Without it, the launcher converts the complete
