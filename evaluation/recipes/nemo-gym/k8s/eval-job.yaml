@@ -37,6 +37,7 @@ spec:
         - {name: LIMIT, value: "${LIMIT}"}
         - {name: GYM_REF, value: "${GYM_REF}"}
         - {name: MAX_CONTEXT_TOKENS, value: "${MAX_CONTEXT_TOKENS}"}
+        - {name: MAX_STEPS, value: "${MAX_STEPS}"}
         # the target model: the hot-load deployment's endpoint and served model name
         - {name: CWTRAIN_ROLLOUT_BASE_URL, value: "${ROLLOUT_BASE_URL}"}
         - {name: CWTRAIN_ROLLOUT_MODEL, value: "${ROLLOUT_MODEL}"}

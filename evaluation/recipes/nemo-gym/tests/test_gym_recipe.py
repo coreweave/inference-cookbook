@@ -55,6 +55,7 @@ def browsecomp_args(**overrides):
         search_api_key_file=None,
         max_context_tokens=32768,
         context_reset_tokens=None,
+        max_steps=50,
     )
     return argparse.Namespace(**(values | overrides))
 
@@ -72,6 +73,7 @@ def test_browsecomp_is_the_default_with_glm_judge_and_nemotron_target():
     assert env["CWTRAIN_ROLLOUT_MODEL"] == "nemotron-lightning-hotload"
     assert env["CWTRAIN_MAX_CONTEXT_TOKENS"] == "32768"
     assert env["CWTRAIN_CONTEXT_RESET_TOKENS"] == "16384"
+    assert env["CWTRAIN_MAX_STEPS"] == "50"  # bounds each task, not Gym's 400
     assert env["CWTRAIN_JUDGE_MODEL"] == "zai-org/GLM-5.2"
     assert env["CWTRAIN_JUDGE_BASE_URL"] == "https://api.inference.wandb.ai/v1"
     assert env["CWTRAIN_JUDGE_API_KEY"] == "judge-key"
@@ -138,6 +140,7 @@ def test_recipe_configs_override_the_gym_benchmark():
     assert agent.save_model_call_using_vllm_tokenize_endpoint is False
     raw = OmegaConf.to_container(agent, resolve=False)
     assert raw["context_reset_tokens"] == "${oc.env:CWTRAIN_CONTEXT_RESET_TOKENS}"
+    assert raw["max_steps"] == "${oc.env:CWTRAIN_MAX_STEPS}"
     assert "judge_model" in config
 
 

@@ -150,6 +150,15 @@ The trajectories and Gym's metrics stay in the pod's `/work/results` until the J
 new `EVAL_NAME` for each evaluation. On a cluster that admits Jobs through Kueue, add the label
 `kueue.x-k8s.io/queue-name: <local queue>` to the Job's metadata, as for the trainer Job.
 
+### Eval time
+
+Each task's time grows with its tool calls, and a hard BrowseComp question can take hundreds.
+`MAX_STEPS` (`--max-steps`, default 50) caps the tool-calling turns per task; Gym's benchmark
+allows 400. A task that reaches the cap is graded on the answer it gives then, usually none, so a
+lower cap lowers the score as well as the time. `LIMIT` (`--limit`, default 5) sets how many tasks
+run. They come from Gym v0.6.0's fixed 400-question subset in the same order, so scores from runs
+with the same settings compare.
+
 ### Context length
 
 BrowseComp allows 4,096 generated tokens per turn. Two settings bound a whole trajectory:

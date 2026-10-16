@@ -40,6 +40,8 @@ DEFAULT_BENCHMARK = "browsecomp"
 DEFAULT_MODEL = "nemotron-lightning-hotload"
 # The hot-load deployment's max-model-len (training/recipes/nemo-rl/deployment.nemotron.example.json).
 DEFAULT_MAX_CONTEXT_TOKENS = 32768
+# Tool-calling turns per BrowseComp task. Gym's benchmark allows 400; 50 bounds each task's time.
+DEFAULT_MAX_STEPS = 50
 # Generated tokens per BrowseComp turn (browsecomp.yaml's max_tokens).
 TURN_TOKENS = 4096
 DEFAULT_JUDGE_MODEL = "zai-org/GLM-5.2"
@@ -144,6 +146,7 @@ def start_environment(
             CWTRAIN_SEARCH_API_KEY=key,
             CWTRAIN_EXCLUDE_DOMAINS_FILE=str(RECIPE / "exclude_domains.json"),
             CWTRAIN_MAX_CONTEXT_TOKENS=str(args.max_context_tokens),
+            CWTRAIN_MAX_STEPS=str(args.max_steps),
             CWTRAIN_CONTEXT_RESET_TOKENS=str(
                 context_reset_tokens(args.max_context_tokens, args.context_reset_tokens)
             ),
@@ -224,6 +227,12 @@ def main() -> None:
         type=int,
         help="Prompt size at which the BrowseComp agent resets its context "
         "(default: half of --max-context-tokens)",
+    )
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=DEFAULT_MAX_STEPS,
+        help=f"Tool-calling turns per BrowseComp task (default: {DEFAULT_MAX_STEPS}; Gym's is 400)",
     )
     parser.add_argument("--limit", type=int, default=5, help="Tasks to collect (default: 5)")
     parser.add_argument("--output", type=Path)

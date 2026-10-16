@@ -39,6 +39,8 @@ browsecomp_benchmark_resources_server:
 browsecomp_benchmark_agent:
   responses_api_agents:
     browsecomp_agent:
+      # Tool-calling turns per task (--max-steps). Gym's 400 lets one task run for an hour.
+      max_steps: ${oc.env:CWTRAIN_MAX_STEPS}
       # The deployment's max-model-len (--max-context-tokens).
       max_context_tokens: ${oc.env:CWTRAIN_MAX_CONTEXT_TOKENS}
       # Reset below max_context_tokens (--context-reset-tokens). Gym's 50,000 would overflow the
