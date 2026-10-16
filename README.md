@@ -45,12 +45,13 @@ says what goes where.
 | [miles](training/recipes/miles/README.md) | [miles](https://github.com/radixark/miles) | GRPO, synchronous or one step ahead | None: miles calls the `cwtrain` hook after each weight sync | `radixark/miles:v0.1.1` |
 | [slime](training/recipes/slime/README.md) | [slime](https://github.com/THUDM/slime) | GRPO | Three small patches, applied by the launcher, so slime publishes weights without inference engines of its own | slime `8ee9c1e` |
 | [NeMo-RL](training/recipes/nemo-rl/README.md) | [NeMo-RL](https://github.com/NVIDIA-NeMo/RL) | GRPO | Patches, applied by the launcher, that register the `coreweave` backend and optional Gym rollouts | NeMo-RL `v0.7.0` |
+| [Axolotl SFT](training/recipes/axolotl-sft/README.md) | [Axolotl](https://github.com/axolotl-ai-cloud/axolotl) | SFT, full or LoRA (merged) | None: stock `axolotl train`; cwtrain publishes the result as a full snapshot | Axolotl `v0.20.0` |
 | [NeMo Gym](evaluation/recipes/nemo-gym/README.md) | [NeMo Gym](https://github.com/NVIDIA-NeMo/Gym) | Evaluation with scored rollouts | None: cwtrain provisions and cleans up the gateway and deployment; Gym runs the agent and scores responses | NeMo Gym `v0.6.0` |
 
-The training recipes use DAPO-Math-17k and run on Kubernetes. NeMo-RL uses Nemotron 3.5
-Lightning BF16; slime and miles use Qwen3-4B. Each ships its own manifests and an example
-deployment request. They share the rest of the setup, with the example bucket policy, in
-[`k8s/`](k8s/README.md).
+The training recipes run on Kubernetes. The RL recipes use DAPO-Math-17k: NeMo-RL with Nemotron
+3.5 Lightning BF16, slime and miles with Qwen3-4B. Axolotl SFT fine-tunes Qwen3-4B on
+NuminaMath-CoT. Each ships its own manifests and an example deployment request. They share the
+rest of the setup, with the example bucket policy, in [`k8s/`](k8s/README.md).
 
 ## Before you start
 
@@ -189,6 +190,7 @@ k8s/                          Kubernetes and object storage setup that the train
 training/recipes/miles/       GRPO with miles, with Kubernetes manifests
 training/recipes/slime/       GRPO with slime, with Kubernetes manifests and the patches slime needs
 training/recipes/nemo-rl/     GRPO with NeMo-RL, with Kubernetes manifests and the patches it needs
+training/recipes/axolotl-sft/ SFT with Axolotl, published to the deployment as a full snapshot
 evaluation/recipes/nemo-gym/  Scored evaluation with NeMo Gym against a temporary deployment
 docs/                         Diagrams
 ```

@@ -1,0 +1,46 @@
+# SPDX-FileCopyrightText: 2026 CoreWeave, Inc.
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-PackageName: inference-cookbook
+#
+# Axolotl config for the recipe's smoke run: a full fine-tune of Qwen3-4B on 2,000 rows of
+# NuminaMath-CoT, with FSDP2. launch.py sets base_model (the staged copy), output_dir and
+# max_steps; EXTRA_TRAIN_ARGS overrides any other key.
+base_model: Qwen/Qwen3-4B
+# lets launch.py and EXTRA_TRAIN_ARGS override any key
+strict: false
+
+# The deployment keeps the base model's chat template, so training uses it too, with thinking off,
+# as the RL recipes query Qwen3.
+chat_template: tokenizer_default
+chat_template_kwargs: {enable_thinking: false}
+datasets:
+  - path: AI-MO/NuminaMath-CoT
+    revision: 9d8d210c9f6a36c8f3cd84045668c9b7800ef517
+    data_files: data/train-00000-of-00005.parquet  # one 235 MiB shard, not all five
+    split: train[:2000]
+    type: chat_template
+
+sequence_len: 2048
+# sdpa needs no extra package on either architecture; it does not support sample packing
+attn_implementation: sdpa
+sample_packing: false
+
+bf16: true
+micro_batch_size: 1
+gradient_accumulation_steps: 4
+learning_rate: 1e-5
+optimizer: adamw_torch_fused
+lr_scheduler: cosine
+warmup_ratio: 0.1
+logging_steps: 1
+# only the final model is published, so no intermediate checkpoints
+save_strategy: "no"
+
+fsdp_version: 2
+fsdp_config:
+  # the final save is one plain Hugging Face checkpoint, gathered on rank 0
+  state_dict_type: FULL_STATE_DICT
+  auto_wrap_policy: TRANSFORMER_BASED_WRAP
+  transformer_layer_cls_to_wrap: Qwen3DecoderLayer
+  reshard_after_forward: true
+  activation_checkpointing: true

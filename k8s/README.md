@@ -1,10 +1,11 @@
 # Shared Kubernetes and storage files
 
 The training recipes ([miles](../training/recipes/miles/README.md),
-[slime](../training/recipes/slime/README.md) and [NeMo-RL](../training/recipes/nemo-rl/README.md))
-run on Kubernetes with the files in this directory. Each recipe's own `k8s/` directory holds only
-what is specific to it: `run.env.example`, `trainer-job.yaml`, `run-trainer.sh` and `make-kit.sh`,
-and for NeMo-RL a staging Job and script of its own.
+[slime](../training/recipes/slime/README.md), [NeMo-RL](../training/recipes/nemo-rl/README.md) and
+[Axolotl SFT](../training/recipes/axolotl-sft/README.md)) run on Kubernetes with the files in this
+directory. Each recipe's own `k8s/` directory holds only what is specific to it: `run.env.example`,
+`trainer-job.yaml`, `run-trainer.sh` and `make-kit.sh`, and for NeMo-RL a staging Job and script of
+its own.
 
 ## Using the files
 

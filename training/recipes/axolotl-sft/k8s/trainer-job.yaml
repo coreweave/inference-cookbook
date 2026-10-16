@@ -1,0 +1,95 @@
+# SPDX-FileCopyrightText: 2026 CoreWeave, Inc.
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-PackageName: inference-cookbook
+#
+# Axolotl SFT trainer that publishes the fine-tuned model into a CoreWeave hot-load deployment.
+# Render with: ../../../../k8s/render.sh run.env trainer-job.yaml | kubectl apply -f -
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: cwtrain-${JOB_NAME}
+  namespace: ${NAMESPACE}
+  labels: {app.kubernetes.io/part-of: cwtrain-recipe}
+spec:
+  # the fine-tuned weights live on the pod's disk until they are uploaded; a retry would train again
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 172800
+  template:
+    metadata:
+      labels: {app.kubernetes.io/part-of: cwtrain-recipe, app.kubernetes.io/component: trainer}
+    spec:
+      restartPolicy: Never
+      # The trainer's own principal: with Workload Identity Federation, its object storage
+      # credentials come from this service account (README, "What you need"). Empty: "default".
+      serviceAccountName: "${TRAINER_SERVICE_ACCOUNT}"
+      nodeSelector: {node.kubernetes.io/instance-type: "${INSTANCE_TYPE}"}
+      tolerations:
+      - {key: is_gpu, operator: Exists}
+      containers:
+      - name: trainer
+        image: ${TRAINER_IMAGE}
+        # args, not command: the image's entrypoint sets up the CUDA environment, then runs these
+        args: ["bash", "/opt/cwtrain/run-trainer.sh"]
+        env:
+        # what to train
+        - {name: HF_MODEL, value: "${HF_MODEL}"}
+        - {name: HF_REVISION, value: "${HF_REVISION}"}
+        - {name: MODEL_SLUG, value: "${MODEL_SLUG}"}
+        - {name: BASE_S3_URI, value: "${BASE_S3_URI}"}
+        - {name: TRAINER_GPUS, value: "${TRAINER_GPUS}"}
+        - {name: MAX_STEPS, value: "${MAX_STEPS}"}
+        # block scalar: the value may carry shell quotes, e.g. --chat-template-kwargs '{"a":1}'
+        - name: EXTRA_TRAIN_ARGS
+          value: |-
+            ${EXTRA_TRAIN_ARGS}
+        # Axolotl's telemetry is on unless this is set
+        - {name: AXOLOTL_DO_NOT_TRACK, value: "${AXOLOTL_DO_NOT_TRACK}"}
+        # model and dataset downloads go to the work volume
+        - {name: HF_HOME, value: /work/hf}
+        # publishing the result
+        - {name: CWTRAIN_HOTLOAD_DEPLOYMENT_ID, value: "${DEPLOYMENT_ID}"}
+        - {name: CWTRAIN_HOTLOAD_RUN_ID, value: "${RUN_ID}"}
+        - {name: CWTRAIN_HOTLOAD_WAIT, value: "${HOTLOAD_WAIT}"}
+        - {name: CWTRAIN_HOTLOAD_TIMEOUT, value: "${HOTLOAD_TIMEOUT}"}
+        - {name: CWTRAIN_HOTLOAD_VERIFY, value: "${HOTLOAD_VERIFY}"}
+        # empty: reset_all, so requests after the swap reuse no KV cache of the base weights
+        - {name: CWTRAIN_HOTLOAD_PROMPT_CACHE_POLICY, value: "${HOTLOAD_PROMPT_CACHE_POLICY}"}
+        - {name: COREWEAVE_API_URL, value: "${COREWEAVE_API_URL}"}
+        # the API token stays in a Secret, never in the Job spec; the pod does not start without it
+        - name: COREWEAVE_API_TOKEN
+          valueFrom: {secretKeyRef: {name: "${API_TOKEN_SECRET}", key: token}}
+        - {name: CWTRAIN_API_HEADERS, value: '${CWTRAIN_API_HEADERS}'}
+        - {name: CWTRAIN_API_INSECURE, value: "${CWTRAIN_API_INSECURE}"}
+        # object storage for the snapshot
+        - {name: CW_S3_ENDPOINT, value: "${CW_S3_ENDPOINT}"}
+        - {name: AWS_CONFIG_FILE, value: /aws/config}
+        - {name: AWS_SHARED_CREDENTIALS_FILE, value: /aws/credentials}
+        - {name: AWS_EC2_METADATA_DISABLED, value: "true"}
+        # Workload Identity Federation: when STORAGE_SECRET holds no key, boto3 exchanges the
+        # service account's token for temporary credentials here. A key in the Secret wins.
+        - {name: AWS_CONTAINER_CREDENTIALS_FULL_URI, value: "https://api.coreweave.com/v1/cwobject/temporary-credentials/oidc/${ORG_ID}"}
+        - {name: AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE, value: /var/run/secrets/caios/token}
+        - {name: PYTHONUNBUFFERED, value: "1"}
+        volumeMounts:
+        - {name: kit, mountPath: /opt/cwtrain, readOnly: true}
+        - {name: aws, mountPath: /aws, readOnly: true}
+        - {name: caios-token, mountPath: /var/run/secrets/caios, readOnly: true}
+        - {name: work, mountPath: /work}
+        - {name: dshm, mountPath: /dev/shm}
+        resources:
+          requests: {nvidia.com/gpu: ${TRAINER_GPUS}, cpu: "16", memory: 256Gi}
+          limits: {nvidia.com/gpu: ${TRAINER_GPUS}, cpu: "32", memory: 512Gi}
+      volumes:
+      - name: kit
+        configMap: {name: ${KIT_NAME}}
+      - name: aws
+        secret: {secretName: ${STORAGE_SECRET}}
+      - name: caios-token
+        projected:
+          sources:
+          - serviceAccountToken: {audience: "https://coreweave.com/iam", expirationSeconds: 3600, path: token}
+      # the base model, the run's output, the merged model and the snapshot, about 4x the model
+      - name: work
+        emptyDir: {sizeLimit: 200Gi}
+      - name: dshm
+        emptyDir: {medium: Memory, sizeLimit: 64Gi}
