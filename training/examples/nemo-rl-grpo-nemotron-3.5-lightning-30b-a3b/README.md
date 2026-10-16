@@ -1,8 +1,10 @@
 # Example: GRPO on Nemotron 3.5 Lightning with NeMo-RL
 
 This example runs the [NeMo-RL recipe](../../recipes/nemo-rl/README.md) on Kubernetes: GRPO on
-Nemotron 3.5 Lightning (30B-A3B, BF16) with the DAPO-Math-17k prompts. The rollouts come from a
-Dedicated Inference deployment with one replica, and every refit is hot-loaded into it. It uses the
+Nemotron 3.5 Lightning (30B-A3B, BF16) as a NeMo Gym search agent on SimpleQA, the recipe's default
+`TRAIN_ENV`. The rollouts come from a Dedicated Inference deployment with four replicas, and every
+refit is hot-loaded into it. The [NeMo Gym evaluation](../../../evaluation/recipes/nemo-gym/README.md)
+scores the trained policy on BrowseComp against the same deployment. It uses the
 recipe's config, [`grpo_coreweave.yaml`](../../recipes/nemo-rl/grpo_coreweave.yaml), and its
 staging Job, [`stage-nemotron-job.yaml`](../../recipes/nemo-rl/k8s/stage-nemotron-job.yaml), as
 they are. The recipe's README explains the loop, its settings and its failure handling.
@@ -11,10 +13,10 @@ they are. The recipe's README explains the loop, its settings and its failure ha
 | --- | --- |
 | Recipe | [NeMo-RL](../../recipes/nemo-rl/README.md): synchronous GRPO with the DTensor (Automodel) policy backend |
 | Model | [`nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16`](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16), at the commit that `HF_REVISION` pins, without its MTP heads ([`prepare_model.py`](../../recipes/nemo-rl/prepare_model.py), which the staging Job runs) |
-| Data | [`BytedTsinghua-SIA/DAPO-Math-17k`](https://huggingface.co/datasets/BytedTsinghua-SIA/DAPO-Math-17k), which NeMo-RL's `DAPOMath17K` dataset loads; the recipe's config names it |
-| Reward | NeMo-RL's `math` environment, with `hf_math_verify` |
+| Data | OpenAI's [SimpleQA](https://openai.com/index/introducing-simpleqa/) questions, which the recipe's `TRAIN_ENV=simpleqa` downloads |
+| Environment and reward | Gym's BrowseComp agent with You.com `search` and `browse` tools; an LLM judge (`zai-org/GLM-5.2` on W&B Inference) grades each final answer |
 | Trainer | 8 GPUs of a `gd-8xh100ib-i128` node, eight-way expert parallelism; 30 GRPO steps (`NUM_STEPS`) of 8 prompts × 4 generations |
-| Deployment | [`deployment.example.json`](deployment.example.json): `dynamo-vllm` on 2 H100 GPUs, 1 replica, `autoscaling.concurrency` 8 |
+| Deployment | [`deployment.example.json`](deployment.example.json): `dynamo-vllm`, 4 replicas of 2 H100 GPUs each, `autoscaling.concurrency` 8, `max-model-len` 32,768 |
 
 ## What you need
 
@@ -137,7 +139,9 @@ CTX=$(kubectl config current-context)
 | 6. Create the deployment | [below](#creating-the-deployment); put its `id` and `rollout_base_url` in `run.env` as `DEPLOYMENT_ID` and `ROLLOUT_BASE_URL` |
 | 7. Inference API key Secret | `kubectl -n "$NAMESPACE" create secret generic "$INFERENCE_KEY_SECRET" --from-file=api_key=<file>` |
 | 8. CoreWeave API token Secret | `kubectl -n "$NAMESPACE" create secret generic "$API_TOKEN_SECRET" --from-file=token=<file>` |
-| 9. Trainer | `"$K/render.sh" run.env "$R/trainer-job.yaml" \| kubectl apply -f -` |
+| 9. Judge API key Secret | `kubectl -n "$NAMESPACE" create secret generic "$JUDGE_KEY_SECRET" --from-file=api_key=<file>` |
+| 10. You.com API key Secret | `kubectl -n "$NAMESPACE" create secret generic "$SEARCH_KEY_SECRET" --from-file=api_key=<file>` |
+| 11. Trainer | `"$K/render.sh" run.env "$R/trainer-job.yaml" \| kubectl apply -f -` |
 
 Notes on the steps:
 
@@ -146,6 +150,12 @@ Notes on the steps:
 - **Step 8** uses a token with the Inference Admin role, because it creates hot-loads. One token
   can serve both steps. The trainer pod does not start until both Secrets exist. Reading the
   tokens from files keeps them out of your shell history.
+- **Steps 9 and 10** hold the judge endpoint's key (a W&B API key for the default `JUDGE_BASE_URL`)
+  and the You.com key. The Job mounts both Secrets as optional, so a `dapo` or `math` run needs
+  neither, and a `simpleqa` or `browsecomp` run stops at start when either file is missing. To
+  create them from keys that are exported in your shell, use
+  `--from-file=api_key=<(printf %s "$WANDB_API_KEY")` and
+  `--from-file=api_key=<(printf %s "$YOU_API_KEY")`.
 - **Step 2**'s storage key must stay valid through staging, node provisioning and training. Use an
   object storage key that lasts for the whole run. If you copy temporary `credential_process`
   output into a static Secret, it does not refresh.
@@ -204,7 +214,10 @@ still exists and holds its GPUs until you delete it** ([Cleaning up](#cleaning-u
 The trainer also waits for READY before its first hot-load, within `HOTLOAD_TIMEOUT`.
 
 The example sets `gpu-memory-utilization`, `max-model-len`, `max-num-seqs` and Nemotron's
-`reasoning-parser`. Add other options only from the engine options that
+`reasoning-parser`. It runs no tool-call parser: cwtrain parses Nemotron's tool-call text itself,
+in the training adapter and in the Gym evaluation. Its `max-model-len` of 32,768 tokens fits a
+trajectory of the recipe's default `MAX_SEQUENCE_LENGTH` (16,384) and the evaluation's longer ones.
+Add other options only from the engine options that
 `cwtrain deployment parameters` lists.
 
 `deployment.run.json` is the request body of `POST /v1alpha1/inference/deployments`. So the `curl`
@@ -257,9 +270,11 @@ print(p.strip("/"))')
     "${HOTLOAD_PREFIX:?set HOTLOAD_PREFIX in run.env to the hotLoad.pathPrefix of the deployment}" "${NAMESPACE:?}" \
     "${BUCKET:?}" "${BUCKET_ZONE:?}" "${MODEL_PREFIX:?}" "${MODEL_SLUG:?}" "${JOB_NAME:?}" "${KIT_NAME:?}" \
     "${STORAGE_SECRET:?}" "${ADMIN_STORAGE_SECRET:?}" "${INFERENCE_KEY_SECRET:?}" "${API_TOKEN_SECRET:?}" \
+    "${JUDGE_KEY_SECRET:?}" "${SEARCH_KEY_SECRET:?}" \
     "${TRAINER_SERVICE_ACCOUNT?set TRAINER_SERVICE_ACCOUNT in run.env, empty for "default"}"
   case "$DEPLOYMENT_ID $NAMESPACE $BUCKET $BUCKET_ZONE $MODEL_PREFIX $MODEL_SLUG $HOTLOAD_PREFIX $JOB_NAME
         $KIT_NAME $STORAGE_SECRET $ADMIN_STORAGE_SECRET $INFERENCE_KEY_SECRET $API_TOKEN_SECRET
+        $JUDGE_KEY_SECRET $SEARCH_KEY_SECRET
         $TRAINER_SERVICE_ACCOUNT" in
     *'<'[A-Za-z]*'>'*) echo "fill in run.env before cleaning up" >&2; exit 1;;
   esac
@@ -271,7 +286,7 @@ print("\n".join(sorted({re.sub(r"-v[0-9]+$", "", h["spec"]["identity"]) for h in
   cwtrain deployment delete "$DEPLOYMENT_ID" --ignore-not-found
   kubectl -n "$NAMESPACE" delete job "cwtrain-$JOB_NAME" "cwtrain-stage-$JOB_NAME" cwtrain-make-bucket --ignore-not-found
   kubectl -n "$NAMESPACE" delete secret "$STORAGE_SECRET" "$ADMIN_STORAGE_SECRET" "$INFERENCE_KEY_SECRET" \
-    "$API_TOKEN_SECRET" --ignore-not-found
+    "$API_TOKEN_SECRET" "$JUDGE_KEY_SECRET" "$SEARCH_KEY_SECRET" --ignore-not-found
   kubectl -n "$NAMESPACE" delete configmap "$KIT_NAME" --ignore-not-found
   [ -z "$TRAINER_SERVICE_ACCOUNT" ] || kubectl -n "$NAMESPACE" delete serviceaccount "$TRAINER_SERVICE_ACCOUNT" --ignore-not-found
   [ -n "$runs" ] || echo "found no hot-loads of $DEPLOYMENT_ID, so nothing under $HOTLOAD_PREFIX/ is removed" >&2
@@ -312,8 +327,8 @@ The recipe's [Concurrency](../../recipes/nemo-rl/README.md#concurrency) section 
 settings that decide how many sequences are sampled at once. In this example,
 [`deployment.example.json`](deployment.example.json) sets `autoscaling.concurrency` to 8, and
 `run.env.example` keeps `ROLLOUT_CONCURRENCY` at the config's 32. With these settings (8 prompts ×
-4 generations per step, one replica at 8), the 32 sequences of a step run in groups of at most
-eight.
+4 generations per step, four replicas at 8), the 32 sequences of a step run at most 32 at a time,
+so a whole step runs at once.
 
 ## Pitfalls
 

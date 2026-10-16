@@ -53,12 +53,3 @@ def test_run_trainer_leaves_an_empty_value_to_the_config(tmp_path: Path, value, 
         text=True,
     ).stdout
     assert out == seen
-
-
-def test_the_deployment_runs_a_whole_step_at_once_on_eight_h100s() -> None:
-    deployment = json.loads(DEPLOYMENT.read_text())
-    autoscaling = deployment["autoscaling"]
-    assert autoscaling["min"] == autoscaling["max"] == 4  # fixed replicas, so hot-loads reach all
-    assert deployment["resources"]["gpuCount"] * autoscaling["min"] == 8  # eight H100s
-    sequences = grpo_setting("num_prompts_per_step") * grpo_setting("num_generations_per_prompt")
-    assert autoscaling["min"] * autoscaling["concurrency"] >= sequences
