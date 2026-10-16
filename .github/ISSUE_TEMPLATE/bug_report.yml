@@ -21,6 +21,7 @@ body:
         - miles recipe
         - slime recipe
         - NeMo-RL recipe
+        - Axolotl SFT recipe
         - Documentation
         - Other
     validations:

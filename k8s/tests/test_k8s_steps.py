@@ -39,6 +39,10 @@ class Recipe:
     deployment: str  # the example deployment that the README creates
     model_prefix: str  # MODEL_PREFIX and MODEL_SLUG in a filled-in run.env.example
     model_slug: str
+    # a variable that run.env.example leaves unfilled and trainer-job.yaml uses
+    placeholder: str = "ROLLOUT_BASE_URL"
+    inference_key: bool = True  # whether the trainer reads an inference API key Secret
+    diagram: str = "docs/hotload-flow.drawio.svg"  # the hot-load flow that the README embeds
 
     @property
     def path(self) -> Path:
@@ -73,6 +77,17 @@ RECIPES = [
         deployment="deployment.nemotron.example.json",
         model_prefix="cookbook/filled/models",  # cookbook/${DEPLOYMENT_RUN}/models
         model_slug="NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16",
+    ),
+    Recipe(
+        name="axolotl-sft",
+        extra="EXTRA_TRAIN_ARGS",
+        run_id="qwen3-4b-sft",
+        deployment="deployment.example.json",
+        model_prefix="models",
+        model_slug="Qwen3-4B",
+        placeholder="DEPLOYMENT_ID",  # SFT samples no rollouts, so it has no rollout endpoint
+        inference_key=False,
+        diagram="docs/hotload-flow-sft.drawio.svg",  # one publish after training, no RL loop
     ),
 ]
 per_recipe = pytest.mark.parametrize("recipe", RECIPES, ids=[recipe.name for recipe in RECIPES])
@@ -157,7 +172,7 @@ def test_render_refuses_a_placeholder_left_in_place(tmp_path: Path, recipe: Reci
     shutil.copy(recipe.k8s / "run.env.example", env)
     result = render(env, recipe.k8s / "trainer-job.yaml")
     assert result.returncode == 1 and result.stdout == ""
-    assert "fill in" in result.stderr and "ROLLOUT_BASE_URL" in result.stderr
+    assert "fill in" in result.stderr and recipe.placeholder in result.stderr
     # step 1 needs only NAMESPACE, so it works before the rest is filled in
     assert render(env, SHARED / "namespace.yaml").returncode == 0
 
@@ -361,7 +376,7 @@ def test_the_readme_links_shared_files_that_exist(recipe: Recipe) -> None:
     expected = [
         "k8s/README.md",
         "k8s/trainer-access-policy.example.json",
-        "docs/hotload-flow.drawio.svg",
+        recipe.diagram,
     ]
     assert {f"../../../{path}" for path in expected} <= links
     for link in links:
@@ -453,9 +468,10 @@ def test_the_cleanup_block_deletes_the_deployment_recipe_objects_and_prefixes(
         "cwtrain deployment delete dep-1 --ignore-not-found",
     ]
     delete = "kubectl -n ns delete"
+    secrets = "store admin ikey token" if recipe.inference_key else "store admin token"
     assert [line for line in lines if line.startswith("kubectl")] == [
         f"{delete} job cwtrain-job cwtrain-stage-job cwtrain-make-bucket --ignore-not-found",
-        f"{delete} secret store admin ikey token --ignore-not-found",
+        f"{delete} secret {secrets} --ignore-not-found",
         f"{delete} configmap kit --ignore-not-found",
         f"{delete} serviceaccount cwtrain-trainer --ignore-not-found",
     ]  # only the recipe's objects; the namespace may hold other work
@@ -880,9 +896,9 @@ def test_the_cleanup_block_accepts_a_lone_angle_bracket(tmp_path: Path, recipe: 
 @needs_envsubst
 @per_recipe
 def test_render_refuses_an_uppercase_placeholder(tmp_path: Path, recipe: Recipe) -> None:
-    env = filled_run_env(recipe, tmp_path, ROLLOUT_MODEL="'<Served Model>'")
+    env = filled_run_env(recipe, tmp_path, **{recipe.placeholder: "'<Served Model>'"})
     result = render(env, recipe.k8s / "trainer-job.yaml")
-    assert result.returncode == 1 and "ROLLOUT_MODEL" in result.stderr
+    assert result.returncode == 1 and recipe.placeholder in result.stderr
 
 
 def test_no_other_directory_holds_a_copy_of_a_shared_file() -> None:

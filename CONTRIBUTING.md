@@ -101,7 +101,9 @@ fails when another directory holds a copy.
 
 Put a new training recipe under `training/recipes/<framework>/`, with its own README, and use the
 files in `k8s/` from there. Add it to `RECIPES` in `k8s/tests/test_k8s_steps.py`, and add a row for
-it to the table in the top-level [README](README.md).
+it to the table in the top-level [README](README.md). A framework that supports more than one
+training method gets one recipe per method, `training/recipes/<framework>-<method>/`, such as
+`training/recipes/axolotl-sft/`.
 
 ### Live hot-load test
 

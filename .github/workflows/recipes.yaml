@@ -14,6 +14,7 @@ on:
       - "docs/**"
       - ".gitignore"
       - "libs/cwtrain/cwtrain/integrations/launch.py"
+      - "libs/cwtrain/cwtrain/hotload/**"
       - ".github/workflows/recipes.yaml"
   push:
     branches: [main]
@@ -24,6 +25,7 @@ on:
       - "docs/**"
       - ".gitignore"
       - "libs/cwtrain/cwtrain/integrations/launch.py"
+      - "libs/cwtrain/cwtrain/hotload/**"
 
 permissions:
   contents: read

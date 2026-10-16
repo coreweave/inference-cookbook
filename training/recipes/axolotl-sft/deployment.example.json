@@ -1,0 +1,25 @@
+{
+  "name": "qwen3-4b-sft-hotload",
+  "gatewayIds": ["<gateway uuid in one zone>"],
+  "runtime": {
+    "engine": "dynamo-vllm",
+    "version": "0.30.0+crwv.5",
+    "engineConfig": {
+      "gpu-memory-utilization": "0.50",
+      "max-model-len": "8192"
+    }
+  },
+  "resources": {"instanceType": "gb300-4x", "gpuCount": 1},
+  "model": {
+    "name": "qwen3-4b-sft-hotload",
+    "bucket": "<bucket>",
+    "path": "models/Qwen3-4B"
+  },
+  "autoscaling": {"min": 2, "max": 2, "concurrency": 256},
+  "traffic": {"weight": 100},
+  "hotLoad": {
+    "bucket": "<bucket>",
+    "pathPrefix": "hotload",
+    "transitionMode": "TRANSITION_MODE_ASYNC"
+  }
+}
