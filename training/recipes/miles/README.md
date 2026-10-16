@@ -386,7 +386,7 @@ print(p.strip("/"))')
   # hot-loaded: <prefix>/<run>-vNNNNNN/ and <prefix>/_manifests/<run>-vNNNNNN.json. List them
   # while the deployment exists.
   runs=$(cwtrain hotload list --deployment "$DEPLOYMENT_ID" --limit 100000 | python3 -c 'import json, re, sys
-print(" ".join(sorted({re.sub(r"-v[0-9]+$", "", h["spec"]["identity"]) for h in json.load(sys.stdin)})))')
+print("\n".join(sorted({re.sub(r"-v[0-9]+$", "", h["spec"]["identity"]) for h in json.load(sys.stdin)})))')
   cwtrain deployment delete "$DEPLOYMENT_ID" --ignore-not-found
   kubectl -n "$NAMESPACE" delete job "cwtrain-$JOB_NAME" "cwtrain-stage-$JOB_NAME" cwtrain-make-bucket --ignore-not-found
   kubectl -n "$NAMESPACE" delete secret "$STORAGE_SECRET" "$ADMIN_STORAGE_SECRET" "$INFERENCE_KEY_SECRET" \
@@ -394,9 +394,11 @@ print(" ".join(sorted({re.sub(r"-v[0-9]+$", "", h["spec"]["identity"]) for h in 
   kubectl -n "$NAMESPACE" delete configmap "$KIT_NAME" --ignore-not-found
   [ -z "$TRAINER_SERVICE_ACCOUNT" ] || kubectl -n "$NAMESPACE" delete serviceaccount "$TRAINER_SERVICE_ACCOUNT" --ignore-not-found
   [ -n "$runs" ] || echo "found no hot-loads of $DEPLOYMENT_ID, so nothing under $HOTLOAD_PREFIX/ is removed" >&2
-  for run in $runs; do
-    aws s3 rm --recursive "s3://$BUCKET/$HOTLOAD_PREFIX/" --exclude '*' --include "$run-v*" \
-      --include "_manifests/$run-v*" --endpoint-url https://cwobject.com --region "$BUCKET_ZONE"
+  # read line by line: zsh, unlike bash, does not split an unquoted $runs into words
+  printf '%s\n' "$runs" | while read -r run; do
+    [ -z "$run" ] || aws s3 rm --recursive "s3://$BUCKET/$HOTLOAD_PREFIX/" --exclude '*' \
+      --include "$run-v*" --include "_manifests/$run-v*" --endpoint-url https://cwobject.com \
+      --region "$BUCKET_ZONE"
   done
   for prefix in "$MODEL_PREFIX/$MODEL_SLUG" "$MODEL_PREFIX/_probe"; do
     aws s3 rm --recursive "s3://$BUCKET/$prefix/" --endpoint-url https://cwobject.com --region "$BUCKET_ZONE"
