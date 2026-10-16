@@ -33,6 +33,13 @@ NeMo Gym evaluation recipe uses it to create and clean up its deployment.
 
 ## Recipes
 
+A recipe wires one trainer or evaluation harness to Dedicated Inference: its launcher, any patches,
+and the settings and modes it supports. It runs the framework's own training or evaluation loop. An
+example runs a recipe with a concrete model, dataset and deployment, and a case study shows a real
+problem solved with Dedicated Inference, with its results. Examples and case studies will go in
+`training/examples/` and `training/case-studies/`. [CONTRIBUTING](CONTRIBUTING.md#what-goes-where)
+says what goes where.
+
 | Recipe | Framework | Algorithm | Upstream changes | Tested with |
 | --- | --- | --- | --- | --- |
 | [miles](training/recipes/miles/README.md) | [miles](https://github.com/radixark/miles) | GRPO, synchronous or one step ahead | None: miles calls the `cwtrain` hook after each weight sync | `radixark/miles:v0.1.1` |

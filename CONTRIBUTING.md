@@ -1,8 +1,36 @@
 # Contributing to the CoreWeave Inference Cookbook
 
-Issues and pull requests are welcome: new recipes, fixes to existing ones, and improvements to
-`cwtrain`. This page covers the contributor agreement, how to run the checks locally, the
-conventions reviewers look for, and how `cwtrain` is released.
+Issues and pull requests are welcome: new recipes, examples and case studies, fixes to existing
+ones, and improvements to `cwtrain`. This page covers what goes where, the contributor agreement,
+how to run the checks locally, the conventions reviewers look for, and how `cwtrain` is released.
+
+## What goes where
+
+| Directory | What goes there |
+| --- | --- |
+| `libs/cwtrain/` | Code that depends only on the Dedicated Inference API, object storage, the hot-load format or an open format such as safetensors, and the helpers that the recipes' launchers share. Also integration code that has to run inside a framework's processes, such as the slime and miles post-write hook and the NeMo-RL generation backend. Patches and thin adapters, such as the slime and miles rollout functions, stay in the recipes. Do not add datasets, benchmarks, prompts, rewards or judges here. |
+| `training/recipes/<framework>/` | One training framework wired to Dedicated Inference: its launcher, any patches, the Kubernetes Job, and a README that says what the deployment replaces, which settings and modes the recipe supports (such as synchronous or one step ahead), and which versions it was tested with. A recipe integrates the framework's own training loop rather than defining one. |
+| `evaluation/recipes/<harness>/` | One evaluation harness wired to Dedicated Inference: its launcher and configuration, and a README that says how it reaches the deployment, what it scores, which versions it uses, and how they were tested. |
+| `training/examples/<trainer>-<method>-<model>/` | A recipe run with a concrete model, dataset, deployment and sizes, including the data preparation and any reward or environment for the task. It uses the recipe as it is, without patches or a launcher of its own. |
+| `training/case-studies/<problem>/` | A real problem solved with Dedicated Inference: the problem, where the data comes from, the setup, the results, the cost and the limitations. A *study* is reproducible from public data and reports its results with the number of runs and their spread. A *field report* describes work that cannot be fully reproduced, for example because its data is private. It reports only published numbers and names a company only with its permission. |
+| `k8s/` | Kubernetes and object storage setup that more than one recipe uses. |
+| `docs/` | Files that more than one README uses, such as the flow diagram. |
+
+To place a change:
+
+- If it changes how a trainer or harness talks to Dedicated Inference, code that runs inside the
+  framework's processes, such as a post-write hook or a generation backend, goes in `cwtrain`. So
+  does code that does not depend on the framework. The launcher, patches, configuration, Kubernetes
+  files and any thin adapter over `cwtrain` go in that recipe.
+- If it picks the model, data and settings for an existing training recipe, it is an example.
+- If it shows how a real problem was solved, with results, it is a case study, even when it also
+  picks the model and data.
+- If it fits none of these, such as a training loop of your own, open an issue before you start.
+
+`training/examples/` and `training/case-studies/` do not exist yet. Each is created by the pull
+request that adds its first entry. Until then, each training recipe's README walks through one run
+with a default model and dataset, and `cwtrain.integrations.nemo_rl.gym` holds the DAPO-Math-17k
+preset for NeMo-RL's Gym rollouts.
 
 ## Contributor License Agreement
 
@@ -60,16 +88,13 @@ pytest training/recipes/*/tests evaluation/recipes/*/tests k8s/tests
 for f in k8s/*.sh training/recipes/*/k8s/*.sh; do bash -n "$f"; done
 ```
 
-The top-level directories group the recipes by use case: `training/recipes/` and
-`evaluation/recipes/`. A recipe is named after the framework it integrates. For example,
-`training/recipes/slime/` is RL training with slime. Examples, which run a recipe with a concrete
-model and data, will go in `training/examples/`, and case studies in `training/case-studies/`;
-each directory is created with its first entry. The training recipes share their Kubernetes and
-object storage setup in [`k8s/`](k8s/README.md) at the repository root: `render.sh`, the namespace,
-the storage Secret, the bucket and staging Jobs, and the example bucket and trainer access policies.
-A recipe's own `k8s/` directory holds what is specific to it, such as `run.env.example`,
-`trainer-job.yaml`, `run-trainer.sh` and `make-kit.sh`. Its README calls the shared files by their
-relative path, and embeds the flow diagram from `docs/`.
+A recipe is named after the framework it integrates: `training/recipes/slime/` is RL training with
+slime. The training recipes share their Kubernetes and object storage setup in
+[`k8s/`](k8s/README.md) at the repository root: `render.sh`, the namespace, the storage Secret, the
+bucket and staging Jobs, and the example bucket and trainer access policies. A recipe's own `k8s/`
+directory holds what is specific to it, such as `run.env.example`, `trainer-job.yaml`,
+`run-trainer.sh` and `make-kit.sh`. Its README calls the shared files by their relative path, and
+embeds the flow diagram from `docs/`.
 
 Change a shared file in `k8s/` only. `k8s/tests` runs every training recipe's steps against it, and
 fails when another directory holds a copy.
