@@ -23,7 +23,13 @@ from cwtrain.hotload.mirror import (
     rewrite_shard_metadata,
     tensor_locations,
 )
-from tests.conftest import make_weights, perturb, write_real_checkpoint, write_real_delta
+from tests.conftest import (
+    make_weights,
+    perturb,
+    write_real_checkpoint,
+    write_real_delta,
+    write_single_file_checkpoint,
+)
 
 
 def read_all(root: Path) -> dict[str, bytes]:
@@ -86,6 +92,31 @@ def test_create_rejects_non_checkpoint(tmp_path: Path) -> None:
     (tmp_path / "junk").mkdir()
     with pytest.raises(Exception, match="full HF checkpoint"):
         WeightMirror.create(tmp_path / "junk", tmp_path / "m")
+
+
+def test_a_single_file_checkpoint_is_a_mirror_and_delta_base(tmp_path: Path) -> None:
+    from cwtrain.hotload.delta import write_delta
+    from cwtrain.hotload.snapshot import generated_index
+
+    w0 = make_weights()
+    w1 = perturb(w0, ("model.layers.1.weight",))
+    base = write_single_file_checkpoint(tmp_path / "base", w0)
+    new = write_single_file_checkpoint(tmp_path / "new", w1)
+    mirror = WeightMirror.create(base, tmp_path / "mirror", version="000000")
+    # the mirror holds the index that the base's upload carries; the base is left as it is
+    assert (mirror.root / "model.safetensors.index.json").read_bytes() == generated_index(base)
+    assert not (base / "model.safetensors.index.json").exists()
+    stats = write_delta(base, new, tmp_path / "weight_v000001", version="000001", base_version="0")
+    assert stats.tensors_changed == 1
+    mirror.apply_delta(stats.path)
+    assert read_all(mirror.root) == {n: d for n, (_t, _s, d) in w1.items()}
+    snap = mirror.write_full_snapshot(tmp_path / "staging" / "run-v000001")
+    info = inspect_snapshot(snap)
+    assert info.type is SnapshotType.FULL and not info.index_generated
+    index = json.loads(info.index_bytes)
+    assert index["weight_map"] == dict.fromkeys(w1, "model.safetensors")
+    assert index["metadata"]["checksum_format"] == "adler32"
+    assert read_all(snap) == {n: d for n, (_t, _s, d) in w1.items()}
 
 
 def test_apply_delta_updates_bytes_and_verifies(tmp_path: Path, base) -> None:

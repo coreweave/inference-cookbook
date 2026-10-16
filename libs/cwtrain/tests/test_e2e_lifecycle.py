@@ -309,7 +309,6 @@ def test_stage_model_uploads_inside_run_prefix(monkeypatch, tmp_path):
     snapshot = Mock()
     s3 = Mock()
     upload = Mock()
-    monkeypatch.setattr(storage, "ensure_model_index", Mock())
     monkeypatch.setattr(storage, "inspect_snapshot", Mock(return_value=snapshot))
     monkeypatch.setattr(storage, "bucket_client", Mock(return_value=s3))
     monkeypatch.setattr(storage, "upload_snapshot", upload)
@@ -321,38 +320,6 @@ def test_stage_model_uploads_inside_run_prefix(monkeypatch, tmp_path):
         identity="base",
         s3=s3,
     )
-
-
-def test_single_file_model_gets_index_without_reading_weights(tmp_path):
-    import json
-
-    from cwtrain.hotload.snapshot import inspect_snapshot
-    from e2e.storage import ensure_model_index
-
-    header = json.dumps(
-        {
-            "__metadata__": {"format": "pt"},
-            "weight": {"dtype": "F32", "shape": [2], "data_offsets": [0, 8]},
-        }
-    ).encode()
-    (tmp_path / "model.safetensors").write_bytes(
-        len(header).to_bytes(8, "little") + header + b"\0" * 8
-    )
-    (tmp_path / "config.json").write_text("{}")
-    ensure_model_index(str(tmp_path))
-    index = json.loads((tmp_path / "model.safetensors.index.json").read_text())
-    assert index == {"metadata": {"total_size": 8}, "weight_map": {"weight": "model.safetensors"}}
-    inspect_snapshot(tmp_path)
-
-
-def test_existing_model_index_is_preserved(tmp_path):
-    from e2e.storage import ensure_model_index
-
-    index = tmp_path / "model.safetensors.index.json"
-    index.write_text('{"weight_map": {"weight": "model-00001-of-00002.safetensors"}}')
-    original = index.read_bytes()
-    ensure_model_index(str(tmp_path))
-    assert index.read_bytes() == original
 
 
 @pytest.mark.parametrize("engine", ["vllm", "sglang", None])

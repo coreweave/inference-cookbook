@@ -32,7 +32,7 @@ import struct
 import threading
 import time
 import zlib
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -40,7 +40,13 @@ from typing import Any, BinaryIO
 
 from cwtrain.errors import CWTrainError
 from cwtrain.hotload.errors import SnapshotError
-from cwtrain.hotload.snapshot import CONFIG_FILE, INDEX_FILE, SHARD_SUFFIX, load_index
+from cwtrain.hotload.snapshot import (
+    CONFIG_FILE,
+    INDEX_FILE,
+    SHARD_SUFFIX,
+    generated_index,
+    load_index,
+)
 
 log = logging.getLogger(__name__)
 
@@ -149,22 +155,44 @@ def rewrite_shard_metadata(
     dst: Path,
     metadata: dict[str, str],
     *,
+    names: Collection[str] | None = None,
     progress: ProgressCallback | None = None,
 ) -> None:
     """Copy ``src`` to ``dst`` with ``metadata`` merged into the header's ``__metadata__``.
 
     Tensor data is copied verbatim, so ``data_offsets`` stay valid. ``progress`` is called with
     the number of data bytes copied as the copy advances.
+
+    Args:
+        names: The tensors to copy, if not all of them; names that ``src`` lacks are ignored.
+            The other tensors and their ``__metadata__`` entries (checksums) are left out.
+            safetensors allows no gap between tensors, so the kept ones are packed in their
+            order in ``src``, with new ``data_offsets``.
     """
     header, data_start = read_safetensors_header(src)
     merged = dict(header.get("__metadata__") or {})
+    tensors = {k: v for k, v in header.items() if k != "__metadata__"}
+    kept: list[tuple[int, int, int]] = []  # (offset in src, offset in dst's data, length)
+    if names is not None:
+        offset = 0
+        for name in sorted(tensors, key=lambda n: tensors[n]["data_offsets"]):
+            if name not in names:
+                del tensors[name]
+                merged.pop(name, None)  # its checksum, if it has one
+                continue
+            begin, end = tensors[name]["data_offsets"]
+            tensors[name] = {**tensors[name], "data_offsets": [offset, offset + end - begin]}
+            kept.append((data_start + begin, offset, end - begin))
+            offset += end - begin
     merged.update({k: str(v) for k, v in metadata.items()})
-    header = {"__metadata__": merged, **{k: v for k, v in header.items() if k != "__metadata__"}}
-    head = _encode_header(header)
+    head = _encode_header({"__metadata__": merged, **tensors})
     with src.open("rb") as fin, dst.open("wb") as fout:
         fout.write(head)
-        size = os.fstat(fin.fileno()).st_size
-        _copy_range(fin, fout, data_start, len(head), max(0, size - data_start), progress)
+        if names is None:
+            size = os.fstat(fin.fileno()).st_size
+            _copy_range(fin, fout, data_start, len(head), max(0, size - data_start), progress)
+        for source, at, length in kept:
+            _copy_range(fin, fout, source, len(head) + at, length, progress)
 
 
 def _workers(workers: int | None) -> int:
@@ -371,16 +399,19 @@ class WeightMirror:
         mirror uses the same number of workers.
 
         An existing mirror at ``root`` is replaced. A mirror is valid only for the run that
-        created it, because the trainer's deltas restart from the base at every launch.
+        created it, because the trainer's deltas restart from the base at every launch. A base
+        saved as one ``model.safetensors`` without an index gets the index that its upload gets,
+        from :func:`~cwtrain.hotload.snapshot.generated_index`.
 
         Args:
             checksums: Every tensor's Adler-32 in ``base``, if already computed (for example with
                 :func:`~cwtrain.hotload.delta.checkpoint_checksums`). Skips hashing the copy.
         """
         base, root = Path(base), Path(root)
-        if not (base / INDEX_FILE).is_file() or not (base / CONFIG_FILE).is_file():
+        generated = generated_index(base)
+        if not (generated or (base / INDEX_FILE).is_file()) or not (base / CONFIG_FILE).is_file():
             raise SnapshotError(f"{base} is not a full HF checkpoint (needs config.json + index)")
-        load_index(base)
+        load_index(base, body=generated)
         if root.exists():
             shutil.rmtree(root)
         root.parent.mkdir(parents=True, exist_ok=True)
@@ -400,6 +431,8 @@ class WeightMirror:
             # Copy everything except the top-level shards (nested directories included), then
             # copy the shards, which hold nearly all the bytes, in parallel.
             shutil.copytree(base, tmp, ignore=not_the_shards)
+            if generated is not None:
+                (tmp / INDEX_FILE).write_bytes(generated)
             if checksums is None:
                 copies = _parallel(
                     lambda s: _copy_and_checksum(s, tmp / s.name, progress), shards, workers

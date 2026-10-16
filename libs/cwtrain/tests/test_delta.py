@@ -5,15 +5,21 @@
 from __future__ import annotations
 
 import json
+import math
 import threading
 from pathlib import Path
 
 import pytest
 
 from cwtrain.hotload import SnapshotError, SnapshotType, WeightMirror, inspect_snapshot
-from cwtrain.hotload.delta import checkpoint_checksums, write_delta
-from cwtrain.hotload.mirror import tensor_locations
-from tests.conftest import make_weights, perturb, write_real_checkpoint
+from cwtrain.hotload.delta import checkpoint_checksums, write_delta, write_full_snapshot
+from cwtrain.hotload.mirror import read_safetensors_header, tensor_locations
+from tests.conftest import (
+    make_weights,
+    perturb,
+    write_real_checkpoint,
+    write_single_file_checkpoint,
+)
 
 
 def read_all(root: Path) -> dict[str, bytes]:
@@ -137,3 +143,164 @@ def test_write_delta_streams_shards_instead_of_holding_the_model(
     mirror = WeightMirror.create(base, tmp_path / "mirror", version="000000")
     mirror.apply_delta(tmp_path / "d")
     assert read_all(mirror.root) == {n: d for n, (_t, _s, d) in w1.items()}
+
+
+# ------------------------------------------------------------------ write_full_snapshot
+
+
+def verified_full_snapshot(snap: Path) -> dict:
+    """The index of ``snap``, after the checks the engine makes when it installs a full snapshot:
+    each shard in the index holds exactly the tensors that the index maps to it, and the
+    Adler-32 that its header records for each one matches the tensor's bytes."""
+    info = inspect_snapshot(snap)
+    assert info.type is SnapshotType.FULL and not info.index_generated
+    index = json.loads(info.index_bytes)
+    assert index["metadata"]["checksum_format"] == "adler32"
+    checksums = checkpoint_checksums(snap)
+    by_shard: dict[str, set[str]] = {}
+    for name, shard in index["weight_map"].items():
+        by_shard.setdefault(shard, set()).add(name)
+    for shard, names in by_shard.items():
+        header, _ = read_safetensors_header(snap / shard)
+        assert set(header) - {"__metadata__"} == names
+        assert {name: header["__metadata__"][name] for name in names} == {
+            name: checksums[name] for name in names
+        }
+    assert index["metadata"]["total_size"] == sum(
+        loc.nbytes for loc in tensor_locations(snap).values()
+    )
+    return index
+
+
+def with_tied_head(weights):
+    """``weights`` plus a tied ``lm_head.weight`` that is a second copy of the embedding, saved
+    between other tensors, as an FSDP2 full-state-dict gather saves it."""
+    embedding = ("F32", (4, 8), bytes(range(128)))
+    return {"model.embed_tokens.weight": embedding, "lm_head.weight": embedding, **weights}
+
+
+def test_write_full_snapshot_of_a_single_file_checkpoint(tmp_path: Path) -> None:
+    weights = make_weights()
+    src = write_single_file_checkpoint(tmp_path / "src", weights)
+    snap = write_full_snapshot(src, tmp_path / "sft-v000030")
+    index = verified_full_snapshot(snap)
+    assert index == {
+        "metadata": {"total_size": 128 + 30 + 16, "checksum_format": "adler32"},
+        "weight_map": dict.fromkeys(weights, "model.safetensors"),
+    }
+    assert read_all(snap) == {n: d for n, (_t, _s, d) in weights.items()}
+    assert sorted(p.name for p in snap.iterdir()) == [
+        "config.json",
+        "model.safetensors",
+        "model.safetensors.index.json",
+        "tokenizer_config.json",
+    ]
+    assert not (src / "model.safetensors.index.json").exists()  # the source is left as it is
+
+
+def test_write_full_snapshot_keeps_only_the_named_tensors(tmp_path: Path) -> None:
+    saved = with_tied_head(make_weights())
+    src = write_single_file_checkpoint(tmp_path / "src", saved)
+    base = sorted(set(saved) - {"lm_head.weight"})  # the tensors the deployment's base holds
+    snap = write_full_snapshot(src, tmp_path / "sft-v000030", names=base)
+    index = verified_full_snapshot(snap)
+    assert sorted(index["weight_map"]) == base
+    assert index["metadata"]["total_size"] == sum(len(saved[n][2]) for n in base)
+    assert read_all(snap) == {n: saved[n][2] for n in base}
+    header, _ = read_safetensors_header(snap / "model.safetensors")
+    assert sorted(set(header) - {"__metadata__"}) == base
+    assert {n: (header[n]["dtype"], tuple(header[n]["shape"])) for n in base} == {
+        n: saved[n][:2] for n in base
+    }
+    assert sorted(set(header["__metadata__"]) - {"format"}) == base  # a checksum for each
+
+    # A source with checksums of its own keeps none for a tensor it drops.
+    fewer = [n for n in base if n != "model.layers.0.weight"]
+    again = write_full_snapshot(snap, tmp_path / "again", names=fewer)
+    header, _ = read_safetensors_header(again / "model.safetensors")
+    assert sorted(set(header["__metadata__"]) - {"format"}) == fewer
+    assert sorted(verified_full_snapshot(again)["weight_map"]) == fewer
+
+
+def test_write_full_snapshot_refuses_a_name_the_checkpoint_lacks(tmp_path: Path) -> None:
+    src = write_single_file_checkpoint(tmp_path / "src")
+    dest = tmp_path / "sft-v000030"
+    dest.mkdir()
+    (dest / "keep").write_text("previous snapshot")
+    with pytest.raises(SnapshotError, match=r"lacks 1 of the tensors to keep, e\.g\. \['x'\]"):
+        write_full_snapshot(src, dest, names=["lm_head.bias", "x"])
+    assert (dest / "keep").read_text() == "previous snapshot"
+
+
+def test_write_full_snapshot_leaves_out_a_shard_that_keeps_no_tensor(tmp_path: Path) -> None:
+    src = write_real_checkpoint(tmp_path / "src")  # lm_head.bias is alone in the second shard
+    keep = ["model.layers.0.weight", "model.layers.1.weight"]
+    snap = write_full_snapshot(src, tmp_path / "pruned", names=keep)
+    first = "model-00001-of-00002.safetensors"
+    assert [p.name for p in snap.glob("*.safetensors")] == [first]
+    assert verified_full_snapshot(snap)["weight_map"] == dict.fromkeys(keep, first)
+    # a shard that keeps all of its tensors is written as it is without names
+    whole = write_full_snapshot(src, tmp_path / "whole")
+    assert (snap / first).read_bytes() == (whole / first).read_bytes()
+
+
+def check_safetensors_layout(shard: Path, tensors: dict) -> None:
+    """``shard`` follows the safetensors format and holds ``tensors`` byte for byte."""
+    header, data_start = read_safetensors_header(shard)
+    assert data_start % 8 == 0  # the header is padded to 8 bytes
+    assert set(header) - {"__metadata__"} == set(tensors)
+    assert all(isinstance(v, str) for v in header["__metadata__"].values())
+    # The data starts at offset 0 and has no gaps or overlaps up to the end of the file.
+    spans = sorted(tuple(header[name]["data_offsets"]) for name in tensors)
+    assert spans[0][0] == 0 and data_start + spans[-1][1] == shard.stat().st_size
+    assert all(a[1] == b[0] for a, b in zip(spans, spans[1:], strict=False))
+    sizes = {"F32": 4, "F16": 2, "BF16": 2, "I8": 1}
+    data = shard.read_bytes()
+    for name, (dtype, shape, raw) in tensors.items():
+        begin, end = header[name]["data_offsets"]
+        assert (header[name]["dtype"], tuple(header[name]["shape"])) == (dtype, shape)
+        assert end - begin == math.prod(shape) * sizes[dtype]
+        assert data[data_start + begin : data_start + end] == raw
+
+
+def test_written_shards_are_valid_safetensors(tmp_path: Path) -> None:
+    saved = with_tied_head(make_weights())
+    src = write_single_file_checkpoint(tmp_path / "src", saved)
+    base = {n: saved[n] for n in saved if n != "lm_head.weight"}
+    check_safetensors_layout(
+        write_full_snapshot(src, tmp_path / "all") / "model.safetensors", saved
+    )
+    check_safetensors_layout(
+        write_full_snapshot(src, tmp_path / "base", names=base) / "model.safetensors", base
+    )
+
+
+def test_written_shards_load_with_the_safetensors_package(tmp_path: Path) -> None:
+    import numpy as np
+
+    safetensors = pytest.importorskip("safetensors")
+    rng = np.random.default_rng(7)
+    embedding = ("F32", (6, 4), rng.standard_normal((6, 4), dtype=np.float32).tobytes())
+    saved = {
+        "model.embed_tokens.weight": embedding,
+        "lm_head.weight": embedding,  # the tied duplicate, between two other tensors
+        "model.layers.0.mlp.down_proj.weight": (
+            "F16",
+            (3, 5),
+            rng.standard_normal((3, 5)).astype(np.float16).tobytes(),
+        ),
+        "model.norm.weight": ("I8", (7,), rng.integers(-128, 127, 7, dtype=np.int8).tobytes()),
+    }
+    src = write_single_file_checkpoint(tmp_path / "src", saved)
+    base = [n for n in saved if n != "lm_head.weight"]
+    for snap, names in (
+        (write_full_snapshot(src, tmp_path / "all"), list(saved)),
+        (write_full_snapshot(src, tmp_path / "base", names=base), base),
+    ):
+        header, _ = read_safetensors_header(snap / "model.safetensors")
+        with safetensors.safe_open(str(snap / "model.safetensors"), framework="numpy") as f:
+            assert sorted(f.keys()) == sorted(names)
+            assert f.metadata() == header["__metadata__"]
+            for name in names:
+                tensor = f.get_tensor(name)
+                assert (tensor.shape, tensor.tobytes()) == (saved[name][1], saved[name][2])

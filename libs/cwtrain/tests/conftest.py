@@ -401,6 +401,16 @@ def write_real_checkpoint(root: Path, weights=None) -> Path:
     return root
 
 
+def write_single_file_checkpoint(root: Path, weights=None) -> Path:
+    """What ``save_pretrained`` writes below its shard size: one model.safetensors, no index."""
+    weights = weights or make_weights()
+    root.mkdir(parents=True, exist_ok=True)
+    write_safetensors(root / "model.safetensors", weights)
+    (root / "config.json").write_text(json.dumps({"architectures": ["Qwen3ForCausalLM"]}))
+    (root / "tokenizer_config.json").write_text("{}")
+    return root
+
+
 def write_real_delta(
     root: Path,
     old: dict[str, tuple[str, tuple[int, ...], bytes]],

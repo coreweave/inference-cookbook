@@ -25,6 +25,7 @@ import os
 import shutil
 import struct
 from collections import deque
+from collections.abc import Collection
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -32,7 +33,7 @@ from typing import Any
 
 from cwtrain.hotload.errors import SnapshotError
 from cwtrain.hotload.mirror import TensorLocation, adler32_hex, tensor_locations
-from cwtrain.hotload.snapshot import INDEX_FILE, load_index
+from cwtrain.hotload.snapshot import INDEX_FILE, generated_index, load_index
 
 log = logging.getLogger(__name__)
 
@@ -218,38 +219,65 @@ def write_full_snapshot(
     src: str | os.PathLike[str],
     dest: str | os.PathLike[str],
     checksums: dict[str, str] | None = None,
+    *,
+    names: Collection[str] | None = None,
 ) -> Path:
     """Copy full checkpoint ``src`` to ``dest`` as a checksummed FULL snapshot.
 
     Each shard gets every tensor's Adler-32 in its ``__metadata__``, and the index gets
     ``checksum_format: adler32``, so the engine verifies each tensor on install. Other files
-    (``config.json``, tokenizer) are copied unchanged. ``dest`` is replaced if it exists.
+    (``config.json``, tokenizer) are copied unchanged. ``dest`` is replaced if it exists. A
+    checkpoint saved as one ``model.safetensors`` without an index gets one in ``dest``, from
+    :func:`~cwtrain.hotload.snapshot.generated_index`.
 
     Args:
         checksums: Every tensor's Adler-32, if already computed. Computed from ``src`` otherwise.
+        names: The tensors to keep, if not all of them; each must be in ``src``. A shard that
+            loses a tensor is rewritten without it, and one that loses all of them is left out.
+            The index's ``weight_map`` and ``total_size`` follow. Pass the names of the
+            deployment's base checkpoint, for example, when ``src`` also holds a tied
+            ``lm_head.weight`` that a gathered state dict saved a second time.
+
+    Raises:
+        SnapshotError: ``src`` is not a valid checkpoint, or it lacks one of ``names``.
     """
     import shutil
 
     from cwtrain.hotload.mirror import rewrite_shard_metadata
 
     src_dir, dest_dir = Path(src), Path(dest)
-    index = load_index(src_dir)
+    index = load_index(src_dir, body=generated_index(src_dir))
+    locations = tensor_locations(src_dir)
+    keep = set(locations) if names is None else set(names)
+    missing = sorted(keep - set(locations))
+    if missing:
+        raise SnapshotError(
+            f"{src_dir} lacks {len(missing)} of the tensors to keep, e.g. {missing[:5]}"
+        )
     checksums = checksums or checkpoint_checksums(src_dir)
     tmp = dest_dir.with_name(dest_dir.name + ".tmp")
     for path in (dest_dir, tmp):
         shutil.rmtree(path, ignore_errors=True)
     tmp.mkdir(parents=True)
     by_shard: dict[Path, dict[str, str]] = {}
-    for name, loc in tensor_locations(src_dir).items():
-        by_shard.setdefault(loc.path, {})[name] = checksums[name]
+    pruned: set[Path] = set()  # the shards that lose a tensor; the others are copied verbatim
+    for name, loc in locations.items():
+        if name in keep:
+            by_shard.setdefault(loc.path, {})[name] = checksums[name]
+        else:
+            pruned.add(loc.path)
     for shard, sums in by_shard.items():
-        rewrite_shard_metadata(shard, tmp / shard.name, sums)
+        kept = sums if shard in pruned else None
+        rewrite_shard_metadata(shard, tmp / shard.name, sums, names=kept)
     for path in src_dir.iterdir():
         if path.is_file() and path.name != INDEX_FILE and not path.name.endswith(".safetensors"):
             shutil.copy2(path, tmp / path.name)
     metadata = index["metadata"]
     metadata.pop("delta_encoding", None)
     metadata["checksum_format"] = "adler32"
+    if pruned:
+        index["weight_map"] = {k: v for k, v in index["weight_map"].items() if k in keep}
+        metadata["total_size"] = sum(locations[name].nbytes for name in keep)
     index["metadata"] = metadata
     (tmp / INDEX_FILE).write_text(json.dumps(index, indent=1))
     tmp.replace(dest_dir)
