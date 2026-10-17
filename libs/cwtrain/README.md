@@ -1,5 +1,7 @@
 # cwtrain
 
+[![PyPI](https://img.shields.io/pypi/v/cwtrain)](https://pypi.org/project/cwtrain/) [![Python](https://img.shields.io/pypi/pyversions/cwtrain)](https://pypi.org/project/cwtrain/)
+
 `cwtrain` is the Python library and CLI for training against
 [CoreWeave Dedicated Inference](https://docs.coreweave.com/products/inference/dedicated). In this
 setup, the training loop gets its rollouts from a Dedicated Inference deployment, not from its own
