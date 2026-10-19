@@ -29,6 +29,8 @@ Configuration (environment of the process that runs the rollout function):
                                  (``return_tokens_as_token_ids``); ``0`` re-tokenizes the text.
 ``CWTRAIN_ROLLOUT_TOKEN_ID_PROMPTS`` ``1`` (default) sends each prompt as the token ids the
                                  trainer encodes and trains on; ``0`` sends the rendered text.
+``CWTRAIN_ROLLOUT_ROUTED_EXPERTS`` ``1`` asks a Mixture-of-Experts deployment for each sequence's
+                                 routed experts; ``0`` (default) does not. See "Routed experts".
 ==============================  =====================================================
 
 Responses
@@ -64,22 +66,42 @@ changes.
 
 A request carries at most four stop strings and four stop token ids. CoreWeave's frontend rejects
 more, so such a request fails before it is sent.
+
+Routed experts
+--------------
+
+A Mixture-of-Experts deployment started with the ``enable-return-routed-experts`` engine option
+reports the experts that each token was routed to in every layer. A trainer that replays them
+(rollout routing replay) then runs the same experts as the engine. Each request asks for them in
+Dynamo's ``nvext.extra_fields``.
+
+A response carries the routes of one sequence, so a group of ``n`` becomes ``n`` requests of one
+choice each, sent together. Each completion's ``routed_experts`` has shape
+``[prompt + response - 1, layers, top_k]``: one row for every token that the engine ran through
+the model, which is every token but the last one sampled. Rows of dense layers are zeros.
+
+Routes line up only with exact tokens. They need token-id prompts and the sampled token ids, so a
+rejected token-id prompt is not retried as text. A response without routes, or with a row count
+that does not match its tokens, is an error: a trainer that replays routes cannot train on it.
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
+import dataclasses
 import logging
 import math
 import os
 import random
 import time
-from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import httpx
+import numpy as np
 
 from cwtrain.errors import CWTrainError
 from cwtrain.integrations._env import flag, positive_float, positive_int
@@ -124,6 +146,9 @@ class RolloutConfig:
     #: Send prompts as token ids, so the endpoint cannot tokenize them differently from the
     #: trainer.
     token_id_prompts: bool = True
+    #: Ask a Mixture-of-Experts deployment for each sequence's routed experts (see "Routed
+    #: experts" above).
+    routed_experts: bool = False
 
     def __post_init__(self) -> None:
         for name, value in (("concurrency", self.concurrency), ("max_attempts", self.max_attempts)):
@@ -132,6 +157,11 @@ class RolloutConfig:
         if not (math.isfinite(self.timeout) and self.timeout > 0):
             raise CWTrainError(
                 f"RolloutConfig.timeout must be a finite number above 0, got {self.timeout}"
+            )
+        if self.routed_experts and not (self.logprobs and self.token_ids and self.token_id_prompts):
+            raise CWTrainError(
+                "RolloutConfig.routed_experts needs exact tokens: keep logprobs, token_ids and "
+                "token_id_prompts on"
             )
 
     @classmethod
@@ -169,6 +199,7 @@ class RolloutConfig:
             logprobs=flag(env, f"{ENV_PREFIX}LOGPROBS", True, labels=names),
             token_ids=flag(env, f"{ENV_PREFIX}TOKEN_IDS", True, labels=names),
             token_id_prompts=flag(env, f"{ENV_PREFIX}TOKEN_ID_PROMPTS", True, labels=names),
+            routed_experts=flag(env, f"{ENV_PREFIX}ROUTED_EXPERTS", False, labels=names),
         )
 
 
@@ -186,10 +217,16 @@ class Completion:
     token_strings: tuple[str, ...] | None = None
     #: Exact sampled token ids when the endpoint reported them (see ``RolloutConfig.token_ids``).
     token_ids: tuple[int, ...] | None = None
+    #: The experts that each token was routed to, ``[prompt + response - 1, layers, top_k]``, when
+    #: requested (see ``RolloutConfig.routed_experts``).
+    routed_experts: np.ndarray | None = field(default=None, compare=False, repr=False)
 
 
 class CompletionSampler:
-    """One ``/v1/completions`` request per GRPO group, ``n`` choices per request."""
+    """One ``/v1/completions`` request per GRPO group, ``n`` choices per request.
+
+    With routed experts, each choice is its own request (see "Routed experts" above).
+    """
 
     def __init__(self, config: RolloutConfig, *, transport: httpx.AsyncBaseTransport | None = None):
         self.config = config
@@ -232,7 +269,9 @@ class CompletionSampler:
 
         Raises:
             RolloutError: The request has too many stops, fails after all retries, gets a status
-                that is not retried, or returns a choice count other than ``n``.
+                that is not retried, or returns a choice count other than ``n``. With routed
+                experts: the prompt is text, or a response lacks routes or token ids, or its
+                routes do not line up with its tokens.
         """
         check_stop_limits(stop, stop_token_ids)
         payload: dict[str, Any] = {
@@ -261,23 +300,63 @@ class CompletionSampler:
             payload["logprobs"] = 1
             if self.config.token_ids:
                 payload["return_tokens_as_token_ids"] = True
+        if self.config.routed_experts:
+            return await self._sample_with_routes(prompt, n, payload)
         async with self._semaphore:
             body = await self._post_with_retry(payload)
         choices = sorted(body.get("choices") or [], key=lambda c: c.get("index", 0))
         if len(choices) != n:
             raise RolloutError(f"endpoint returned {len(choices)} choices for n={n}")
-        return [
-            Completion(
-                index=i,
-                text=c.get("text") or "",
-                finish_reason=c.get("finish_reason"),
-                stop_reason=c.get("stop_reason"),
-                token_logprobs=_token_logprobs(c) if self.config.logprobs else None,
-                token_strings=_token_strings(c) if self.config.logprobs else None,
-                token_ids=_token_ids(c) if self.config.logprobs and self.config.token_ids else None,
-            )
-            for i, c in enumerate(choices)
-        ]
+        return [self._completion(i, c) for i, c in enumerate(choices)]
+
+    def _completion(self, index: int, choice: dict[str, Any]) -> Completion:
+        logprobs = self.config.logprobs
+        return Completion(
+            index=index,
+            text=choice.get("text") or "",
+            finish_reason=choice.get("finish_reason"),
+            stop_reason=choice.get("stop_reason"),
+            token_logprobs=_token_logprobs(choice) if logprobs else None,
+            token_strings=_token_strings(choice) if logprobs else None,
+            token_ids=_token_ids(choice) if logprobs and self.config.token_ids else None,
+        )
+
+    async def _sample_with_routes(
+        self, prompt: str | Sequence[int], n: int, payload: dict[str, Any]
+    ) -> list[Completion]:
+        """``n`` requests of one choice each, because a response carries one sequence's routes."""
+        if isinstance(prompt, str):
+            raise RolloutError("routed experts need a token-id prompt")
+        payload = {**payload, "n": 1, "nvext": {"extra_fields": ["routed_experts"]}}
+        async with self._semaphore:
+            bodies = await _gather_all([self._post_with_retry(payload) for _ in range(n)])
+        completions = []
+        for index, body in enumerate(bodies):
+            choices = body.get("choices") or []
+            if len(choices) != 1:
+                raise RolloutError(f"endpoint returned {len(choices)} choices for n=1")
+            completion = self._completion(index, choices[0])
+            if completion.token_ids is None:
+                raise RolloutError(
+                    "routed experts need the sampled token ids, and the endpoint did not report "
+                    "them"
+                )
+            nvext = body.get("nvext")
+            value = nvext.get("routed_experts") if isinstance(nvext, dict) else None
+            if value is None:
+                raise RolloutError(
+                    "the endpoint returned no routed experts; start the deployment with the "
+                    "enable-return-routed-experts engine option"
+                )
+            routes = decode_routed_experts(value)
+            rows = len(prompt) + len(completion.token_ids) - 1
+            if routes.shape[0] != rows:
+                raise RolloutError(
+                    f"routed experts have {routes.shape[0]} rows for {len(prompt)} prompt and "
+                    f"{len(completion.token_ids)} response tokens, not {rows}"
+                )
+            completions.append(dataclasses.replace(completion, routed_experts=routes))
+        return completions
 
     async def _post_with_retry(self, payload: dict[str, Any]) -> dict[str, Any]:
         delay = 1.0
@@ -323,7 +402,8 @@ async def sample_prompt(
     With ``token_id_prompts``, the prompt goes out as ``prompt_ids``. On a 4xx, it is retried once
     as ``text()``. Token-id prompts are dropped only if the text request succeeds. A 4xx with
     another cause (a prompt that is too long, a bad sampling parameter) then still fails, and the
-    run does not switch to the less exact text path.
+    run does not switch to the less exact text path. Routed experts need exact tokens, so with
+    them the 4xx is raised instead.
 
     Raises:
         RolloutError: The request fails. If the text retry also fails, the token-id error is
@@ -334,7 +414,7 @@ async def sample_prompt(
     try:
         return await sampler.sample(prompt_ids, n, **kwargs), True
     except RolloutError as exc:
-        if "HTTP 4" not in str(exc):
+        if "HTTP 4" not in str(exc) or sampler.config.routed_experts:
             raise
         rejected = exc
     try:
@@ -452,6 +532,68 @@ def _token_ids(choice: dict[str, Any]) -> tuple[int, ...] | None:
         except ValueError:
             return None
     return tuple(ids)
+
+
+def decode_routed_experts(value: Any) -> np.ndarray:
+    """Decode a response's ``nvext.routed_experts``.
+
+    Dynamo sends ``{"data", "shape", "start", "dtype"}``:
+
+    - ``data`` is base64 of the array's raw C-order bytes;
+    - ``shape`` is ``[rows, layers, top_k]``;
+    - ``dtype`` is the element type, ``uint8`` for models with at most 256 experts, else
+      ``uint16``;
+    - ``start`` is the sequence position of the first row.
+
+    Returns:
+        A read-only array of shape ``[rows, layers, top_k]``.
+
+    Raises:
+        RolloutError: The value is malformed, or its rows do not start at the first token.
+    """
+    if not isinstance(value, dict):
+        raise RolloutError(f"routed experts must be an object, got {type(value).__name__}")
+    shape = value.get("shape")
+    if not (
+        isinstance(shape, list)
+        and len(shape) == 3
+        and all(isinstance(d, int) and not isinstance(d, bool) and d >= 0 for d in shape)
+    ):
+        raise RolloutError(f"routed experts shape must be [rows, layers, top_k], got {shape!r}")
+    start = value.get("start")
+    if start != 0:
+        # Replay needs a row for every token, prompt included.
+        raise RolloutError(f"routed experts start at token {start!r}, not at the first token")
+    try:
+        dtype = np.dtype(value.get("dtype") or "")
+    except TypeError:
+        dtype = None
+    if dtype is None or dtype.kind not in "iu":
+        raise RolloutError(
+            f"routed experts dtype must be an integer type, got {value.get('dtype')!r}"
+        )
+    try:
+        raw = base64.b64decode(value.get("data"), validate=True)
+    except (TypeError, ValueError):
+        raise RolloutError("routed experts data is not base64") from None
+    expected = math.prod(shape) * dtype.itemsize
+    if len(raw) != expected:
+        raise RolloutError(
+            f"routed experts data has {len(raw)} bytes, not the {expected} that shape {shape} of "
+            f"{dtype} needs"
+        )
+    return np.frombuffer(raw, dtype=dtype).reshape(shape)
+
+
+async def _gather_all(awaitables: Sequence[Awaitable[Any]]) -> list[Any]:
+    """Await ``awaitables`` concurrently. On the first error, cancel the rest."""
+    tasks = [asyncio.ensure_future(a) for a in awaitables]
+    try:
+        return list(await asyncio.gather(*tasks))
+    except BaseException:
+        for task in tasks:
+            task.cancel()
+        raise
 
 
 def align_logprobs(
@@ -620,6 +762,7 @@ __all__ = [
     "RolloutError",
     "align_logprobs",
     "check_stop_limits",
+    "decode_routed_experts",
     "fill_group",
     "omitted_stop_token",
     "same_token",
