@@ -32,6 +32,29 @@ on it.
 
 ## Setup
 
+```mermaid
+flowchart LR
+  subgraph cks["CKS cluster"]
+    trainer["Trainer pod, 8 x H100<br/>NeMo-RL GRPO + Gym actor"]
+    eval["Eval Job, CPU node<br/>Gym BrowseComp agent"]
+  end
+  subgraph cw["CoreWeave Forge"]
+    bucket[("Object storage<br/>full and delta snapshots")]
+    deploy["Inference deployment<br/>gateway, 4 x 2 H100 replicas"]
+  end
+  apis["External APIs<br/>You.com search, GLM-5.2 judge on W&B"]
+  trainer -- "weights after each step" --> bucket
+  bucket -- "hot-load" --> deploy
+  trainer -- "rollouts" --> deploy
+  eval -- "eval rollouts" --> deploy
+  trainer -- "search, judge" --> apis
+  eval -- "search, judge" --> apis
+```
+
+After each GRPO step, cwtrain uploads the weights (a full snapshot or a delta) and hot-loads them
+into every replica before the next rollouts. The trainer's Gym actor and the evaluation's agent
+sample from the same deployment and call the same search and judge APIs.
+
 | | |
 | --- | --- |
 | Training recipe | [NeMo-RL](../../recipes/nemo-rl/README.md): synchronous GRPO with the DTensor (Automodel) policy backend |
