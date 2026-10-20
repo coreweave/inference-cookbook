@@ -164,6 +164,19 @@ class RolloutConfig:
                 "token_id_prompts on"
             )
 
+    def without_routed_experts(self, trainer: str) -> RolloutConfig:
+        """This config with routed experts off, for a trainer that cannot replay them.
+
+        Routes split each group into one request per choice and add hundreds of bytes per token,
+        so a trainer that never reads them should not ask for them.
+        """
+        if not self.routed_experts:
+            return self
+        log.warning(
+            "%s does not replay routed experts; ignoring %sROUTED_EXPERTS", trainer, ENV_PREFIX
+        )
+        return dataclasses.replace(self, routed_experts=False)
+
     @classmethod
     def from_env(
         cls, environ: Mapping[str, str] | None = None, *, labels: Mapping[str, str] | None = None
@@ -220,6 +233,8 @@ class Completion:
     #: The experts that each token was routed to, ``[prompt + response - 1, layers, top_k]``, when
     #: requested (see ``RolloutConfig.routed_experts``).
     routed_experts: np.ndarray | None = field(default=None, compare=False, repr=False)
+    #: Prompt tokens the deployment served from its prefix cache, when it reported them.
+    cached_tokens: int | None = None
 
 
 class CompletionSampler:
@@ -307,12 +322,13 @@ class CompletionSampler:
         choices = sorted(body.get("choices") or [], key=lambda c: c.get("index", 0))
         if len(choices) != n:
             raise RolloutError(f"endpoint returned {len(choices)} choices for n={n}")
-        return [self._completion(i, c) for i, c in enumerate(choices)]
+        return [self._completion(i, c, body) for i, c in enumerate(choices)]
 
-    def _completion(self, index: int, choice: dict[str, Any]) -> Completion:
+    def _completion(self, index: int, choice: dict[str, Any], body: dict[str, Any]) -> Completion:
         logprobs = self.config.logprobs
         return Completion(
             index=index,
+            cached_tokens=_cached_tokens(body),
             text=choice.get("text") or "",
             finish_reason=choice.get("finish_reason"),
             stop_reason=choice.get("stop_reason"),
@@ -335,7 +351,7 @@ class CompletionSampler:
             choices = body.get("choices") or []
             if len(choices) != 1:
                 raise RolloutError(f"endpoint returned {len(choices)} choices for n=1")
-            completion = self._completion(index, choices[0])
+            completion = self._completion(index, choices[0], body)
             if completion.token_ids is None:
                 raise RolloutError(
                     "routed experts need the sampled token ids, and the endpoint did not report "
@@ -586,14 +602,23 @@ def decode_routed_experts(value: Any) -> np.ndarray:
 
 
 async def _gather_all(awaitables: Sequence[Awaitable[Any]]) -> list[Any]:
-    """Await ``awaitables`` concurrently. On the first error, cancel the rest."""
+    """Await ``awaitables`` concurrently. On the first error, cancel the rest and wait for them."""
     tasks = [asyncio.ensure_future(a) for a in awaitables]
     try:
         return list(await asyncio.gather(*tasks))
     except BaseException:
         for task in tasks:
             task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         raise
+
+
+def _cached_tokens(body: dict[str, Any]) -> int | None:
+    """``usage.prompt_tokens_details.cached_tokens``, when the response has it."""
+    usage = body.get("usage")
+    details = usage.get("prompt_tokens_details") if isinstance(usage, dict) else None
+    value = details.get("cached_tokens") if isinstance(details, dict) else None
+    return int(value) if isinstance(value, int) else None
 
 
 def align_logprobs(

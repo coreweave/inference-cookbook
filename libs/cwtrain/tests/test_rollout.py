@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import dataclasses
 import json
 import logging
 from dataclasses import dataclass, field
@@ -789,26 +790,54 @@ def test_a_rejected_token_id_prompt_is_not_retried_as_text_when_routes_are_on() 
 
 def test_a_failed_choice_cancels_the_rest_of_its_group() -> None:
     started: list[int] = []
-
+    cancelled: list[int] = []
     everyone = asyncio.Event()
 
     async def handler(request: httpx.Request) -> httpx.Response:
-        started.append(len(started))
+        me = len(started)
+        started.append(me)
         if len(started) == 3:
             everyone.set()
-        if len(started) == 1:
+        if me == 0:
             await everyone.wait()  # fail once all three requests are in flight
             return httpx.Response(400, text="bad request")
-        await asyncio.sleep(30)  # cancelled by the first choice's failure
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            cancelled.append(me)
+            raise
         return routed_response([97], encode_routes(routes_for(3)))
 
     sampler = CompletionSampler(ROUTED, transport=httpx.MockTransport(handler))
 
-    async def run() -> float:
+    async def run() -> tuple[float, list[int]]:
         loop = asyncio.get_running_loop()
         began = loop.time()
         with pytest.raises(RolloutError, match="bad request"):
             await sampler.sample([1, 2, 3], 3, max_tokens=4, temperature=1.0)
-        return loop.time() - began
+        # Checked before asyncio.run's shutdown, which would cancel leftover tasks anyway: in a
+        # long-lived loop such as a trainer's shared sampler, nothing else would.
+        return loop.time() - began, sorted(cancelled)
 
-    assert asyncio.run(run()) < 5 and len(started) == 3
+    seconds, cancelled_choices = asyncio.run(run())
+    assert seconds < 5 and len(started) == 3 and cancelled_choices == [1, 2]
+
+
+def test_completions_report_the_prompt_tokens_served_from_the_cache() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        response = routed_response([97], encode_routes(routes_for(3)))
+        body = response.json() | {"usage": {"prompt_tokens_details": {"cached_tokens": 2}}}
+        return httpx.Response(200, json=body)
+
+    for config in (ROUTED, dataclasses.replace(ROUTED, routed_experts=False)):
+        sampler = CompletionSampler(config, transport=httpx.MockTransport(handler))
+        [done] = asyncio.run(sampler.sample([1, 2, 3], 1, max_tokens=4, temperature=1.0))
+        assert done.cached_tokens == 2
+
+
+def test_a_trainer_without_routing_replay_turns_routes_off(caplog) -> None:
+    with caplog.at_level(logging.WARNING, logger="cwtrain.integrations.rollout"):
+        assert ROUTED.without_routed_experts("NeMo-RL").routed_experts is False
+    assert "NeMo-RL does not replay routed experts" in caplog.text
+    plain = dataclasses.replace(ROUTED, routed_experts=False)
+    assert plain.without_routed_experts("NeMo-RL") is plain
