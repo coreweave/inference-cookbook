@@ -1,0 +1,243 @@
+# SPDX-FileCopyrightText: 2026 CoreWeave, Inc.
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-PackageName: inference-cookbook
+
+import asyncio
+import base64
+import json
+import struct
+import sys
+from pathlib import Path
+
+import httpx
+import numpy as np
+import pytest
+from cwtrain.integrations.rollout import RolloutConfig, RolloutError
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import record  # noqa: E402
+import router_noise  # noqa: E402
+
+USER, ASSISTANT, THINK, END_THINK = 1, 2, 3, 4
+
+
+class Tokenizer:
+    """A GLM-like chat template over character ids: user turns, then assistant turns in <think>."""
+
+    def apply_chat_template(self, messages, tokenize, add_generation_prompt, return_dict):
+        assert tokenize and not return_dict
+        ids = []
+        for m in messages:
+            text = [10 + ord(c) % 1000 for c in m["content"]]
+            ids += [USER, *text] if m["role"] == "user" else [ASSISTANT, THINK, END_THINK, *text]
+        return ids + ([ASSISTANT, THINK] if add_generation_prompt else [])
+
+
+def test_the_second_turn_is_the_first_turns_ids_then_the_rendered_follow_up() -> None:
+    tok = Tokenizer()
+    messages = [{"role": "user", "content": "hi"}]
+    suffix = record.follow_up_suffix(tok, messages, "ok?")
+    assert suffix == [USER, *[10 + ord(c) for c in "ok?"], ASSISTANT, THINK]
+    prompt = record.render(tok, messages)
+    # A response that stopped on the user token does not get it twice; any other keeps its end.
+    assert record.second_turn_prompt(prompt, [50, USER], suffix) == prompt + [50, *suffix]
+    assert record.second_turn_prompt(prompt, [50, 99], suffix) == prompt + [50, 99, *suffix]
+
+
+def test_long_prompts_differ_from_the_first_token_on_and_reach_their_length() -> None:
+    tok = Tokenizer()
+    a, b = (record.render(tok, record.long_prompt(i, 600, tok)) for i in (0, 1))
+    assert len(a) >= 600 and len(b) >= 600
+    assert a[:2] == b[:2] and a[: a.index(10 + ord("0")) + 5] != b[: b.index(10 + ord("0")) + 5]
+
+
+def encode(routes: np.ndarray) -> dict:
+    data = base64.b64encode(routes.tobytes()).decode("ascii")
+    return {"data": data, "shape": list(routes.shape), "start": 0, "dtype": str(routes.dtype)}
+
+
+class Engine:
+    """Completions with routes; the first ``drop`` responses come without them."""
+
+    def __init__(self, drop: int = 0, cached: int = 0, unavailable: int = 0):
+        self.drop, self.cached, self.requests = drop, cached, []
+        self.unavailable = unavailable
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        self.requests.append(body)
+        if len(self.requests) <= self.unavailable:
+            return httpx.Response(503, text="busy")
+        out = [7, 8, 9]
+        rows = len(body["prompt"]) + len(out) - 1
+        routes = np.arange(rows * 2 * 2, dtype=np.uint16).reshape(rows, 2, 2) % 288
+        choice = {
+            "index": 0,
+            "text": "abc",
+            "finish_reason": "length",
+            "logprobs": {"tokens": [f"token_id:{t}" for t in out], "token_logprobs": [-0.5] * 3},
+        }
+        usage = {"prompt_tokens_details": {"cached_tokens": self.cached}}
+        result = {"choices": [choice], "usage": usage, "nvext": {"routed_experts": encode(routes)}}
+        if len(self.requests) <= self.drop:
+            del result["nvext"]
+        return httpx.Response(200, json=result)
+
+
+def recorder(engine: Engine) -> record.Recorder:
+    config = RolloutConfig(base_url="https://gw.invalid/v1", model="m")
+    return record.Recorder(config, transport=httpx.MockTransport(engine))
+
+
+def test_a_recorded_sample_has_exact_tokens_log_probs_routes_and_cached_tokens() -> None:
+    engine = Engine(drop=1, cached=128)
+    rec = recorder(engine)
+    done = asyncio.run(rec.complete([1, 2, 3, 4], 3))
+    assert done["response_ids"] == [7, 8, 9] and done["logprobs"] == [-0.5] * 3
+    assert done["routes"].shape == (6, 2, 2) and done["cached_tokens"] == 128
+    assert rec.retries == ["no routed experts"]  # that response was asked again
+    sent = engine.requests[-1]
+    assert sent["prompt"] == [1, 2, 3, 4] and sent["return_tokens_as_token_ids"] is True
+    assert sent["nvext"] == {"extra_fields": ["routed_experts"]} and sent["temperature"] == 1.0
+
+
+@pytest.fixture(autouse=True)
+def no_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def no_wait(seconds: float) -> None:
+        pass
+
+    monkeypatch.setattr(record.asyncio, "sleep", no_wait)
+
+
+def test_busy_endpoints_are_asked_again() -> None:
+    rec = recorder(Engine(unavailable=2))
+    assert asyncio.run(rec.complete([1, 2], 3))["response_ids"] == [7, 8, 9]
+    assert rec.retries == ["HTTP 503", "HTTP 503"]
+
+
+def test_responses_that_never_carry_routes_fail() -> None:
+    with pytest.raises(RolloutError, match="without usable routes"):
+        asyncio.run(recorder(Engine(drop=99)).complete([1, 2], 3))
+
+
+def test_sets_are_written_as_jsonl_and_routes_keyed_by_sample_id(tmp_path: Path) -> None:
+    tok = Tokenizer()
+    rows = [{"prompt": f"q{i}", "label": str(i)} for i in range(4)]
+
+    async def both():
+        rec = recorder(Engine())
+        single = await record.record_single(rec, tok, rows, 0, 2)
+        turns = await record.record_two_turn(rec, tok, rows, 2, 1, "again?")
+        return single, turns
+
+    single, turns = asyncio.run(both())
+    assert [s["id"] for s in turns] == ["two_turn-0002-1", "two_turn-0002-2"]
+    # turn 2 starts with turn 1's prompt and sampled ids
+    first = turns[0]["prompt_ids"] + turns[0]["response_ids"]
+    assert turns[1]["prompt_ids"][: len(first)] == first
+    stats = record.write_set(tmp_path, "single", single)
+    assert stats["samples"] == 2 and stats["truncated"] == 2
+    lines = (tmp_path / "single.jsonl").read_text().splitlines()
+    assert [json.loads(line)["label"] for line in lines] == ["0", "1"]
+    routes = np.load(tmp_path / "single.npz")
+    assert sorted(routes.files) == ["single-0000", "single-0001"]
+
+
+# --- router noise ---
+
+
+def bf16(values) -> np.ndarray:
+    return router_noise.f32_to_bf16(np.asarray(values, dtype=np.float32))
+
+
+def test_bfloat16_rounding_is_to_nearest_with_ties_to_even() -> None:
+    one = 0x3F80
+    # 1 + 2**-8 lies halfway between 1 and the next bfloat16: ties go to the even one, 1.
+    # 1 + 3 * 2**-8 lies halfway between the 1st and 2nd steps above 1: it goes to the 2nd.
+    halfway = [1.0, 1 + 2**-8, 1 + 3 * 2**-8, 1 + 2**-8 + 2**-20, -2.5]
+    assert bf16(halfway).tolist() == [one, one, one + 2, one + 1, 0xC020]
+    exact = np.array([0.5, -3.0, 1.5, 0.0078125], dtype=np.float32)
+    assert (router_noise.bf16_to_f32(bf16(exact)) == exact).all()
+
+
+def test_noise_is_seeded_per_layer_and_has_the_requested_spread() -> None:
+    bits = bf16(np.full((64, 256), 0.5))
+    a = router_noise.noised(bits, seed=1, layer=3, sigma=0.01)
+    assert (a == router_noise.noised(bits, seed=1, layer=3, sigma=0.01)).all()
+    assert (a != router_noise.noised(bits, seed=1, layer=4, sigma=0.01)).any()
+    assert (a != router_noise.noised(bits, seed=2, layer=3, sigma=0.01)).any()
+    spread = (router_noise.bf16_to_f32(a) - 0.5).std()
+    assert spread == pytest.approx(0.01, rel=0.1)
+
+
+def write_shard(path: Path, tensors: dict[str, np.ndarray]) -> None:
+    header, offset, blobs = {}, 0, []
+    for name, bits in tensors.items():
+        blob = bits.astype(np.uint16).tobytes()
+        header[name] = {
+            "dtype": "BF16",
+            "shape": list(bits.shape),
+            "data_offsets": [offset, offset + len(blob)],
+        }
+        offset += len(blob)
+        blobs.append(blob)
+    raw = json.dumps(header).encode()
+    path.write_bytes(struct.pack("<Q", len(raw)) + raw + b"".join(blobs))
+
+
+@pytest.fixture
+def checkpoint(tmp_path: Path) -> Path:
+    base = tmp_path / "v0"
+    base.mkdir()
+    rng = np.random.default_rng(0)
+    weights = lambda *shape: bf16(rng.standard_normal(shape) * 0.02)  # noqa: E731
+    shards = {
+        "a.safetensors": {
+            "model.layers.0.mlp.gate.weight": weights(8, 16),
+            "model.layers.0.self_attn.q_proj.weight": weights(16, 16),
+        },
+        "b.safetensors": {"model.layers.1.mlp.up_proj.weight": weights(16, 16)},
+        "c.safetensors": {"model.layers.2.mlp.gate.weight": weights(8, 16)},  # an MTP layer
+    }
+    weight_map = {}
+    for shard, tensors in shards.items():
+        write_shard(base / shard, tensors)
+        weight_map |= dict.fromkeys(tensors, shard)
+    (base / "model.safetensors.index.json").write_text(json.dumps({"weight_map": weight_map}))
+    (base / "config.json").write_text(json.dumps({"text_config": {"num_hidden_layers": 2}}))
+    return base
+
+
+def test_a_noisy_version_changes_only_the_decoder_routers(checkpoint: Path) -> None:
+    from cwtrain.hotload.mirror import tensor_locations
+
+    out = checkpoint.with_name("v1")
+    rec = router_noise.make_version(checkpoint, out, seed=1, scale=0.05)
+    assert list(rec["tensors"]) == ["model.layers.0.mlp.gate.weight"]
+    entry = rec["tensors"]["model.layers.0.mlp.gate.weight"]
+    assert entry["layer"] == 0 and entry["changed_elements"] > 0
+    before, after = tensor_locations(checkpoint), tensor_locations(out)
+    for name, loc in after.items():
+        old = before[name].path.read_bytes()[before[name].offset :][: loc.nbytes]
+        new = loc.path.read_bytes()[loc.offset :][: loc.nbytes]
+        assert (old != new) == (name == "model.layers.0.mlp.gate.weight"), name
+        if name == "model.layers.0.mlp.gate.weight":
+            assert router_noise.sha256(np.frombuffer(new, np.uint16)) == entry["sha256_after"]
+            assert router_noise.sha256(np.frombuffer(old, np.uint16)) == entry["sha256_before"]
+    # shards without a decoder router are links to the base's, not copies
+    assert (out / "b.safetensors").stat().st_ino == (checkpoint / "b.safetensors").stat().st_ino
+    assert (out / "a.safetensors").stat().st_ino != (checkpoint / "a.safetensors").stat().st_ino
+
+
+def test_main_writes_the_delta_and_the_record_next_to_the_version(checkpoint: Path) -> None:
+    v1 = checkpoint.with_name("v1")
+    args = ["--base", str(checkpoint), "--out", str(v1), "--seed", "1", "--scale", "0.05"]
+    assert router_noise.main([*args, "--delta", str(checkpoint.with_name("v1-delta"))]) == 0
+    rec = json.loads(v1.with_name("v1.noise.json").read_text())
+    assert rec["base"] == "v0" and rec["version"] == "v1" and rec["delta"]["tensors_changed"] == 1
+    index = json.loads(
+        (checkpoint.with_name("v1-delta") / "model.safetensors.index.json").read_text()
+    )
+    assert index["metadata"]["base_version"] == "v0" and index["metadata"]["version"] == "v1"
+    assert not (v1 / "v1.noise.json").exists()
