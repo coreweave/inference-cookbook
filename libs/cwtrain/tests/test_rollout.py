@@ -899,6 +899,31 @@ class TrainerArgs:  # the slime and miles flag that replays the rollout's routes
     use_rollout_routing_replay: bool = False
 
 
+def test_the_replay_flag_decides_and_a_setting_that_disagrees_is_ignored(caplog) -> None:
+    on = {**ROLLOUT_ENV, "CWTRAIN_ROLLOUT_ROUTED_EXPERTS": "1"}
+    off = {**ROLLOUT_ENV, "CWTRAIN_ROLLOUT_ROUTED_EXPERTS": "0"}
+    with caplog.at_level(logging.WARNING, logger="cwtrain.integrations.rollout"):
+        assert RolloutConfig.for_trainer(TrainerArgs(False), on).routed_experts is False
+        assert RolloutConfig.for_trainer(TrainerArgs(True), off).routed_experts is True
+    assert caplog.text.count("ignoring CWTRAIN_ROLLOUT_ROUTED_EXPERTS") == 2
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="cwtrain.integrations.rollout"):
+        assert RolloutConfig.for_trainer(TrainerArgs(True), on).routed_experts is True
+        assert RolloutConfig.for_trainer(TrainerArgs(False), ROLLOUT_ENV).routed_experts is False
+    assert caplog.text == ""
+
+
+def test_routes_must_have_the_trainers_layer_count_and_top_k() -> None:
+    from cwtrain.integrations.rollout import check_routes_fit
+
+    sample = Sample(prompt="p")
+    sample.rollout_routed_experts = np.zeros((3, 4, 2), np.int32)
+    check_routes_fit([[sample]], num_layers=4, top_k=2)
+    with pytest.raises(RolloutError, match="4 layers and top-2, but the trainer has --num-layers"):
+        check_routes_fit([[sample]], num_layers=5, top_k=2)
+    check_routes_fit([[Sample(prompt="q")]], num_layers=5, top_k=2)  # no routes to check
+
+
 def test_the_trainers_replay_flag_turns_routes_on() -> None:
     assert RolloutConfig.for_trainer(TrainerArgs(True), ROLLOUT_ENV).routed_experts is True
     assert RolloutConfig.for_trainer(TrainerArgs(False), ROLLOUT_ENV).routed_experts is False

@@ -23,10 +23,16 @@ from typing import Any
 
 from slime.rollout.base_types import RolloutFnEvalOutput, RolloutFnTrainOutput
 from slime.rollout.rm_hub import batched_async_rm
+from slime.rollout.sample_hooks import apply_rollout_sample_hooks
 from slime.utils.async_utils import run
 from slime.utils.processing_utils import load_tokenizer
 
-from cwtrain.integrations.rollout import RolloutConfig, sample_groups, shared_sampler
+from cwtrain.integrations.rollout import (
+    RolloutConfig,
+    check_routes_fit,
+    sample_groups,
+    shared_sampler,
+)
 
 log = logging.getLogger(__name__)
 
@@ -49,8 +55,9 @@ def generate_rollout(
 async def _generate(args: Namespace, rollout_id: int, data_source: Any) -> RolloutFnTrainOutput:
     tokenizer = _tokenizer(args.hf_checkpoint)
     groups = data_source.get_samples(args.rollout_batch_size)
+    config = RolloutConfig.for_trainer(args)
     metrics = await sample_groups(
-        shared_sampler(RolloutConfig.for_trainer(args)),
+        shared_sampler(config),
         groups,
         tokenizer=tokenizer,
         max_tokens=int(args.rollout_max_response_len),
@@ -58,6 +65,10 @@ async def _generate(args: Namespace, rollout_id: int, data_source: Any) -> Rollo
         top_p=float(getattr(args, "rollout_top_p", 1.0) or 1.0),
         stop=getattr(args, "rollout_stop", None),
     )
+    if config.routed_experts:
+        check_routes_fit(groups, int(args.num_layers), int(args.moe_router_topk))
+    # --rollout-sample-hook-path, such as slime's spill_routed_experts, as slime's own rollout runs
+    groups = await apply_rollout_sample_hooks(args, groups)
     flat = [s for g in groups for s in g]
     rewards = await batched_async_rm(args, flat)
     for sample, reward in zip(flat, rewards, strict=True):

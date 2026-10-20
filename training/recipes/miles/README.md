@@ -112,11 +112,14 @@ supplies them:
 
 - Start the deployment with the `enable-return-routed-experts` engine option.
 - Pass `--use-rollout-routing-replay` to miles. The rollout function then asks for each sequence's
-  routes, as `CWTRAIN_ROLLOUT_ROUTED_EXPERTS=1` would, and stores them as `rollout_routed_experts`.
+  routes and stores them as `rollout_routed_experts`. The flag is the only switch: without it the
+  rollout asks for no routes, and a `CWTRAIN_ROLLOUT_ROUTED_EXPERTS` that disagrees is ignored with
+  a warning.
 - A response carries one sequence's routes, so each group of `n` becomes `n` requests of one
   choice.
-- A response without routes, or whose routes do not line up with its tokens, fails the rollout.
-  miles refuses to train a batch without them in any case.
+- A response without routes, or whose routes do not line up with its tokens or have another layer
+  count or top-k than `--num-layers` and `--moe-router-topk`, fails the rollout. miles refuses to
+  train a batch without routes in any case.
 
 ## Hooking into miles' per-model scripts
 

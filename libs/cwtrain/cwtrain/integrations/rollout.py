@@ -221,15 +221,29 @@ class RolloutConfig:
 
     @classmethod
     def for_trainer(cls, args: Any, environ: Mapping[str, str] | None = None) -> RolloutConfig:
-        """:meth:`from_env`, with routed experts on when the trainer replays them.
+        """:meth:`from_env`, with routed experts on exactly when the trainer replays them.
 
         slime and miles replay the rollout's routes with ``--use-rollout-routing-replay``
-        (``args.use_rollout_routing_replay``), and then fail on a sample without them.
+        (``args.use_rollout_routing_replay``), and then fail on a sample without them. Without
+        it, routes would cost a request per choice and go unread. The flag decides, and an
+        explicit ``CWTRAIN_ROLLOUT_ROUTED_EXPERTS`` that disagrees is ignored with a warning. For
+        a trainer without the flag, the environment decides.
         """
-        config = cls.from_env(environ)
-        if getattr(args, "use_rollout_routing_replay", False) and not config.routed_experts:
-            config = dataclasses.replace(config, routed_experts=True)
-        return config
+        env = os.environ if environ is None else environ
+        config = cls.from_env(env)
+        flag = getattr(args, "use_rollout_routing_replay", None)
+        if flag is None:
+            return config
+        replay = bool(flag)
+        explicit = env.get(f"{ENV_PREFIX}ROUTED_EXPERTS", "").strip()
+        if explicit and config.routed_experts != replay:
+            log.warning(
+                "ignoring %sROUTED_EXPERTS=%s: --use-rollout-routing-replay is %s",
+                ENV_PREFIX,
+                explicit,
+                "on" if replay else "off",
+            )
+        return dataclasses.replace(config, routed_experts=replay)
 
 
 @dataclass(frozen=True)
@@ -745,6 +759,24 @@ def fill_group(
                     f"{len(sample.tokens)} tokens"
                 )
             sample.rollout_routed_experts = completion.routed_experts.astype(np.int32)
+
+
+def check_routes_fit(groups: Sequence[Sequence[Any]], num_layers: int, top_k: int) -> None:
+    """Fail unless every sample's routes have the trainer's layer count and top-k.
+
+    slime checks this itself; miles' replay would otherwise fail deep inside its router.
+
+    Raises:
+        RolloutError: a sample's ``rollout_routed_experts`` is not ``[rows, num_layers, top_k]``.
+    """
+    for group in groups:
+        for sample in group:
+            routes = getattr(sample, "rollout_routed_experts", None)
+            if routes is not None and tuple(routes.shape[1:]) != (num_layers, top_k):
+                raise RolloutError(
+                    f"routed experts have {routes.shape[1]} layers and top-{routes.shape[2]}, but "
+                    f"the trainer has --num-layers {num_layers} and --moe-router-topk {top_k}"
+                )
 
 
 async def sample_groups(
