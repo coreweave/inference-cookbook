@@ -6,25 +6,31 @@
 
 Run it against a Mixture-of-Experts deployment started with the ``enable-return-routed-experts``
 engine option, before recording rollouts or training with routing replay. It sends a few requests,
-most of them the way cwtrain's sampler does, and checks what comes back:
+most of them the way cwtrain's sampler does, and reads the routes only where the sampler does: the
+response's top-level ``nvext``. The checks:
 
 - ``routes``: a sampled response has one row of routes for each token but the last. The rows have
   the model's layer count and top-k, zeros in dense layers, and distinct expert ids in range in
   every other layer.
-- ``repeat``: the same prompt, sent twice with greedy decoding, returns rows that line up with the
-  tokens: in the first MoE layer, most rows agree for the prompt and for the response tokens that
-  both answers share. Deeper layers may drift, because decoding on many GPUs is not bit-exact from
-  run to run and sensitive routers then change some choices.
-- ``cache``: a long prompt sent twice. Did the second request reuse the prefix cache, and did it
-  return the same rows?
+- ``align``: a greedy response's rows, computed while decoding, against the rows of the same tokens
+  sent back as a prompt, computed in one prefill. The first MoE layer, which numerical noise barely
+  reaches, must agree on most tokens, and all MoE layers together must agree clearly more than rows
+  one position off. Deeper layers may drift: decoding on many GPUs is not bit-exact, and sensitive
+  routers then change some choices. A shift common to both paths can't be seen from outside.
+- ``cache``: a long prompt sent twice, then a prompt that shares only the first half of what was
+  cached, so that its hit can end inside a cache block. Cached rows must equal the rows first
+  returned for those tokens, and every response's rows must be well formed. Without a cache hit
+  there is nothing to check, and the result is ``info``.
 - ``burst``: many requests at once, as a GRPO rollout sends them. Every response must carry routes
   that line up with its tokens. Some engine builds drop routes once enough sequences run at once.
 - ``n2``, ``stream`` and ``chat``: what an ``n=2`` request, a streamed request and a chat request
   return.
 - ``long``: the size of a long response's routes, and whether the gateway delivers them.
 
-The endpoint comes from cwtrain's ``CWTRAIN_ROLLOUT_*`` environment variables. ``--model-path`` is
-the served model's Hugging Face id or local directory, for its tokenizer and ``config.json``::
+Requests are retried like the sampler's: transport errors and its retryable statuses, up to
+``CWTRAIN_ROLLOUT_MAX_ATTEMPTS`` times. The endpoint comes from cwtrain's ``CWTRAIN_ROLLOUT_*``
+environment variables. ``--model-path`` is the served model's Hugging Face id or local directory,
+for its tokenizer and ``config.json``::
 
     python probe.py --model-path zai-org/GLM-5.3-Flash --out probe.json
 
@@ -48,19 +54,25 @@ from typing import Any
 import httpx
 import numpy as np
 from cwtrain.integrations.rollout import (
+    RETRY_STATUS,
     CompletionSampler,
     RolloutConfig,
     RolloutError,
     decode_routed_experts,
 )
 
-CHECKS = ("routes", "repeat", "cache", "burst", "n2", "stream", "chat", "long")
+CHECKS = ("routes", "align", "cache", "burst", "n2", "stream", "chat", "long")
 ROUTES = ["routed_experts"]
-#: Two cold prefills of the same prompt return rows that agree at least this much.
-AGREEMENT = 0.9
 #: Rows of the same tokens agree at least this much in the first MoE layer, which numerical noise
 #: barely reaches. Rows one position off, as a misaligned engine returns them, agree on almost none.
 ALIGNED = 0.5
+#: Over all MoE layers, rows of the same tokens agree at least this much more than rows one
+#: position off.
+MARGIN = 0.1
+#: The fewest response rows ``align`` judges.
+MIN_ROWS = 16
+#: The response length that ``align`` asks for.
+ALIGN_TOKENS = 64
 
 MATH = "Find every real x with x^2 - 5x + 6 = 0. Reason step by step, then state the answer."
 SHORT = "What is 17 times 23? Reply with the number only."
@@ -160,12 +172,13 @@ def token_ids(choice: dict[str, Any]) -> list[int]:
 
 
 def find(body: dict[str, Any], key: str) -> Any:
-    """``key`` from wherever the response put it: its ``nvext``, its first choice, or the body."""
-    choice = (body.get("choices") or [{}])[0]
-    for place in (body.get("nvext"), choice.get("nvext"), choice, body):
-        if isinstance(place, dict) and place.get(key) is not None:
-            return place[key]
-    return None
+    """``key`` from the response's (or stream event's) top-level ``nvext``, or ``None``.
+
+    That is the only place cwtrain's sampler reads, so a deployment that puts routes anywhere else
+    fails here as it would fail the trainer.
+    """
+    nvext = body.get("nvext")
+    return nvext.get(key) if isinstance(nvext, dict) else None
 
 
 def sse_events(lines: Sequence[str]) -> list[dict[str, Any]]:
@@ -186,6 +199,17 @@ class Check:
     details: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class Answer:
+    """One completion: its prompt, sampled ids, routes and the prompt tokens served from cache."""
+
+    prompt: list[int]
+    ids: list[int]
+    routes: np.ndarray
+    cached: int
+    seconds: float
+
+
 class Probe:
     """Requests against one deployment, and the checks on what they return."""
 
@@ -197,6 +221,7 @@ class Probe:
         *,
         long_tokens: int = 16384,
         burst: int = 64,
+        backoff: float = 0.5,
         transport: httpx.AsyncBaseTransport | None = None,
     ):
         self.config = dataclasses.replace(config, routed_experts=True)
@@ -213,6 +238,7 @@ class Probe:
         self.layout = layout
         self.long_tokens = long_tokens
         self.burst_size = burst
+        self.backoff = backoff
 
     async def aclose(self) -> None:
         await self.sampler.aclose()
@@ -240,10 +266,56 @@ class Probe:
         }
 
     async def post(self, path: str, payload: dict[str, Any]) -> httpx.Response:
-        response = await self.http.post(path, json=payload)
-        if response.status_code != 200:
-            raise RolloutError(f"HTTP {response.status_code}: {response.text[:300]}")
-        return response
+        """POST as the sampler does: retry transport errors and its retryable statuses."""
+        last = ""
+        for attempt in range(self.config.max_attempts):
+            if attempt:
+                await asyncio.sleep(self.backoff * 2 ** (attempt - 1))
+            try:
+                response = await self.http.post(path, json=payload)
+            except httpx.TransportError as exc:
+                last = f"{type(exc).__name__}: {exc}"
+                continue
+            if response.status_code == 200:
+                return response
+            last = f"HTTP {response.status_code}: {response.text[:300]}"
+            if response.status_code not in RETRY_STATUS:
+                break
+        raise RolloutError(last)
+
+    async def complete(
+        self, prompt: list[int], max_tokens: int, *, temperature: float = 1.0, force: bool = False
+    ) -> Answer:
+        """One completion with routes. ``force`` asks for exactly ``max_tokens`` tokens."""
+        payload = self.payload(prompt, max_tokens, temperature=temperature)
+        began = time.monotonic()
+        if force:
+            response = await self.forced(payload, max_tokens)
+        else:
+            response = await self.post("/completions", payload)
+        seconds = round(time.monotonic() - began, 3)
+        body = response.json()
+        value = find(body, "routed_experts")
+        if value is None:
+            raise RolloutError("the response has no routed_experts in its nvext")
+        details = (body.get("usage") or {}).get("prompt_tokens_details") or {}
+        ids = token_ids((body.get("choices") or [{}])[0])
+        cached = int(details.get("cached_tokens") or 0)
+        return Answer(prompt, ids, decode_routed_experts(value), cached, seconds)
+
+    async def forced(self, payload: dict[str, Any], tokens: int) -> httpx.Response:
+        """Generate to ``tokens``, or as far as the model goes when the endpoint refuses that.
+
+        ``ignore_eos`` alone leaves the generation config's other stop tokens (such as an
+        end-of-turn token) in force, so ``min_tokens`` goes along.
+        """
+        try:
+            forced = {"ignore_eos": True, "min_tokens": tokens}
+            return await self.post("/completions", {**payload, **forced})
+        except RolloutError as exc:
+            if "HTTP 4" not in str(exc):
+                raise
+            return await self.post("/completions", payload)
 
     def rows_check(self, name: str, routes: np.ndarray, prompt: int, response: int) -> Check:
         rows = prompt + response - 1
@@ -259,44 +331,57 @@ class Probe:
             return Check(name, "fail", "; ".join(problems), details)
         return Check(name, "pass", f"{rows} rows of {routes.dtype}, shape as expected", details)
 
+    def answer_problems(self, answers: dict[str, Answer]) -> list[str]:
+        """The row-count and structure problems of each named answer."""
+        problems = []
+        for label, answer in answers.items():
+            check = self.rows_check(label, answer.routes, len(answer.prompt), len(answer.ids))
+            if check.status == "fail":
+                problems.append(f"{label}: {check.summary}")
+        return problems
+
     async def routes(self) -> Check:
         prompt = self.prompt(MATH)
         [done] = await self.sampler.sample(prompt, 1, max_tokens=512, temperature=1.0)
         return self.rows_check("routes", done.routed_experts, len(prompt), len(done.token_ids))
 
-    async def repeat(self) -> Check:
-        prompt = self.prompt(SHORT)
-        first, second = [
-            (await self.sampler.sample(prompt, 1, max_tokens=64, temperature=0.0))[0]
-            for _ in range(2)
-        ]
-        p = len(prompt)
-        # Row p + j routes response token j; the last response token has no row.
-        shared = min(
-            common_prefix(first.token_ids, second.token_ids),
-            len(first.token_ids) - 1,
-            len(second.token_ids) - 1,
-        )
-        a, b = first.routed_experts, second.routed_experts
-        prompt_layers = layer_agreement(a[:p], b[:p], self.layout)
-        response_layers = layer_agreement(a[p : p + shared], b[p : p + shared], self.layout)
-        # Rows one position apart, as a misaligned engine would return them: about chance level.
-        shifted = agreement(a[p + 1 : p + shared], b[p : p + shared - 1], self.layout)
-        details = {
-            "prompt_rows_agree": float(prompt_layers.mean()),
-            "shared_response_tokens": shared,
-            "response_rows_agree": float(response_layers.mean()),
-            "response_rows_agree_by_moe_layer": [round(float(x), 4) for x in response_layers],
-            "response_rows_agree_one_position_off": shifted,
-            "same_response": first.token_ids == second.token_ids,
+    async def align(self) -> Check:
+        prompt = self.prompt(MATH)
+        decoded = await self.complete(prompt, ALIGN_TOKENS, temperature=0.0, force=True)
+        p, compared = len(prompt), len(decoded.ids) - 1  # the last sampled token has no row
+        # The same tokens as a prompt: one prefill, not the decoding path. Its own answer is moot.
+        replayed = await self.complete(prompt + decoded.ids[:-1], 1, temperature=0.0)
+        problems = self.answer_problems({"decoded": decoded, "replayed": replayed})
+        details: dict[str, Any] = {
+            "response_rows": compared,
+            "replayed_cached_tokens": replayed.cached,
         }
-        status = "pass" if min(prompt_layers[0], response_layers[0]) >= ALIGNED else "fail"
+        if problems:
+            return Check("align", "fail", "; ".join(problems), details)
+        if compared < MIN_ROWS:
+            summary = f"only {compared} response rows to compare, fewer than {MIN_ROWS}"
+            return Check("align", "info", summary, details)
+        if replayed.cached >= p + compared:
+            summary = "the replayed prompt came from the prefix cache, so it repeats the same rows"
+            return Check("align", "info", summary, details)
+        a, b = decoded.routes[p : p + compared], replayed.routes[p : p + compared]
+        layers = layer_agreement(a, b, self.layout)
+        # The better of the two one-position shifts: about chance for rows that line up, and
+        # high for rows that come one position early or late.
+        shifted = max(agreement(a[1:], b[:-1], self.layout), agreement(a[:-1], b[1:], self.layout))
+        mean = float(layers.mean())
+        details |= {
+            "rows_agree": mean,
+            "rows_agree_by_moe_layer": [round(float(x), 4) for x in layers],
+            "rows_agree_one_position_off": shifted,
+        }
+        status = "pass" if layers[0] >= ALIGNED and mean - shifted >= MARGIN else "fail"
         summary = (
-            f"prompt rows agree {prompt_layers.mean():.1%}; rows of {shared} shared response "
-            f"tokens agree {response_layers.mean():.1%} (first MoE layer {response_layers[0]:.1%}, "
-            f"last {response_layers[-1]:.1%}; one position off {shifted:.1%})"
+            f"{compared} decoded rows against a prefill of the same tokens: {mean:.1%} agree "
+            f"(first MoE layer {layers[0]:.1%}, last {layers[-1]:.1%}), one position off "
+            f"{shifted:.1%}"
         )
-        return Check("repeat", status, summary, details)
+        return Check("align", status, summary, details)
 
     async def cache(self) -> Check:
         # A unique first line, so the first request cannot hit an earlier run's cache.
@@ -304,31 +389,50 @@ class Probe:
         while len(self.prompt(text)) < 6000:
             text += PASSAGE
         prompt = self.prompt(text)
-        seconds, cached, routes = [], [], []
-        for _ in range(2):
-            began = time.monotonic()
-            body = (await self.post("/completions", self.payload(prompt, 1))).json()
-            seconds.append(round(time.monotonic() - began, 3))
-            details = (body.get("usage") or {}).get("prompt_tokens_details") or {}
-            cached.append(details.get("cached_tokens"))
-            routes.append(decode_routed_experts(find(body, "routed_experts")))
-        # A cache hit returns the rows stored with the cached blocks, so those must be identical.
-        # The engine recomputes the rest from the cached state, which can route differently.
-        hit = int(cached[1] or 0)
-        details = {"prompt_tokens": len(prompt), "seconds": seconds, "cached_tokens": cached}
+        first = await self.complete(prompt, 1)
+        second = await self.complete(prompt, 1)
+        hit = second.cached
+        details: dict[str, Any] = {
+            "prompt_tokens": len(prompt),
+            "seconds": [first.seconds, second.seconds],
+            "cached_tokens": [first.cached, hit],
+        }
+        answers = {"first": first, "second": second}
+        partial = None
+        if hit:
+            # Share only part of what was cached, then other tokens: on an engine that matches
+            # prefixes in smaller units than its cache blocks, this hit ends inside a block.
+            shared = hit // 2 + 7
+            other = self.prompt(uuid.uuid4().hex + "\n" + PASSAGE)
+            partial = answers["partial"] = await self.complete(prompt[:shared] + other, 1)
+            details |= {"partial_shared_tokens": shared, "partial_cached_tokens": partial.cached}
+        problems = self.answer_problems(answers)
+        if problems:
+            return Check("cache", "fail", "; ".join(problems), details)
         if not hit:
-            same = agreement(routes[0], routes[1], self.layout)
-            details["rows_agree"] = same
-            summary = f"no cache hit ({seconds[0]} s, then {seconds[1]} s); rows agree {same:.1%}"
-            return Check("cache", "pass" if same >= AGREEMENT else "fail", summary, details)
-        kept = agreement(routes[0][:hit], routes[1][:hit], self.layout)
-        rest = agreement(routes[0][hit:], routes[1][hit:], self.layout)
+            summary = (
+                f"no cache hit ({first.seconds} s, then {second.seconds} s): prefix caching off, "
+                "or another replica"
+            )
+            return Check("cache", "info", summary, details)
+        # A hit returns the rows stored with the cached blocks, so those must be identical. The
+        # engine recomputes the rest from the cached state, which can route differently.
+        kept = agreement(first.routes[:hit], second.routes[:hit], self.layout)
+        rest = agreement(first.routes[hit:], second.routes[hit:], self.layout)
         details |= {"cached_rows_agree": kept, "recomputed_rows_agree": rest}
         summary = (
-            f"{len(prompt)}-token prompt: {seconds[0]} s, then {seconds[1]} s with {hit} cached "
-            f"tokens; cached rows agree {kept:.1%}, recomputed rows {rest:.1%}"
+            f"{len(prompt)}-token prompt: {first.seconds} s, then {second.seconds} s with {hit} "
+            f"cached tokens; cached rows agree {kept:.1%}, recomputed rows {rest:.1%}"
         )
-        return Check("cache", "pass" if kept == 1.0 else "fail", summary, details)
+        status = "pass" if kept == 1.0 else "fail"
+        if partial is not None and partial.cached:
+            n = partial.cached
+            same = agreement(first.routes[:n], partial.routes[:n], self.layout)
+            details["partial_cached_rows_agree"] = same
+            summary += f"; a prompt sharing {details['partial_shared_tokens']} tokens: {n} cached"
+            summary += f", rows agree {same:.1%}"
+            status = status if same == 1.0 else "fail"
+        return Check("cache", status, summary, details)
 
     async def burst(self) -> Check:
         async def one(prompt: list[int]) -> str:
@@ -342,13 +446,22 @@ class Probe:
 
         # Distinct prompts, all sent at once: the engine runs them as one large batch.
         prompts = [self.prompt(f"{SHORT} ({i})") for i in range(self.burst_size)]
-        results = await asyncio.gather(*(one(p) for p in prompts))
+        results = await asyncio.gather(*(one(p) for p in prompts), return_exceptions=True)
+        errors = [r for r in results if isinstance(r, BaseException)]
         missing, misaligned = results.count("missing"), results.count("misaligned")
-        details = {"requests": len(results), "missing": missing, "misaligned": misaligned}
-        if missing or misaligned:
+        details: dict[str, Any] = {
+            "requests": len(results),
+            "missing": missing,
+            "misaligned": misaligned,
+            "errors": len(errors),
+        }
+        if errors:
+            details["first_error"] = f"{type(errors[0]).__name__}: {errors[0]}"
+        if missing or misaligned or errors:
             summary = (
-                f"{missing} of {len(results)} concurrent responses had no routes, and "
-                f"{misaligned} had rows that do not line up with their tokens"
+                f"{missing} of {len(results)} concurrent responses had no routes, "
+                f"{misaligned} had rows that do not line up with their tokens, and {len(errors)} "
+                "failed"
             )
             return Check("burst", "fail", summary, details)
         return Check(
@@ -379,7 +492,7 @@ class Probe:
         ids = [t for e in events for c in e.get("choices") or [] for t in token_ids(c)]
         carrying = [i for i, e in enumerate(events) if find(e, "routed_experts") is not None]
         if not carrying:
-            return Check("stream", "fail", f"no routes in {len(events)} events")
+            return Check("stream", "fail", f"no routes in the nvext of {len(events)} events")
         check = self.rows_check(
             "stream",
             decode_routed_experts(find(events[carrying[-1]], "routed_experts")),
@@ -404,7 +517,7 @@ class Probe:
         value, prompt, completion = (find(body, key) for key in fields)
         if value is None or completion is None:
             missing = [k for k, v in ((ROUTES[0], value), (fields[2], completion)) if v is None]
-            return Check("chat", "fail", f"the response has no {', '.join(missing)}")
+            return Check("chat", "fail", f"the response's nvext has no {', '.join(missing)}")
         if prompt is None:
             # Some Dynamo versions return no prompt ids on chat; the usage still counts them.
             prompt_tokens = int((body.get("usage") or {}).get("prompt_tokens") or 0)
@@ -429,20 +542,12 @@ class Probe:
         prompt = self.prompt(LONG_ASK)
         payload = self.payload(prompt, self.long_tokens)
         began = time.monotonic()
-        try:
-            # Generate to max_tokens, so the response has a known size. ignore_eos alone leaves
-            # the generation config's other stop tokens (such as an end-of-turn token) in force.
-            forced = {"ignore_eos": True, "min_tokens": self.long_tokens}
-            response = await self.post("/completions", {**payload, **forced})
-        except RolloutError as exc:
-            if "HTTP 4" not in str(exc):
-                raise
-            response = await self.post("/completions", payload)
+        response = await self.forced(payload, self.long_tokens)
         seconds = round(time.monotonic() - began, 1)
         body = response.json()
         value = find(body, "routed_experts")
         if value is None:
-            return Check("long", "fail", "the response has no routes")
+            return Check("long", "fail", "the response's nvext has no routes")
         routes = decode_routed_experts(value)
         response_tokens = len(token_ids(body["choices"][0]))
         details = {
