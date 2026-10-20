@@ -11,8 +11,10 @@ most of them the way cwtrain's sampler does, and checks what comes back:
 - ``routes``: a sampled response has one row of routes for each token but the last. The rows have
   the model's layer count and top-k, zeros in dense layers, and distinct expert ids in range in
   every other layer.
-- ``repeat``: the same prompt, sent twice with greedy decoding, returns the same prompt rows and the
-  same rows for the response tokens that both answers share.
+- ``repeat``: the same prompt, sent twice with greedy decoding, returns rows that line up with the
+  tokens: in the first MoE layer, most rows agree for the prompt and for the response tokens that
+  both answers share. Deeper layers may drift, because decoding on many GPUs is not bit-exact from
+  run to run and sensitive routers then change some choices.
 - ``cache``: a long prompt sent twice. Did the second request reuse the prefix cache, and did it
   return the same rows?
 - ``burst``: many requests at once, as a GRPO rollout sends them. Every response must carry routes
@@ -54,8 +56,11 @@ from cwtrain.integrations.rollout import (
 
 CHECKS = ("routes", "repeat", "cache", "burst", "n2", "stream", "chat", "long")
 ROUTES = ["routed_experts"]
-#: Rows that agree less than this are not numerical noise: they belong to other tokens.
+#: Two cold prefills of the same prompt return rows that agree at least this much.
 AGREEMENT = 0.9
+#: Rows of the same tokens agree at least this much in the first MoE layer, which numerical noise
+#: barely reaches. Rows one position off, as a misaligned engine returns them, agree on almost none.
+ALIGNED = 0.5
 
 MATH = "Find every real x with x^2 - 5x + 6 = 0. Reason step by step, then state the answer."
 SHORT = "What is 17 times 23? Reply with the number only."
@@ -123,14 +128,20 @@ def structure_problems(routes: np.ndarray, layout: MoeLayout) -> list[str]:
     return problems
 
 
-def agreement(a: np.ndarray, b: np.ndarray, layout: MoeLayout) -> float:
-    """The share of (token, MoE layer) rows that route to the same set of experts."""
+def layer_agreement(a: np.ndarray, b: np.ndarray, layout: MoeLayout) -> np.ndarray:
+    """For each MoE layer, the share of tokens that route to the same set of experts."""
     if a.shape != b.shape:
         raise ValueError(f"route shapes differ: {list(a.shape)} and {list(b.shape)}")
     a, b = a[:, layout.moe], b[:, layout.moe]
-    if not a.size:
-        return 1.0
-    return float((np.sort(a, axis=-1) == np.sort(b, axis=-1)).all(axis=-1).mean())
+    if not a.shape[0]:
+        return np.ones(len(layout.moe))
+    return (np.sort(a, axis=-1) == np.sort(b, axis=-1)).all(axis=-1).mean(axis=0)
+
+
+def agreement(a: np.ndarray, b: np.ndarray, layout: MoeLayout) -> float:
+    """The share of (token, MoE layer) rows that route to the same set of experts."""
+    per_layer = layer_agreement(a, b, layout)
+    return float(per_layer.mean()) if per_layer.size else 1.0
 
 
 def common_prefix(a: Sequence[int], b: Sequence[int]) -> int:
@@ -267,18 +278,23 @@ class Probe:
             len(second.token_ids) - 1,
         )
         a, b = first.routed_experts, second.routed_experts
-        prompt_rows = agreement(a[:p], b[:p], self.layout)
-        response_rows = agreement(a[p : p + shared], b[p : p + shared], self.layout)
+        prompt_layers = layer_agreement(a[:p], b[:p], self.layout)
+        response_layers = layer_agreement(a[p : p + shared], b[p : p + shared], self.layout)
+        # Rows one position apart, as a misaligned engine would return them: about chance level.
+        shifted = agreement(a[p + 1 : p + shared], b[p : p + shared - 1], self.layout)
         details = {
-            "prompt_rows_agree": prompt_rows,
+            "prompt_rows_agree": float(prompt_layers.mean()),
             "shared_response_tokens": shared,
-            "response_rows_agree": response_rows,
+            "response_rows_agree": float(response_layers.mean()),
+            "response_rows_agree_by_moe_layer": [round(float(x), 4) for x in response_layers],
+            "response_rows_agree_one_position_off": shifted,
             "same_response": first.token_ids == second.token_ids,
         }
-        status = "pass" if min(prompt_rows, response_rows) >= AGREEMENT else "fail"
+        status = "pass" if min(prompt_layers[0], response_layers[0]) >= ALIGNED else "fail"
         summary = (
-            f"prompt rows agree {prompt_rows:.1%}; rows of {shared} shared response tokens agree "
-            f"{response_rows:.1%}"
+            f"prompt rows agree {prompt_layers.mean():.1%}; rows of {shared} shared response "
+            f"tokens agree {response_layers.mean():.1%} (first MoE layer {response_layers[0]:.1%}, "
+            f"last {response_layers[-1]:.1%}; one position off {shifted:.1%})"
         )
         return Check("repeat", status, summary, details)
 

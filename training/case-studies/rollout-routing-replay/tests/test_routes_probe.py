@@ -72,6 +72,8 @@ class Engine:
     report that many cached tokens and route the recomputed rest differently, like a hybrid model
     resuming from its cached state; ``stale_cache`` changes the cached rows too. ``drop_every``
     leaves the routes out of every n-th completion, like an engine that loses them under load.
+    ``drift_from`` changes the response rows of every completion from that MoE layer on, like
+    decoding that is not bit-exact from run to run.
     """
 
     def __init__(
@@ -82,6 +84,7 @@ class Engine:
         cache_hit: int = 0,
         stale_cache: bool = False,
         drop_every: int = 0,
+        drift_from: int | None = None,
     ):
         self.extra_rows, self.dense_value = extra_rows, dense_value
         self.chat_prompt_ids, self.cache_hit, self.stale_cache = (
@@ -89,17 +92,20 @@ class Engine:
             cache_hit,
             stale_cache,
         )
-        self.drop_every = drop_every
+        self.drop_every, self.drift_from = drop_every, drift_from
         self.requests: list[dict] = []
         self.seen: set[tuple[int, ...]] = set()
 
-    def routes(self, tokens: list[int], cached: int = 0) -> dict:
+    def routes(self, tokens: list[int], cached: int = 0, prompt: int | None = None) -> dict:
         tokens = tokens + list(range(100, 100 + self.extra_rows))
         routes = routes_for(tokens, self.dense_value)
+        moe = LAYOUT.moe
         if cached:
-            moe = LAYOUT.moe
             start = 0 if self.stale_cache else cached
             routes[start:, moe] = (routes[start:, moe] + 1) % LAYOUT.experts
+        if self.drift_from is not None and prompt is not None:
+            drifting, step = moe[self.drift_from :], len(self.requests)  # new on each request
+            routes[prompt:, drifting] = (routes[prompt:, drifting] + step) % LAYOUT.experts
         return encode(routes)
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
@@ -124,7 +130,7 @@ class Engine:
             "finish_reason": "length",
             "logprobs": {"tokens": tokens, "token_logprobs": [-0.5] * len(OUT)},
         }
-        nvext = {"routed_experts": self.routes(prompt + OUT, cached)}
+        nvext = {"routed_experts": self.routes(prompt + OUT, cached, len(prompt))}
         if body.get("stream"):
             events = [
                 {"choices": [{"index": 0, "logprobs": {"tokens": [t], "token_logprobs": [-0.5]}}]}
@@ -186,6 +192,15 @@ def test_a_burst_fails_when_some_responses_lose_their_routes() -> None:
     assert "16 of 64 concurrent responses had no routes" in burst.summary
     misaligned = run_probe(Engine(extra_rows=1), ("burst",))["burst"]
     assert misaligned.status == "fail" and misaligned.details["misaligned"] == 64
+
+
+def test_repeat_allows_drift_in_deeper_layers_but_not_in_the_first() -> None:
+    drift = run_probe(Engine(drift_from=1), ("repeat",))["repeat"]
+    assert drift.status == "pass", drift.summary
+    assert drift.details["response_rows_agree_by_moe_layer"] == [1.0, 0.0, 0.0, 0.0]
+    assert drift.details["prompt_rows_agree"] == 1.0
+    everywhere = run_probe(Engine(drift_from=0), ("repeat",))["repeat"]
+    assert everywhere.status == "fail" and "first MoE layer 0.0%" in everywhere.summary
 
 
 def test_cached_rows_must_match_while_recomputed_rows_may_differ() -> None:
