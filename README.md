@@ -64,12 +64,13 @@ bucket policy.
 ## Case studies
 
 A case study solves a real problem with Dedicated Inference: the problem, where the data comes
-from, the setup, the results, the cost and the limitations. It runs a recipe the way an example
+from, the setup, the results, the cost and the limitations. Most run a recipe the way an example
 does.
 
 | Case study | Problem | Recipes | Model | Deployment |
 | --- | --- | --- | --- | --- |
 | [web-search-agent](training/case-studies/web-search-agent/README.md) | Train a model to answer questions by searching the web (You.com), scored by an LLM judge | NeMo-RL GRPO with NeMo Gym; NeMo Gym evaluation on BrowseComp | Nemotron 3.5 Lightning 30B-A3B BF16 | 4 replicas, 2 H100 GPUs each |
+| [rollout-routing-replay](training/case-studies/rollout-routing-replay/README.md) | Train an MoE model on the tokens and experts its rollouts used: exact tokens and routing replay, across hot-loads | None: cwtrain's rollout requests and a transformers forward pass | GLM-5.3-Flash BF16 | 1 replica, 16 H100 GPUs |
 
 ## Before you start
 
