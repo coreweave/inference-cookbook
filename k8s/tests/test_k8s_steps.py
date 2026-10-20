@@ -1236,6 +1236,10 @@ def test_every_training_recipe_is_in_recipes() -> None:
     assert found == {recipe.name for recipe in RECIPES}, "add the recipe to RECIPES"
 
 
+#: Case studies that run no recipe, so none of the tests above apply to them.
+STUDIES_WITHOUT_A_RECIPE = {("case-studies", "rollout-routing-replay")}
+
+
 def test_every_example_is_in_examples() -> None:
     # an example or case study that is not in EXAMPLES gets none of the tests above
     found = {
@@ -1243,7 +1247,8 @@ def test_every_example_is_in_examples() -> None:
         for kind in ("examples", "case-studies")
         for path in (ROOT / "training" / kind).glob("*/README.md")
     }
-    assert found == {(example.kind, example.name) for example in EXAMPLES}, "add it to EXAMPLES"
+    expected = {(example.kind, example.name) for example in EXAMPLES} | STUDIES_WITHOUT_A_RECIPE
+    assert found == expected, "add it to EXAMPLES"
 
 
 def test_every_training_recipe_has_an_example() -> None:
