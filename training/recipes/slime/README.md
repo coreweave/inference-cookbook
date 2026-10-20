@@ -148,6 +148,26 @@ It is a thin slime adapter over `cwtrain.integrations.rollout`. Configure it wit
 `CWTRAIN_ROLLOUT_API_KEY_FILE`. The hook blocks until every replica serves the new version, so the
 next rollout is on-policy without an engine handshake.
 
+## Routing replay for MoE models
+
+On a Mixture-of-Experts model, the trainer's router can pick other experts for a token than the
+deployment did. With `--use-rollout-routing-replay`, slime runs its MoE layers on the experts that
+the deployment used, so it trains the forward pass that sampled the rollout. The rollout function
+supplies them:
+
+- Start the deployment with the `enable-return-routed-experts` engine option.
+- Pass `--use-rollout-routing-replay` to slime. The rollout function then asks for each sequence's
+  routes and stores them as `rollout_routed_experts`. The flag is the only switch: without it the
+  rollout asks for no routes, and a `CWTRAIN_ROLLOUT_ROUTED_EXPERTS` that disagrees is ignored with
+  a warning.
+- A response carries one sequence's routes, so each group of `n` becomes `n` requests of one
+  choice.
+- A response without routes, or whose routes do not line up with its tokens or have another layer
+  count or top-k than `--num-layers` and `--moe-router-topk`, fails the rollout. slime refuses to
+  train a batch without routes in any case.
+- The rollout runs slime's sample hooks (`--rollout-sample-hook-path`), so
+  `slime.utils.routed_experts.spill_routed_experts` can move the routes to disk.
+
 ## Which entrypoint
 
 slime ships `train.py` only. Its asynchronous training is the fully-async rollout worker

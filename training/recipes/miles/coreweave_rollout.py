@@ -28,7 +28,12 @@ from miles.rollout.base_types import (
 from miles.rollout.rm_hub import batched_async_rm
 from miles.utils.processing_utils import load_tokenizer
 
-from cwtrain.integrations.rollout import RolloutConfig, sample_groups, shared_sampler
+from cwtrain.integrations.rollout import (
+    RolloutConfig,
+    check_routes_fit,
+    sample_groups,
+    shared_sampler,
+)
 
 log = logging.getLogger(__name__)
 
@@ -40,7 +45,7 @@ class CoreWeaveRolloutFn(BaseRolloutFn):
         super().__init__(input)
         self.args = input.args
         self.data_source = input.data_source
-        self.config = RolloutConfig.from_env()
+        self.config = RolloutConfig.for_trainer(self.args)
         self.tokenizer = load_tokenizer(self.args.hf_checkpoint, trust_remote_code=False)
 
     async def __call__(self, input: RolloutFnInput):
@@ -58,6 +63,8 @@ class CoreWeaveRolloutFn(BaseRolloutFn):
             top_p=float(getattr(args, "rollout_top_p", 1.0) or 1.0),
             stop=getattr(args, "rollout_stop", None),
         )
+        if self.config.routed_experts:
+            check_routes_fit(groups, int(args.num_layers), int(args.moe_router_topk))
         flat = [s for g in groups for s in g]
         rewards = await batched_async_rm(args, flat)
         for sample, reward in zip(flat, rewards, strict=True):
