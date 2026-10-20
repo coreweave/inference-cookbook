@@ -70,7 +70,8 @@ class Engine:
 
     ``extra_rows`` and ``dense_value`` break the routes. ``cache_hit`` makes a repeated prompt
     report that many cached tokens and route the recomputed rest differently, like a hybrid model
-    resuming from its cached state; ``stale_cache`` changes the cached rows too.
+    resuming from its cached state; ``stale_cache`` changes the cached rows too. ``drop_every``
+    leaves the routes out of every n-th completion, like an engine that loses them under load.
     """
 
     def __init__(
@@ -80,6 +81,7 @@ class Engine:
         chat_prompt_ids: bool = True,
         cache_hit: int = 0,
         stale_cache: bool = False,
+        drop_every: int = 0,
     ):
         self.extra_rows, self.dense_value = extra_rows, dense_value
         self.chat_prompt_ids, self.cache_hit, self.stale_cache = (
@@ -87,6 +89,7 @@ class Engine:
             cache_hit,
             stale_cache,
         )
+        self.drop_every = drop_every
         self.requests: list[dict] = []
         self.seen: set[tuple[int, ...]] = set()
 
@@ -132,6 +135,8 @@ class Engine:
             return httpx.Response(200, text=text, headers={"content-type": "text/event-stream"})
         choices = [{**choice, "index": i} for i in range(body.get("n", 1))]
         usage = {"prompt_tokens": len(prompt), "prompt_tokens_details": {"cached_tokens": cached}}
+        if self.drop_every and len(self.requests) % self.drop_every == 0:
+            return httpx.Response(200, json={"choices": choices, "usage": usage})
         return httpx.Response(200, json={"choices": choices, "nvext": nvext, "usage": usage})
 
 
@@ -158,11 +163,13 @@ def test_a_healthy_deployment_passes_every_check() -> None:
         "routes": "pass",
         "repeat": "pass",
         "cache": "pass",
+        "burst": "pass",
         "n2": "info",
         "stream": "pass",
         "chat": "pass",
         "long": "info",
     }
+    assert results["burst"].details == {"requests": 64, "missing": 0, "misaligned": 0}
     assert results["n2"].details["matches"] == [0, 1]
     assert results["chat"].details["prompt_ids_match_the_trainers_render"] is True
     assert results["stream"].details["events_with_routes"] == [2]
@@ -171,6 +178,14 @@ def test_a_healthy_deployment_passes_every_check() -> None:
     assert engine.requests[-1]["ignore_eos"] is True
     assert engine.requests[-1]["min_tokens"] == engine.requests[-1]["max_tokens"] == 16384
     assert results["cache"].details["prompt_tokens"] >= 6000
+
+
+def test_a_burst_fails_when_some_responses_lose_their_routes() -> None:
+    burst = run_probe(Engine(drop_every=4), ("burst",))["burst"]
+    assert burst.status == "fail" and burst.details["missing"] == 16
+    assert "16 of 64 concurrent responses had no routes" in burst.summary
+    misaligned = run_probe(Engine(extra_rows=1), ("burst",))["burst"]
+    assert misaligned.status == "fail" and misaligned.details["misaligned"] == 64
 
 
 def test_cached_rows_must_match_while_recomputed_rows_may_differ() -> None:

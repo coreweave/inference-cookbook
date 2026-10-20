@@ -15,6 +15,8 @@ most of them the way cwtrain's sampler does, and checks what comes back:
   same rows for the response tokens that both answers share.
 - ``cache``: a long prompt sent twice. Did the second request reuse the prefix cache, and did it
   return the same rows?
+- ``burst``: many requests at once, as a GRPO rollout sends them. Every response must carry routes
+  that line up with its tokens. Some engine builds drop routes once enough sequences run at once.
 - ``n2``, ``stream`` and ``chat``: what an ``n=2`` request, a streamed request and a chat request
   return.
 - ``long``: the size of a long response's routes, and whether the gateway delivers them.
@@ -50,7 +52,7 @@ from cwtrain.integrations.rollout import (
     decode_routed_experts,
 )
 
-CHECKS = ("routes", "repeat", "cache", "n2", "stream", "chat", "long")
+CHECKS = ("routes", "repeat", "cache", "burst", "n2", "stream", "chat", "long")
 ROUTES = ["routed_experts"]
 #: Rows that agree less than this are not numerical noise: they belong to other tokens.
 AGREEMENT = 0.9
@@ -183,17 +185,23 @@ class Probe:
         layout: MoeLayout,
         *,
         long_tokens: int = 16384,
+        burst: int = 64,
         transport: httpx.AsyncBaseTransport | None = None,
     ):
         self.config = dataclasses.replace(config, routed_experts=True)
         self.sampler = CompletionSampler(self.config, transport=transport)
         headers = {"Authorization": f"Bearer {config.api_key}"} if config.api_key else {}
         self.http = httpx.AsyncClient(
-            base_url=config.base_url, headers=headers, timeout=config.timeout, transport=transport
+            base_url=config.base_url,
+            headers=headers,
+            timeout=config.timeout,
+            transport=transport,
+            limits=httpx.Limits(max_connections=max(100, burst)),
         )
         self.tokenizer = tokenizer
         self.layout = layout
         self.long_tokens = long_tokens
+        self.burst_size = burst
 
     async def aclose(self) -> None:
         await self.sampler.aclose()
@@ -305,6 +313,31 @@ class Probe:
             f"tokens; cached rows agree {kept:.1%}, recomputed rows {rest:.1%}"
         )
         return Check("cache", "pass" if kept == 1.0 else "fail", summary, details)
+
+    async def burst(self) -> Check:
+        async def one(prompt: list[int]) -> str:
+            body = (await self.post("/completions", self.payload(prompt, 64))).json()
+            value = find(body, "routed_experts")
+            if value is None:
+                return "missing"
+            rows = decode_routed_experts(value).shape[0]
+            response = len(token_ids((body.get("choices") or [{}])[0]))
+            return "ok" if rows == len(prompt) + response - 1 else "misaligned"
+
+        # Distinct prompts, all sent at once: the engine runs them as one large batch.
+        prompts = [self.prompt(f"{SHORT} ({i})") for i in range(self.burst_size)]
+        results = await asyncio.gather(*(one(p) for p in prompts))
+        missing, misaligned = results.count("missing"), results.count("misaligned")
+        details = {"requests": len(results), "missing": missing, "misaligned": misaligned}
+        if missing or misaligned:
+            summary = (
+                f"{missing} of {len(results)} concurrent responses had no routes, and "
+                f"{misaligned} had rows that do not line up with their tokens"
+            )
+            return Check("burst", "fail", summary, details)
+        return Check(
+            "burst", "pass", f"all {len(results)} concurrent responses had routes", details
+        )
 
     async def n2(self) -> Check:
         prompt = self.prompt(MATH)
@@ -436,6 +469,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--model-path", required=True, help="Hugging Face id or local directory")
     parser.add_argument("--checks", default=",".join(CHECKS), help="comma-separated checks to run")
     parser.add_argument("--long-tokens", type=int, default=16384, help="the long check's tokens")
+    parser.add_argument("--burst", type=int, default=64, help="the burst check's requests at once")
     parser.add_argument("--out", type=Path, help="write the results as JSON")
     parser.add_argument("--trust-remote-code", action="store_true")
     args = parser.parse_args(argv)
@@ -449,7 +483,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.model_path, trust_remote_code=args.trust_remote_code
     )
     layout = moe_layout(load_config(args.model_path))
-    probe = Probe(RolloutConfig.from_env(), tokenizer, layout, long_tokens=args.long_tokens)
+    probe = Probe(
+        RolloutConfig.from_env(),
+        tokenizer,
+        layout,
+        long_tokens=args.long_tokens,
+        burst=args.burst,
+    )
     results = asyncio.run(run(probe, args.checks.split(",")))
     for result in results:
         print(f"{result.status.upper():4}  {result.name:6}  {result.summary}")
