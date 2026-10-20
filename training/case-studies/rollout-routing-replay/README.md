@@ -4,7 +4,7 @@ A trainer's forward pass and the engine that sampled a rollout can disagree on *
 trainer scores and, on a Mixture-of-Experts model, **which experts** each token goes through. Both
 move the trainer's log-probs away from the engine's, and an RL loss then masks or clips tokens the
 policy did sample. On GLM-5.3-Flash served by Dedicated Inference, token-in, token-out requests
-close the first gap, and routing replay cuts the second 4.5×.
+close the first gap, and routing replay cuts the second 4.6×.
 
 ```mermaid
 flowchart LR
@@ -29,19 +29,20 @@ attention computes the same thing.
 
 ## Results
 
-128 single-turn rollouts, 191,334 response tokens, 95% bootstrap intervals over sequences:
+128 single-turn rollouts, 187,257 response tokens, 95% bootstrap intervals over sequences:
 
 | | Sequences on other tokens | Routing choices that differ | Mean \|Δ log p\| | KL (k3) | Tokens outside [½, 2] |
 | --- | --- | --- | --- | --- | --- |
-| Text, tokenized again | 4 of 128 | — | — | — | — |
-| Exact tokens | 0 | 44.2% | 0.0427 [0.0392, 0.0463] | 0.0068 | 821 (0.43%) |
-| Exact tokens and replay | 0 | 0 | 0.0095 [0.0088, 0.0103] | 0.00036 | 0 |
+| Text, tokenized again | 1 of 128 | — | — | — | — |
+| Exact tokens | 0 | 44.4% | 0.0427 [0.0393, 0.0460] | 0.0067 | 857 (0.46%) |
+| Exact tokens and replay | 0 | 0 | 0.0094 [0.0086, 0.0101] | 0.00036 | 1 |
 
-- **Replay cuts the log-prob gap 4.5×** [4.4, 4.6] and the KL 19× [17, 20], and leaves no token
-  for IcePop to mask or TIS to clip. Without it, 821 tokens fall outside [½, 2].
-- **Tokenizing the text again changes 4 of 128 responses**: splits the tokenizer doesn't produce
-  (`$k` for `$` `k`, `BET` `WEEN` for `BETWEEN`), and a cut inside a multi-byte character. One keeps
-  its length, so a row-count check passes it and replay would put experts on the wrong tokens.
+- **Replay cuts the log-prob gap 4.6×** [4.4, 4.7] and the KL 19× [18, 20], and leaves 1 token for
+  IcePop to mask or TIS to clip, against 857 without it.
+- **Tokenizing the text again changes 1 of 128 responses** (4 of 128 in an earlier recording):
+  splits the tokenizer doesn't produce (`-p` `refix` for `-prefix`, `BET` `WEEN` for `BETWEEN`),
+  and a cut inside a multi-byte character. One kept its length, so a row-count check passes it and
+  replay would put experts on the wrong tokens.
 
 ## Getting exact tokens and routes
 
@@ -77,12 +78,12 @@ rows of a decoded response match a prefill of the same tokens. Every check passe
 
 ## Multi-turn
 
-Build turn 2 from turn 1's exact ids and the rendered follow-up (`second_turn_prompt` in
-[`record.py`](record.py)). Rendering the whole conversation from text changed **21 of 25**
+Build turn 2 from turn 1's exact ids, without a trailing stop token, and the rendered follow-up
+(`second_turn_prompt` in [`record.py`](record.py)). Rendering the whole conversation from text changed **21 of 25**
 conversations whose first turn was cut off, and 0 of 7 complete ones.
 
 The prefix cache keeps 384-token blocks of prompts, never generated tokens, so turn 2 recomputes
-turn 1's positions, and **only 56–59% of those rows match turn 1's**:
+turn 1's positions, and **only 57% of those rows match turn 1's**:
 
 ```mermaid
 flowchart LR
@@ -97,9 +98,9 @@ flowchart LR
 
 | Routes replayed, one pass over the conversation | Turn-1 tokens | Turn-2 tokens |
 | --- | --- | --- |
-| None | 0.0426 | 0.0412 |
-| Turn 2's rows everywhere | 0.0422 | 0.0103 |
-| Each turn's rows over its own positions | 0.0093 | 0.0158 |
+| None | 0.0402 | 0.0348 |
+| Turn 2's rows everywhere | 0.0379 | 0.0084 |
+| Each turn's rows over its own positions | 0.0086 | 0.0136 |
 
 **Train each turn as its own sample with that turn's routes**, and both gaps stay at the
 single-turn level.
@@ -134,10 +135,10 @@ which one computed it:
 
 | Set (16 prompts of 1,538 tokens) | Cached prompt tokens | The row matches |
 | --- | --- | --- |
-| P on v0 | 0 | v0 53%, v1 33% |
-| P after v1 (`RESET_ALL`) | 0 | v1 54%, v0 33% |
-| Q after v2 (`PRESERVE`) | 1,536, rows byte-identical to v1's | **v1 54%, v2 32%** |
-| R on v2 | 0 | v2 55%, v1 30% |
+| P on v0 | 0 | v0 54%, v1 33% |
+| P after v1 (`RESET_ALL`) | 0 | v1 53%, v0 33% |
+| Q after v2 (`PRESERVE`) | 1,536, rows byte-identical to v1's | **v1 53%, v2 35%** |
+| R on v2 | 0 | v2 55%, v1 31% |
 
 With `PRESERVE`, a cached prompt keeps the previous version's KV cache and routes. The synchronous
 recipes (slime, miles `train.py`, NeMo-RL, Axolotl) publish with `RESET_ALL`; miles' `train_async.py`
@@ -161,7 +162,7 @@ keeps `PRESERVE`.
 - **One model, one recording.** Transformers stands in for a trainer's kernels.
 - **Up to 2,048 tokens.** Longer sequences need a trainer that implements the sparse attention
   layers.
-- **Replay removes only the routing part of the gap.** The rest, 0.0095 here, still needs off-policy
+- **Replay removes only the routing part of the gap.** The rest, 0.0094 here, still needs off-policy
   corrections such as TIS.
 
 ## Reproduce
