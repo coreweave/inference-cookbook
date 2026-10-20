@@ -68,8 +68,12 @@ cwtrain's sampler sends this with `CWTRAIN_ROLLOUT_ROUTED_EXPERTS=1`:
   at the end.
 - **The rows belong to their sample.** Decoding on 16 GPUs isn't bit-exact: the same greedy prompt
   drifts after 70 to 120 tokens.
+- **Engine builds.** Older vLLM builds lose routes under load and return all-zero rows on cache hits
+  that end inside a block. vLLM 0.31 fixes both
+  ([vllm-project/vllm#45635](https://github.com/vllm-project/vllm/pull/45635)).
 
-[`probe.py`](probe.py) checks all of this on a deployment; every check passed on this one.
+[`probe.py`](probe.py) checks all of this on a deployment, both engine bugs included, and that the
+rows of a decoded response match a prefill of the same tokens. Every check passed on this one.
 
 ## Multi-turn
 
@@ -164,11 +168,13 @@ keeps `PRESERVE`.
 
 [`reproduce.sh`](reproduce.sh) runs every step against your deployment. Its header lists what it
 needs: disk, the deployment's bucket credentials, and GPUs for the trainer-side passes
-(`FORWARD=1`).
+(`FORWARD=1`). It checks the token, the bucket and the credentials before the first step, and
+refuses a `WORK` directory that already holds a recording.
 
 ```bash
 pip install -e libs/cwtrain transformers huggingface_hub jinja2
 export CWTRAIN_ROLLOUT_BASE_URL="https://YOUR-GATEWAY/v1" CWTRAIN_ROLLOUT_API_KEY="YOUR-API-KEY"
 export COREWEAVE_API_TOKEN="YOUR-API-TOKEN" DEPLOYMENT_ID="YOUR-DEPLOYMENT-ID"
+export AWS_ACCESS_KEY_ID="YOUR-KEY-ID" AWS_SECRET_ACCESS_KEY="YOUR-SECRET" AWS_REGION="BUCKET-ZONE"
 training/case-studies/rollout-routing-replay/reproduce.sh
 ```
