@@ -20,9 +20,11 @@ experts get their gate weights from the trainer's own router scores, renormalize
 miles' routing replay computes them. Against the engine's log-probs it reports the mean absolute
 log-prob gap, the k3 KL estimate and the share of tokens whose probability ratio lies outside
 [1/2, 2] (the tokens IcePop masks and TIS truncates), with 95% bootstrap intervals over
-sequences. For the hot-load sets it rebuilds each version's routers from the noise records and,
-where two versions choose differently in the first MoE layer, asks which of them the returned rows
-follow.
+sequences. It stops first unless replaying the trainer's own choices reproduces its pass and
+replaying them one row off changes it, and it runs no pass on a recording with problems. Only
+sigmoid routers are supported. For the hot-load sets it rebuilds each version's routers from the
+noise records and, where two versions choose differently in the first MoE layer, asks which of
+them the returned rows follow.
 
     python analyze.py --recording recording --model-path zai-org/GLM-5.3-Flash-BF16 --out cpu.json
     python analyze.py --recording recording --model-path /models/glm --forward --out report.json
@@ -43,6 +45,10 @@ import numpy as np
 from probe import MoeLayout, agreement, load_config, moe_layout, structure_problems
 
 HOTLOAD_SETS = ("P", "Q", "R")
+#: Replaying the trainer's own choices must give back its own log-probs to this precision.
+SELF_CHECK_TOLERANCE = 1e-6
+#: Replaying its choices one row off must move its log-probs at least this much on average.
+SHIFTED_MIN_CHANGE = 0.05
 
 
 # --- the recording ---
@@ -78,6 +84,23 @@ def validate(samples: list[dict[str, Any]], layout: MoeLayout) -> list[str]:
         if len(s["logprobs"]) != len(s["response_ids"]):
             problems.append(f"{s['id']}: {len(s['logprobs'])} log-probs")
     return problems
+
+
+def kept_first_turn_tokens(one: dict[str, Any], two: dict[str, Any]) -> int:
+    """How many of turn 1's response tokens turn 2's prompt repeats.
+
+    All of them, or all but a closing stop token that turn 2's prompt replaces with the
+    follow-up.
+    """
+    p1, response = len(one["prompt_ids"]), one["response_ids"]
+    c1 = len(response)
+    if two["prompt_ids"][:p1] == one["prompt_ids"]:
+        tail = two["prompt_ids"][p1 : p1 + c1]
+        if tail == response:
+            return c1
+        if c1 and tail[: c1 - 1] == response[: c1 - 1]:
+            return c1 - 1
+    raise ValueError(f"{two['id']} does not start with the tokens of {one['id']}")
 
 
 def conversations(samples: list[dict[str, Any]]) -> list[tuple[dict, dict]]:
@@ -151,7 +174,7 @@ def two_turn_rows(pairs: list[tuple[dict, dict]], layout: MoeLayout) -> dict[str
     """The second turn's rows over the first turn's prompt and response, against the first's."""
     prompt, response = [], []
     for one, two in pairs:
-        p, rows = len(one["prompt_ids"]), one["routes"].shape[0]
+        p, rows = len(one["prompt_ids"]), shared_rows(one, two)
         prompt.append(agreement(one["routes"][:p], two["routes"][:p], layout))
         response.append(agreement(one["routes"][p:rows], two["routes"][p:rows], layout))
     cached = [int(two["cached_tokens"] or 0) for _, two in pairs]
@@ -161,6 +184,11 @@ def two_turn_rows(pairs: list[tuple[dict, dict]], layout: MoeLayout) -> dict[str
         "first_turn_prompt_rows_agree": float(np.mean(prompt)) if prompt else None,
         "first_turn_response_rows_agree": float(np.mean(response)) if response else None,
     }
+
+
+def shared_rows(one: dict[str, Any], two: dict[str, Any]) -> int:
+    """Turn 1's rows whose positions hold the same tokens in turn 2."""
+    return min(one["routes"].shape[0], len(one["prompt_ids"]) + kept_first_turn_tokens(one, two))
 
 
 def hotload_rows(before: list[dict], after: list[dict], layout: MoeLayout) -> dict[str, Any]:
@@ -222,6 +250,8 @@ def ratio(
 
 def gaps(trainer: np.ndarray, engine: Sequence[float]) -> dict[str, tuple[float, int]]:
     """Per-sequence sums for the log-prob metrics, as (sum, tokens)."""
+    if len(trainer) != len(engine):
+        raise ValueError(f"{len(trainer)} trainer log-probs for {len(engine)} engine log-probs")
     d = trainer.astype(np.float64) - np.asarray(engine, dtype=np.float64)
     n = len(d)
     return {
@@ -255,13 +285,31 @@ def summarize(per: dict[str, list[dict[str, tuple[float, int]]]]) -> dict[str, A
 # --- the GPU part ---
 
 
+def check_scoring(config: dict[str, Any]) -> None:
+    """Stop unless the model's routers score with a sigmoid, the only gates the replay computes."""
+    text = config.get("text_config") or config
+    scoring = text.get("scoring_func") or "softmax"
+    if scoring != "sigmoid":
+        raise SystemExit(
+            f"the model's routers use {scoring} scores; the replay here computes gates for "
+            "sigmoid routers only (GLM, DeepSeek V3)"
+        )
+
+
+def check_routers(routers: dict[int, Any], layout: MoeLayout) -> None:
+    """Stop unless the model has a router hook on exactly the config's MoE layers."""
+    if sorted(routers) != layout.moe:
+        found = sorted(routers) or "none"
+        raise SystemExit(f"found routers on layers {found}, but the MoE layers are {layout.moe}")
+
+
 class Routing:
     """Forward hooks on every router: record its choices, or replay given ones."""
 
     def __init__(self, model: Any):
         self.routers: dict[int, Any] = {}
         for name, module in model.named_modules():
-            if type(module).__name__.endswith("TopkRouter"):
+            if "topkrouter" in type(module).__name__.lower():
                 self.routers[int(name.split(".layers.")[1].split(".")[0])] = module
         self.routers = dict(sorted(self.routers.items()))
         self.replay: np.ndarray | None = None  # [tokens, layers, top_k]
@@ -324,6 +372,7 @@ class Trainer:
         import transformers
 
         config = load_config(model_path)
+        check_scoring(config)
         cls = getattr(transformers, config["architectures"][0])
         began = time.monotonic()
         self.model = cls.from_pretrained(
@@ -331,6 +380,7 @@ class Trainer:
         ).eval()
         self.load_seconds = round(time.monotonic() - began, 1)
         self.routing = Routing(self.model)
+        check_routers(self.routing.routers, layout)
         self.base = {i: m.weight.detach().clone() for i, m in self.routing.routers.items()}
         self.layout = layout
         self.device = next(self.model.parameters()).device
@@ -350,11 +400,37 @@ class Trainer:
             self.routing.replay = None
         return lp.cpu().numpy()
 
-    def self_check(self, ids: Sequence[int]) -> float:
-        """Replaying the trainer's own choices must reproduce its own pass."""
+    def self_check(self, ids: Sequence[int]) -> dict[str, float]:
+        """Replay the trainer's own choices, as they are and one row off, on one sequence.
+
+        The first must reproduce its pass and the second must change it: a hook whose return
+        value the model ignores passes the first only. :func:`check_replay` enforces both.
+        """
         own = self.logprobs(ids)
-        again = self.logprobs(ids, self.routing.choices(self.layout.layers))
-        return float(np.abs(again - own).max())
+        chosen = self.routing.choices(self.layout.layers)
+        again = self.logprobs(ids, chosen)
+        moved = self.logprobs(ids, np.concatenate([chosen[1:], chosen[-1:]]))
+        return {
+            "self_check_max_abs_dlogp": float(np.abs(again - own).max()),
+            "self_check_shifted_mean_abs_dlogp": float(np.abs(moved - own).mean()),
+        }
+
+
+def check_replay(result: dict[str, float]) -> None:
+    """Stop before any comparison unless the replay hook passed both self-checks."""
+    same = result["self_check_max_abs_dlogp"]
+    if not same <= SELF_CHECK_TOLERANCE:
+        raise SystemExit(
+            f"replaying the trainer's own choices moved its log-probs by up to {same:.2e} (more "
+            f"than {SELF_CHECK_TOLERANCE:.0e}): the replay does not reproduce the router"
+        )
+    moved = result["self_check_shifted_mean_abs_dlogp"]
+    if not moved >= SHIFTED_MIN_CHANGE:
+        raise SystemExit(
+            f"replaying the trainer's choices one row off moved its log-probs by {moved:.2e} on "
+            f"average (less than {SHIFTED_MIN_CHANGE}): the replay hook does not change the "
+            "forward pass"
+        )
 
 
 def forward_single(trainer: Trainer, samples: list[dict], limit: int = 0) -> dict[str, Any]:
@@ -388,17 +464,19 @@ def forward_two_turn(trainer: Trainer, pairs: list[tuple[dict, dict]]) -> dict[s
     """One pass over each whole conversation, as a trainer computes every turn's log-probs.
 
     Routes: the trainer's own; the second turn's rows for every position; or the first turn's rows
-    over its own positions, then the second turn's.
+    over the positions it shares with the second, then the second turn's. Turn 1's tokens are
+    those that turn 2's prompt repeats, which leaves out a closing stop token that it replaced.
     """
     per = {f"{turn}_{name}": [] for turn in ("turn1", "turn2") for name in ("own", "last", "each")}
     for one, two in pairs:
         ids = two["prompt_ids"] + two["response_ids"]
-        p1, c1, p2 = len(one["prompt_ids"]), len(one["response_ids"]), len(two["prompt_ids"])
+        p1, p2 = len(one["prompt_ids"]), len(two["prompt_ids"])
+        kept, rows = kept_first_turn_tokens(one, two), shared_rows(one, two)
         each = two["routes"].copy()
-        each[: one["routes"].shape[0]] = one["routes"]
+        each[:rows] = one["routes"][:rows]
         for name, replay in (("own", None), ("last", two["routes"]), ("each", each)):
             lp = trainer.logprobs(ids, replay)
-            per[f"turn1_{name}"].append(gaps(lp[p1 - 1 : p1 - 1 + c1], one["logprobs"]))
+            per[f"turn1_{name}"].append(gaps(lp[p1 - 1 : p1 - 1 + kept], one["logprobs"][:kept]))
             per[f"turn2_{name}"].append(gaps(lp[p2 - 1 :], two["logprobs"]))
     out: dict[str, Any] = {"conversations": len(pairs)}
     for key, rows in per.items():
@@ -497,14 +575,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
     print(json.dumps({k: v for k, v in report.items() if k != "sets"}, indent=2), flush=True)
 
-    if args.forward:
+    if args.forward and problems:
+        print(f"no trainer-side passes: {len(problems)} problems in the recording", flush=True)
+    elif args.forward:
         parts = set(args.parts.split(","))
         trainer = Trainer(args.model_path, layout)
         report["load_seconds"] = trainer.load_seconds
-        report["self_check_max_abs_dlogp"] = trainer.self_check(
-            single[0]["prompt_ids"] + single[0]["response_ids"]
-        )
-        print(f"self-check: {report['self_check_max_abs_dlogp']:.2e}", flush=True)
+        checks = trainer.self_check(single[0]["prompt_ids"] + single[0]["response_ids"])
+        print(f"self-check: {json.dumps(checks)}", flush=True)
+        check_replay(checks)
+        report |= checks
         if "single" in parts:
             report["single"] = forward_single(trainer, single, args.limit)
             print(json.dumps({"single": report["single"]}, indent=2), flush=True)

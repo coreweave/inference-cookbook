@@ -2,8 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-PackageName: inference-cookbook
 
+import json
 import math
 import sys
+import types
 from pathlib import Path
 
 import numpy as np
@@ -120,7 +122,7 @@ def test_two_turn_re_rendering_changes_conversations_whose_first_turn_was_cut_of
         suffix = record.follow_up_suffix(tok, messages, "again")
         two = sample(
             f"two_turn-{i:04d}-2",
-            record.second_turn_prompt(prompt, response, suffix),
+            record.second_turn_prompt(prompt, response, suffix, (USER, STOP)),
             [*chars("z"), STOP],
             "z",
             row=i,
@@ -140,7 +142,7 @@ def test_recordings_load_validate_and_pair_their_turns(tmp_path: Path) -> None:
         sample("two_turn-0003-2", [1, 2, 3, 4, 5], [6], "y", row=3, turn=2),
         sample("two_turn-0004-1", [1, 2], [3], "z", row=4, turn=1),  # no second turn
     ]
-    record.write_set(tmp_path / "v0", "two_turn", [dict(s) for s in samples])
+    record.write_set(tmp_path / "v0", "two_turn", record.SetResult([dict(s) for s in samples]))
     loaded = analyze.load_set(tmp_path, "v0", "two_turn")
     assert analyze.available(tmp_path) == {"v0": ["two_turn"]}
     assert analyze.validate(loaded, LAYOUT) == []
@@ -183,6 +185,169 @@ def test_log_prob_gaps_and_their_summary() -> None:
     assert "outside_own_over_replay" not in summary  # no finite ratio over zero tokens
     assert summary["outside_tokens"] == {"own": 2, "replay": 0, "of": 6}
     assert summary["abs_own"]["value"] == pytest.approx(math.log(2.5) / 3)
+
+
+def test_gaps_refuse_log_probs_of_different_lengths() -> None:
+    with pytest.raises(ValueError, match="2 trainer log-probs for 1 engine log-probs"):
+        analyze.gaps(np.zeros(2), [0.0])
+
+
+# --- the forward passes, with a trainer that needs no GPU ---
+
+
+class FakeRouting:
+    """Own choices: experts 0 and 1 in every MoE layer."""
+
+    def __init__(self):
+        self.rows = 0
+
+    def choices(self, layers: int) -> np.ndarray:
+        out = np.zeros((self.rows, layers, LAYOUT.top_k), np.int64)
+        out[:, LAYOUT.moe] = [0, 1]
+        return out
+
+
+class FakeTrainer:
+    """Log-probs that name their token, -id / 100, and 0.5 lower under any replay."""
+
+    def __init__(self):
+        self.layout, self.routing, self.calls = LAYOUT, FakeRouting(), []
+
+    def logprobs(self, ids, replay=None):
+        self.calls.append((list(ids), replay))
+        self.routing.rows = len(ids) - 1
+        scores = -np.asarray(ids[1:], dtype=np.float64) / 100
+        return scores if replay is None else scores - 0.5
+
+
+def engine_logprobs(ids: list[int]) -> list[float]:
+    return [-t / 100 for t in ids]
+
+
+def test_single_turn_passes_score_the_response_tokens_with_and_without_the_routes() -> None:
+    rows = routes(4, 6)
+    rows[:2, LAYOUT.moe] = [0, 1]  # the first two rows route as the trainer does
+    s = sample("single-0000", [1, 2, 3], [4, 5], "x", routes=rows)
+    s["logprobs"] = engine_logprobs([4, 5])
+    trainer = FakeTrainer()
+    result = analyze.forward_single(trainer, [s])
+    assert result["abs_own"]["value"] == pytest.approx(0.0)  # positions 3 and 4, exactly
+    assert result["abs_replay"]["value"] == pytest.approx(0.5)
+    assert trainer.calls[1][1] is s["routes"]
+    assert result["routers_disagree"]["value"] == pytest.approx(0.5)
+    assert result["tokens"] == 2
+
+
+def conversation(turn1_end: int) -> tuple[dict, dict]:
+    """Turn 1 is [7, 8] then [9, 10, turn1_end]; turn 2's prompt continues with [1, 20, 21]."""
+    one = sample("two_turn-0000-1", [7, 8], [9, 10, turn1_end], "x", routes=routes(4, 7))
+    one["logprobs"] = engine_logprobs([9, 10, turn1_end])
+    two = sample("two_turn-0000-2", [7, 8, 9, 10, USER, 20, 21], [22, 23], "y", routes=routes(8, 8))
+    two["logprobs"] = engine_logprobs([22, 23])
+    return one, two
+
+
+def test_turn_two_repeats_turn_one_and_may_replace_its_closing_stop_token() -> None:
+    kept, replaced = conversation(USER), conversation(STOP)
+    assert analyze.kept_first_turn_tokens(*kept) == 3  # turn 1 stopped on the follow-up's token
+    assert analyze.kept_first_turn_tokens(*replaced) == 2  # its stop token gave way to [1, ...]
+    assert analyze.shared_rows(*kept) == analyze.shared_rows(*replaced) == 4
+    one, two = conversation(USER)
+    two["prompt_ids"] = [7, 8, 99, 10, USER, 20, 21]
+    with pytest.raises(ValueError, match="does not start with the tokens of two_turn-0000-1"):
+        analyze.kept_first_turn_tokens(one, two)
+
+
+@pytest.mark.parametrize("turn1_end", [USER, STOP])
+def test_two_turn_passes_score_each_turns_tokens_at_their_positions(turn1_end) -> None:
+    one, two = conversation(turn1_end)
+    trainer = FakeTrainer()
+    result = analyze.forward_two_turn(trainer, [(one, two)])
+    # the slices land on the right tokens: a token off would show as a gap
+    assert result["abs_turn1_own"]["value"] == pytest.approx(0.0)
+    assert result["abs_turn2_own"]["value"] == pytest.approx(0.0)
+    assert result["abs_turn1_last"]["value"] == pytest.approx(0.5)
+    own, last, each = (replay for _, replay in trainer.calls)
+    assert own is None and last is two["routes"]
+    assert np.array_equal(each[:4], one["routes"]) and np.array_equal(each[4:], two["routes"][4:])
+
+
+def test_the_replay_supports_sigmoid_routers_on_the_configs_moe_layers_only() -> None:
+    analyze.check_scoring({"text_config": {"scoring_func": "sigmoid"}})
+    with pytest.raises(SystemExit, match="softmax scores"):
+        analyze.check_scoring({"num_experts": 128})  # Qwen3-MoE
+    analyze.check_routers({1: None, 2: None}, LAYOUT)
+    with pytest.raises(SystemExit, match="found routers on layers none, but the MoE layers"):
+        analyze.check_routers({}, LAYOUT)
+    with pytest.raises(SystemExit, match=r"found routers on layers \[1\]"):
+        analyze.check_routers({1: None}, LAYOUT)
+
+
+def test_a_replay_that_misses_its_tolerance_or_changes_nothing_stops_the_analysis() -> None:
+    analyze.check_replay(
+        {"self_check_max_abs_dlogp": 0.0, "self_check_shifted_mean_abs_dlogp": 1.0}
+    )
+    with pytest.raises(SystemExit, match="moved its log-probs by up to 2.50e-01"):
+        analyze.check_replay(
+            {"self_check_max_abs_dlogp": 0.25, "self_check_shifted_mean_abs_dlogp": 1.0}
+        )
+    with pytest.raises(SystemExit, match="the replay hook does not change the forward pass"):
+        analyze.check_replay(
+            {"self_check_max_abs_dlogp": 0.0, "self_check_shifted_mean_abs_dlogp": 0.0}
+        )
+
+
+@pytest.fixture
+def recording(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A one-sample recording, a model directory with a config, and a stand-in tokenizer."""
+    one, two = conversation(USER)
+    two_turn = [dict(one, row=0, turn=1, messages=[], follow_up="again")]
+    two_turn.append(dict(two, row=0, turn=2, messages=[], follow_up="again"))
+    record.write_set(tmp_path / "rec" / "v0", "two_turn", record.SetResult(two_turn))
+    single = sample("single-0000", [1, 2, 3], [4, 5], "x")
+    record.write_set(tmp_path / "rec" / "v0", "single", record.SetResult([single]))
+    model = tmp_path / "model"
+    model.mkdir()
+    config = {"num_hidden_layers": 3, "num_experts_per_tok": 2, "n_routed_experts": 288}
+    config |= {"first_k_dense_replace": 1, "scoring_func": "sigmoid"}
+    (model / "config.json").write_text(json.dumps(config))
+    transformers = types.ModuleType("transformers")
+    transformers.AutoTokenizer = types.SimpleNamespace(
+        from_pretrained=lambda *args, **kwargs: Tokenizer()
+    )
+    monkeypatch.setitem(sys.modules, "transformers", transformers)
+    return tmp_path
+
+
+def run_main(root: Path, *extra: str) -> int:
+    args = ["--recording", str(root / "rec"), "--model-path", str(root / "model")]
+    return analyze.main([*args, "--out", str(root / "report.json"), "--forward", *extra])
+
+
+def test_no_forward_pass_runs_on_a_recording_with_problems(recording, monkeypatch) -> None:
+    single = recording / "rec" / "v0" / "single.jsonl"
+    broken = json.loads(single.read_text())
+    broken["logprobs"] = broken["logprobs"][:1]  # one log-prob for two response tokens
+    single.write_text(json.dumps(broken) + "\n")
+    monkeypatch.setattr(analyze, "Trainer", lambda *a: pytest.fail("loaded the model"))
+    assert run_main(recording) == 1
+    assert "1 log-probs" in json.loads((recording / "report.json").read_text())["problems"][0]
+
+
+def test_a_failed_self_check_stops_before_any_report(recording, monkeypatch) -> None:
+    class Trainer:
+        load_seconds = 0.0
+
+        def __init__(self, model_path, layout):
+            pass
+
+        def self_check(self, ids):  # the identity replay moved the log-probs
+            return {"self_check_max_abs_dlogp": 0.25, "self_check_shifted_mean_abs_dlogp": 1.0}
+
+    monkeypatch.setattr(analyze, "Trainer", Trainer)
+    with pytest.raises(SystemExit, match="does not reproduce the router"):
+        run_main(recording)
+    assert not (recording / "report.json").exists()
 
 
 def test_bootstrap_intervals_contain_the_point_and_ratios_resample_pairs() -> None:
