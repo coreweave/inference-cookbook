@@ -83,7 +83,7 @@ def rollout_config_from(
         if cfg.get(key) is not None:
             env[f"{ENV_PREFIX}{suffix}"] = str(cfg[key])
             labels[f"{ENV_PREFIX}{suffix}"] = f"coreweave_cfg.{key}"
-    return RolloutConfig.from_env(env, labels=labels)
+    return RolloutConfig.from_env(env, labels=labels).without_routed_experts("NeMo-RL")
 
 
 class CoreWeaveGeneration(GenerationInterface):

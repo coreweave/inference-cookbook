@@ -5,6 +5,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import dataclasses
 import json
 import logging
 from dataclasses import dataclass, field
@@ -12,6 +14,7 @@ from enum import Enum
 from pathlib import Path
 
 import httpx
+import numpy as np
 import pytest
 
 from cwtrain.errors import CWTrainError
@@ -19,7 +22,9 @@ from cwtrain.integrations.rollout import (
     CompletionSampler,
     RolloutConfig,
     RolloutError,
+    decode_routed_experts,
     sample_groups,
+    sample_prompt,
 )
 
 ROLLOUT_ENV = {"CWTRAIN_ROLLOUT_BASE_URL": "u", "CWTRAIN_ROLLOUT_MODEL": "m"}
@@ -665,3 +670,174 @@ def test_shared_sampler_is_reused_on_one_loop_and_not_across_loops() -> None:
     assert a is b is c
     d, _ = asyncio.run(twice())  # another loop gets its own client
     assert d is not a
+
+
+ROUTED = RolloutConfig(base_url="https://gw/v1", model="m", routed_experts=True)
+
+
+def encode_routes(routes: np.ndarray, start: int = 0) -> dict:
+    """Dynamo's ``nvext.routed_experts`` for ``routes``."""
+    return {
+        "data": base64.b64encode(routes.tobytes()).decode("ascii"),
+        "shape": list(routes.shape),
+        "start": start,
+        "dtype": str(routes.dtype),
+    }
+
+
+def routes_for(rows: int, seed: int = 0, dtype: str = "uint8") -> np.ndarray:
+    return np.random.default_rng(seed).integers(0, 200, size=(rows, 4, 2)).astype(dtype)
+
+
+def routed_response(token_ids: list[int], routes: dict | None) -> httpx.Response:
+    tokens = [f"token_id:{t}" for t in token_ids]
+    body: dict = {"choices": [_choice("".join(map(chr, token_ids)), tokens, [-0.5] * len(tokens))]}
+    if routes is not None:
+        body["nvext"] = {"routed_experts": routes}
+    return httpx.Response(200, json=body)
+
+
+def test_routed_experts_take_one_request_per_choice_and_come_back_decoded() -> None:
+    prompt = [1, 2, 3]
+    first, second = routes_for(3 + 2 - 1, seed=1), routes_for(3 + 3 - 1, seed=2)
+    transport, seen = make_server(
+        [
+            routed_response([97, 98], encode_routes(first)),
+            routed_response([99, 100, 0], encode_routes(second)),
+        ]
+    )
+    sampler = CompletionSampler(ROUTED, transport=transport)
+    out = asyncio.run(sampler.sample(prompt, 2, max_tokens=4, temperature=1.0))
+    # a response carries one sequence's routes, so the group of two is two requests of one choice
+    assert [req["n"] for req in seen] == [1, 1]
+    assert all(req["nvext"] == {"extra_fields": ["routed_experts"]} for req in seen)
+    assert all(req["prompt"] == prompt and req["return_tokens_as_token_ids"] for req in seen)
+    assert [c.index for c in out] == [0, 1]
+    # the two requests may be answered in either order; each completion keeps its own routes
+    expected = {(97, 98): first, (99, 100, 0): second}
+    assert sorted(c.token_ids for c in out) == sorted(expected)
+    for completion in out:
+        assert completion.routed_experts.dtype == np.uint8
+        assert np.array_equal(completion.routed_experts, expected[completion.token_ids])
+
+
+def test_routes_are_not_requested_unless_asked_for() -> None:
+    transport, seen = make_server([completions_response(["ab", "cd"])])
+    sampler = CompletionSampler(
+        RolloutConfig(base_url="https://gw/v1", model="m"), transport=transport
+    )
+    out = asyncio.run(sampler.sample([1], 2, max_tokens=4, temperature=1.0))
+    assert seen[0]["n"] == 2 and "nvext" not in seen[0]
+    assert all(c.routed_experts is None for c in out)
+
+
+def test_uint16_routes_of_models_with_more_than_256_experts_decode() -> None:
+    routes = np.array([[[0, 287], [300, 1]]], dtype=np.uint16)
+    decoded = decode_routed_experts(encode_routes(routes))
+    assert decoded.dtype == np.uint16 and np.array_equal(decoded, routes)
+    assert not decoded.flags.writeable
+
+
+@pytest.mark.parametrize(
+    ("routes", "message"),
+    [
+        (None, "no routed experts"),
+        (encode_routes(routes_for(3)), "3 rows for 3 prompt and 2 response tokens, not 4"),
+        (encode_routes(routes_for(4), start=3), "start at token 3"),
+        ({**encode_routes(routes_for(4)), "data": "not base64!"}, "not base64"),
+        ({**encode_routes(routes_for(4)), "shape": [4, 4]}, r"\[rows, layers, top_k\]"),
+        ({**encode_routes(routes_for(4)), "shape": [4, 4, 3]}, "not the 48"),
+        ({**encode_routes(routes_for(4)), "dtype": "float32"}, "integer type"),
+        ({**encode_routes(routes_for(4)), "dtype": ""}, "integer type"),
+    ],
+)
+def test_a_response_whose_routes_are_missing_or_do_not_line_up_is_an_error(routes, message) -> None:
+    transport, _ = make_server([routed_response([97, 98], routes)])
+    sampler = CompletionSampler(ROUTED, transport=transport)
+    with pytest.raises(RolloutError, match=message):
+        asyncio.run(sampler.sample([1, 2, 3], 1, max_tokens=4, temperature=1.0))
+
+
+def test_routes_need_the_sampled_token_ids() -> None:
+    transport, _ = make_server([completions_response(["ab"], logprobs=[[-0.1, -0.2]])])
+    sampler = CompletionSampler(ROUTED, transport=transport)
+    with pytest.raises(RolloutError, match="sampled token ids"):
+        asyncio.run(sampler.sample([1, 2, 3], 1, max_tokens=4, temperature=1.0))
+
+
+@pytest.mark.parametrize("off", ["logprobs", "token_ids", "token_id_prompts"])
+def test_routed_experts_need_exact_tokens(off) -> None:
+    with pytest.raises(CWTrainError, match="needs exact tokens"):
+        RolloutConfig(base_url="u", model="m", routed_experts=True, **{off: False})
+
+
+def test_routed_experts_flag_comes_from_the_environment() -> None:
+    assert RolloutConfig.from_env(ROLLOUT_ENV).routed_experts is False
+    env = {**ROLLOUT_ENV, "CWTRAIN_ROLLOUT_ROUTED_EXPERTS": "1"}
+    assert RolloutConfig.from_env(env).routed_experts is True
+
+
+def test_a_rejected_token_id_prompt_is_not_retried_as_text_when_routes_are_on() -> None:
+    transport, seen = make_server([httpx.Response(400, text="token ids not accepted")])
+    sampler = CompletionSampler(ROUTED, transport=transport)
+    sampling = sample_prompt(
+        sampler, [1, 2], 1, text=lambda: "p", token_id_prompts=True, max_tokens=4, temperature=1.0
+    )
+    with pytest.raises(RolloutError, match="token ids not accepted"):
+        asyncio.run(sampling)
+    assert len(seen) == 1
+
+
+def test_a_failed_choice_cancels_the_rest_of_its_group() -> None:
+    started: list[int] = []
+    cancelled: list[int] = []
+    everyone = asyncio.Event()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        me = len(started)
+        started.append(me)
+        if len(started) == 3:
+            everyone.set()
+        if me == 0:
+            await everyone.wait()  # fail once all three requests are in flight
+            return httpx.Response(400, text="bad request")
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            cancelled.append(me)
+            raise
+        return routed_response([97], encode_routes(routes_for(3)))
+
+    sampler = CompletionSampler(ROUTED, transport=httpx.MockTransport(handler))
+
+    async def run() -> tuple[float, list[int]]:
+        loop = asyncio.get_running_loop()
+        began = loop.time()
+        with pytest.raises(RolloutError, match="bad request"):
+            await sampler.sample([1, 2, 3], 3, max_tokens=4, temperature=1.0)
+        # Checked before asyncio.run's shutdown, which would cancel leftover tasks anyway: in a
+        # long-lived loop such as a trainer's shared sampler, nothing else would.
+        return loop.time() - began, sorted(cancelled)
+
+    seconds, cancelled_choices = asyncio.run(run())
+    assert seconds < 5 and len(started) == 3 and cancelled_choices == [1, 2]
+
+
+def test_completions_report_the_prompt_tokens_served_from_the_cache() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        response = routed_response([97], encode_routes(routes_for(3)))
+        body = response.json() | {"usage": {"prompt_tokens_details": {"cached_tokens": 2}}}
+        return httpx.Response(200, json=body)
+
+    for config in (ROUTED, dataclasses.replace(ROUTED, routed_experts=False)):
+        sampler = CompletionSampler(config, transport=httpx.MockTransport(handler))
+        [done] = asyncio.run(sampler.sample([1, 2, 3], 1, max_tokens=4, temperature=1.0))
+        assert done.cached_tokens == 2
+
+
+def test_a_trainer_without_routing_replay_turns_routes_off(caplog) -> None:
+    with caplog.at_level(logging.WARNING, logger="cwtrain.integrations.rollout"):
+        assert ROUTED.without_routed_experts("NeMo-RL").routed_experts is False
+    assert "NeMo-RL does not replay routed experts" in caplog.text
+    plain = dataclasses.replace(ROUTED, routed_experts=False)
+    assert plain.without_routed_experts("NeMo-RL") is plain

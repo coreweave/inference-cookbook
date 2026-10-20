@@ -1224,6 +1224,9 @@ def test_rollout_concurrency_from_the_config_or_the_environment() -> None:
     # an error names the setting the value came from
     with pytest.raises(CWTrainError, match="coreweave_cfg.concurrency must be at least 1"):
         rollout_config_from({"concurrency": 0}, env)
+    # NeMo-RL has no routing replay, so it does not pay for routes it would not read
+    routed = {**env, "CWTRAIN_ROLLOUT_ROUTED_EXPERTS": "1"}
+    assert rollout_config_from({}, routed).routed_experts is False
 
 
 @pytest.mark.parametrize(

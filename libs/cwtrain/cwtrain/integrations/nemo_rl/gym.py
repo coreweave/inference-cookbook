@@ -184,7 +184,7 @@ def actor_config(initial: dict[str, Any], environ=None) -> dict[str, Any]:
         CWTRAIN_ROLLOUT_BASE_URL=urls[0] if isinstance(urls, list) else urls,
         CWTRAIN_ROLLOUT_MODEL=initial["policy_model_name"],
     )
-    rollout = RolloutConfig.from_env(env)
+    rollout = RolloutConfig.from_env(env).without_routed_experts("NeMo-RL")
     if key_file and not rollout.api_key:
         raise ValueError("Gym actor cannot read a nonempty inference key from api_key_file")
     tokenizer = initial.pop("coreweave_tokenizer", None)
