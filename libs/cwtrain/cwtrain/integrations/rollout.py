@@ -83,6 +83,10 @@ the model, which is every token but the last one sampled. Rows of dense layers a
 Routes line up only with exact tokens. They need token-id prompts and the sampled token ids, so a
 rejected token-id prompt is not retried as text. A response without routes, or with a row count
 that does not match its tokens, is an error: a trainer that replays routes cannot train on it.
+
+slime and miles replay routes with ``--use-rollout-routing-replay``. With that flag,
+:meth:`RolloutConfig.for_trainer` turns routes on, and :func:`fill_group` stores them as
+``rollout_routed_experts``: int32, in the shape that both expect.
 """
 
 from __future__ import annotations
@@ -214,6 +218,18 @@ class RolloutConfig:
             token_id_prompts=flag(env, f"{ENV_PREFIX}TOKEN_ID_PROMPTS", True, labels=names),
             routed_experts=flag(env, f"{ENV_PREFIX}ROUTED_EXPERTS", False, labels=names),
         )
+
+    @classmethod
+    def for_trainer(cls, args: Any, environ: Mapping[str, str] | None = None) -> RolloutConfig:
+        """:meth:`from_env`, with routed experts on when the trainer replays them.
+
+        slime and miles replay the rollout's routes with ``--use-rollout-routing-replay``
+        (``args.use_rollout_routing_replay``), and then fail on a sample without them.
+        """
+        config = cls.from_env(environ)
+        if getattr(args, "use_rollout_routing_replay", False) and not config.routed_experts:
+            config = dataclasses.replace(config, routed_experts=True)
+        return config
 
 
 @dataclass(frozen=True)
@@ -693,7 +709,13 @@ def fill_group(
     response tokens are the exact sampled ids when the endpoint reports them. Otherwise the text
     is re-tokenized, and the token that ended the response (end-of-sequence or a stop token id) is
     appended. The stopping action then stays in the trained sequence, with its log-prob. Also sets
-    ``rollout_log_probs`` (see :func:`align_logprobs`).
+    ``rollout_log_probs`` (see :func:`align_logprobs`), and ``rollout_routed_experts`` when the
+    completions carry routes: int32, ``[len(tokens) - 1, layers, top_k]``, as slime and miles
+    replay them.
+
+    Raises:
+        RolloutError: The completion count differs from the group's, or a completion's routes do
+            not have a row for every token but the last.
     """
     if len(group) != len(completions):
         raise RolloutError(f"{len(completions)} completions for a group of {len(group)}")
@@ -716,6 +738,13 @@ def fill_group(
             status.TRUNCATED if completion.finish_reason == "length" else status.COMPLETED
         )
         sample.rollout_log_probs = align_logprobs(completion, response_ids, tokenizer)
+        if completion.routed_experts is not None:
+            if completion.routed_experts.shape[0] != len(sample.tokens) - 1:
+                raise RolloutError(
+                    f"routed experts have {completion.routed_experts.shape[0]} rows for "
+                    f"{len(sample.tokens)} tokens"
+                )
+            sample.rollout_routed_experts = completion.routed_experts.astype(np.int32)
 
 
 async def sample_groups(

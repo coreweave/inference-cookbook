@@ -50,7 +50,7 @@ async def _generate(args: Namespace, rollout_id: int, data_source: Any) -> Rollo
     tokenizer = _tokenizer(args.hf_checkpoint)
     groups = data_source.get_samples(args.rollout_batch_size)
     metrics = await sample_groups(
-        shared_sampler(RolloutConfig.from_env()),
+        shared_sampler(RolloutConfig.for_trainer(args)),
         groups,
         tokenizer=tokenizer,
         max_tokens=int(args.rollout_max_response_len),

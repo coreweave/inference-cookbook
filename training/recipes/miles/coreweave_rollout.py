@@ -40,7 +40,7 @@ class CoreWeaveRolloutFn(BaseRolloutFn):
         super().__init__(input)
         self.args = input.args
         self.data_source = input.data_source
-        self.config = RolloutConfig.from_env()
+        self.config = RolloutConfig.for_trainer(self.args)
         self.tokenizer = load_tokenizer(self.args.hf_checkpoint, trust_remote_code=False)
 
     async def __call__(self, input: RolloutFnInput):

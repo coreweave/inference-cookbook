@@ -19,6 +19,7 @@ import pytest
 
 from cwtrain.errors import CWTrainError
 from cwtrain.integrations.rollout import (
+    Completion,
     CompletionSampler,
     RolloutConfig,
     RolloutError,
@@ -44,6 +45,7 @@ class Sample:  # the fields slime's and miles' Sample share
     response_length: int = 0
     status: Status = Status.PENDING
     rollout_log_probs: list[float] | None = None
+    rollout_routed_experts: np.ndarray | None = None
     Status = Status
 
 
@@ -841,3 +843,69 @@ def test_a_trainer_without_routing_replay_turns_routes_off(caplog) -> None:
     assert "NeMo-RL does not replay routed experts" in caplog.text
     plain = dataclasses.replace(ROUTED, routed_experts=False)
     assert plain.without_routed_experts("NeMo-RL") is plain
+
+
+def test_routes_reach_the_samples_as_int32_rows_for_every_token_but_the_last() -> None:
+    prompt_ids = [ord("p"), ord("q")]
+    first, second = routes_for(2 + 2 - 1, seed=3), routes_for(2 + 3 - 1, seed=4)
+    transport, _ = make_server(
+        [
+            routed_response([97, 98], encode_routes(first)),
+            routed_response([99, 100, 0], encode_routes(second)),
+        ]
+    )
+    sampler = CompletionSampler(ROUTED, transport=transport)
+    group = [Sample(prompt="pq"), Sample(prompt="pq")]
+    asyncio.run(
+        sample_groups(sampler, [group], tokenizer=EosTokenizer(), max_tokens=4, temperature=1.0)
+    )
+    expected = {(97, 98): first, (99, 100, 0): second}
+    for sample in group:
+        routes = sample.rollout_routed_experts
+        assert routes.dtype == np.int32 and routes.shape[0] == len(sample.tokens) - 1
+        assert np.array_equal(routes, expected[tuple(sample.tokens[len(prompt_ids) :])])
+
+
+def test_samples_get_no_routes_unless_they_were_requested() -> None:
+    transport, _ = make_server([completions_response(["ab"])])
+    sampler = CompletionSampler(
+        RolloutConfig(base_url="https://gw/v1", model="m"), transport=transport
+    )
+    group = [Sample(prompt="p")]
+    asyncio.run(
+        sample_groups(sampler, [group], tokenizer=Tokenizer(), max_tokens=4, temperature=1.0)
+    )
+    assert group[0].rollout_routed_experts is None
+
+
+def test_fill_group_rejects_routes_that_miss_a_token() -> None:
+    from cwtrain.integrations.rollout import fill_group
+
+    completion = Completion(
+        index=0,
+        text="ab",
+        finish_reason="stop",
+        token_logprobs=(-0.1, -0.2),
+        token_strings=("token_id:97", "token_id:98"),
+        token_ids=(97, 98),
+        routed_experts=routes_for(2),  # prompt 2 + response 2 needs 3 rows
+    )
+    with pytest.raises(RolloutError, match="2 rows for 4 tokens"):
+        fill_group([Sample(prompt="pq")], [completion], prompt_ids=[1, 2], tokenizer=Tokenizer())
+
+
+@dataclass
+class TrainerArgs:  # the slime and miles flag that replays the rollout's routes
+    use_rollout_routing_replay: bool = False
+
+
+def test_the_trainers_replay_flag_turns_routes_on() -> None:
+    assert RolloutConfig.for_trainer(TrainerArgs(True), ROLLOUT_ENV).routed_experts is True
+    assert RolloutConfig.for_trainer(TrainerArgs(False), ROLLOUT_ENV).routed_experts is False
+    # an args object without the flag (an older trainer) leaves the setting to the environment
+    env = {**ROLLOUT_ENV, "CWTRAIN_ROLLOUT_ROUTED_EXPERTS": "1"}
+    assert RolloutConfig.for_trainer(object(), env).routed_experts is True
+    with pytest.raises(CWTrainError, match="needs exact tokens"):
+        RolloutConfig.for_trainer(
+            TrainerArgs(True), {**ROLLOUT_ENV, "CWTRAIN_ROLLOUT_TOKEN_IDS": "0"}
+        )
