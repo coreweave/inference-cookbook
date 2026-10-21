@@ -38,6 +38,7 @@ exec python3 $WORK/py/run_hotload.py \
   --n-samples-per-prompt "${N_SAMPLES_PER_PROMPT:-4}" --global-batch-size "${GLOBAL_BATCH_SIZE:-32}" \
   --rollout-max-response-len "${ROLLOUT_MAX_RESPONSE_LEN:-2048}" --max-tokens-per-gpu "${MAX_TOKENS_PER_GPU:-9216}" \
   --rm-type "${RM_TYPE:-math}" \
+  --tis "${USE_TIS:-1}" \
   --train-script "${TRAIN_SCRIPT:-train.py}" --async-correction "${ASYNC_CORRECTION:-keep_old_actor}" \
   --rollout-module-dir "$WORK/py" \
   --base-s3-uri "${BASE_S3_URI:-}" \

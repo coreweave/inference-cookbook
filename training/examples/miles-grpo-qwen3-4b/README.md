@@ -226,8 +226,9 @@ weights that the hook has just hot-loaded. To generate the next rollout while a 
 example again with miles' `train_async.py`:
 
 1. In `run.env`, set `TRAIN_SCRIPT=train_async.py`. `ASYNC_CORRECTION` picks how the trainer
-   corrects for samples that are one policy step stale: `keep_old_actor` (the default), `tis` or
-   `none`.
+   treats samples that are one policy step stale: `keep_old_actor` (the default) recomputes the
+   PPO ratio's denominator with the weights that sampled them, and `none` leaves the stale step to
+   TIS.
 2. Load `run.env` again, delete the finished Job, then render and apply step 9, as in
    [Watching and re-running](#watching-and-re-running). The new run publishes under new
    identities, so it starts with a full snapshot.
@@ -235,7 +236,7 @@ example again with miles' `train_async.py`:
 With `train_async.py`, the launcher keeps the platform's prompt-cache policy, `preserve`, unless
 `HOTLOAD_PROMPT_CACHE_POLICY` sets another. The recipe's section
 [Synchronous or one-step-ahead](../../recipes/miles/README.md#synchronous-or-one-step-ahead-trainpy-vs-train_asyncpy)
-explains both loops and the three corrections.
+explains both loops and both corrections.
 
 ### Cleaning up
 

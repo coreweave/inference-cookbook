@@ -55,6 +55,14 @@ that the hook just hot-loaded. So, unless you set it, the launcher sets
 computed under the previous weights, instead of reusing cached prompt prefixes after the swap.
 `train_async.py` generates one step ahead and keeps the platform default, `preserve`.
 
+Either way, each rollout's requests carry a cache salt of the run, the rollout and a token drawn
+once per process (`nvext.cache_salt`). A run resumed from a checkpoint repeats rollout numbers
+under the same run ID, and the token keeps it from reusing the earlier process's salts. So a
+prompt cached under earlier weights never serves a later rollout, even with `preserve`, as long
+as the hook waits for every replica (`HOTLOAD_WAIT=1`, the default). With
+`HOTLOAD_WAIT=0`, the rollout function logs a warning: a replica that has not switched yet would
+cache old KV under the new salt.
+
 Snapshot identities are `<RUN_ID>-vNNNNNN`. The platform keys weight versions by identity, so
 never reuse a run ID for different weights.
 
@@ -95,13 +103,40 @@ over `cwtrain.integrations.rollout`:
 - Responses come back as the exact sampled token ids. Only when the endpoint does not report them
   does it re-tokenize the text.
 - Rewards come from miles' own `--rm-type`.
+- With routed experts, which takes one request per choice, each request gets its own random seed.
+  Replicas that start together then can't sample a group's choices alike.
+  `CWTRAIN_ROLLOUT_SEEDS=0` turns this off. A request with `n` choices runs them all on one
+  engine and goes unseeded.
 - When the endpoint's sampled-token log-probs align with the response tokens, including the token
-  that ended the response, it attaches them as `rollout_log_probs`. Otherwise it leaves them unset.
-  The trainer recomputes log-probs itself in both cases.
+  that ended the response, it attaches them as `rollout_log_probs`. With `--use-tis`, a group where
+  they do not align is sampled again, up to twice, before the rollout fails. Without it, they stay
+  unset, and the trainer recomputes log-probs either way.
 
 Configure it with `CWTRAIN_ROLLOUT_BASE_URL`, `CWTRAIN_ROLLOUT_MODEL` and, optionally,
 `CWTRAIN_ROLLOUT_API_KEY_FILE`. The hook blocks until every replica serves the new version, so the
 next rollout is on-policy without an engine handshake.
+
+## Truncated importance sampling
+
+The deployment and the trainer compute slightly different log-probs for the same tokens, so even
+fresh rollouts are a little off-policy. The recipe passes `--use-tis` in both loops: miles weights
+each token's loss by the trainer's probability over the deployment's, capped at 2 (`--tis-clip`).
+On a Mixture-of-Experts model, combine it with routing replay (next section), which removes most of
+the gap first. The [routing replay case study](../../case-studies/rollout-routing-replay/README.md)
+measures the gap with and without replay.
+
+- `USE_TIS=0` in `run.env` (the launcher's `--tis 0`) turns it off.
+  A `run.env` written before this setting needs a `USE_TIS` line, because `render.sh` refuses a
+  manifest that uses a variable the file doesn't set. `USE_TIS=1`, or an empty `USE_TIS=`,
+  keeps TIS on.
+- TIS reads `rollout_log_probs` from every sample. A group whose log-probs do not line up with
+  its tokens is sampled again, up to twice, before the rollout fails. With the sampled token ids
+  from the deployment, they always line up.
+- Sample at temperature 1, the recipe's `--rollout-temperature`. The deployment reports log-probs
+  before temperature and miles scores after it, so the rollout function refuses TIS at any other
+  temperature.
+- miles logs the weights as `tis`, the clipped share as `tis_clipfrac`, and the mean gap between
+  the two log-probs as `train_rollout_logprob_abs_diff`.
 
 ## Routing replay for MoE models
 
@@ -170,14 +205,15 @@ any download and names the pinned image. A newer image works if it accepts the f
 3. It calls the same `update_weights` path, so the hook hot-loads as in the synchronous loop.
 
 The data is different: the policy that sampled each rollout is one update behind the policy being
-trained. miles requires an explicit behaviour-policy correction, which `--async-correction`
-selects:
+trained. `--async-correction` picks the denominator of the PPO ratio:
 
 | Value | Flag | Notes |
 | --- | --- | --- |
-| `keep_old_actor` (default) | `--keep-old-actor` | Recomputes the ratio denominator with the weights that generated the rollout. Costs one extra copy of the actor weights on the trainer. Needs nothing from the endpoint. |
-| `tis` | `--use-tis` | Truncated importance sampling against the endpoint's sampled-token log-probs. Every sample of every batch must carry aligned `rollout_log_probs`; batches where the response tokens could not be matched to the endpoint's at every position lose them. |
-| `none` | | Plain GRPO on one-step-stale samples. |
+| `keep_old_actor` (default) | `--keep-old-actor` | Recomputes it with the weights that generated the rollout. Costs one extra copy of the actor weights on the trainer. TIS then corrects only for the gap between the deployment's and the trainer's numerics. |
+| `none` | | Recomputes it with the current weights. TIS then corrects for the stale step too. With `USE_TIS=0`, this is plain GRPO on one-step-stale samples. |
+
+`ASYNC_CORRECTION=tis` from earlier versions of this recipe is now `USE_TIS=1` (the default) with
+`ASYNC_CORRECTION=none`. The launcher refuses `tis` with that hint.
 
 On a hot-load deployment, the gain is that generation overlaps the training step. The hot-load
 itself still runs between steps. slime's upstream tree does not ship a `train_async.py`. Its

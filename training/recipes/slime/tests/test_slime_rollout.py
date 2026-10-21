@@ -13,6 +13,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from cwtrain.errors import CWTrainError
 from cwtrain.integrations.rollout import RolloutError
 
 RECIPE = Path(__file__).resolve().parents[1]
@@ -66,6 +67,7 @@ def rollout(monkeypatch):
 
     async def sample_groups(sampler, groups, **kwargs):
         seen["configs"].append(sampler)
+        seen.setdefault("salts", []).append(kwargs.get("cache_salt"))
         for group in groups:
             for sample in group:
                 if sampler.routed_experts:
@@ -77,16 +79,18 @@ def rollout(monkeypatch):
     return module, seen
 
 
-def args(replay: bool) -> Namespace:
-    return Namespace(
-        hf_checkpoint="ckpt",
-        rollout_batch_size=1,
-        rollout_max_response_len=8,
-        rollout_temperature=1.0,
-        num_layers=4,
-        moe_router_topk=2,
-        use_rollout_routing_replay=replay,
-    )
+def args(replay: bool, **flags) -> Namespace:
+    defaults = {
+        "hf_checkpoint": "ckpt",
+        "rollout_batch_size": 1,
+        "rollout_max_response_len": 8,
+        "rollout_temperature": 1.0,
+        "num_layers": 4,
+        "moe_router_topk": 2,
+        "use_rollout_routing_replay": replay,
+        "use_tis": False,
+    }
+    return Namespace(**{**defaults, **flags})
 
 
 class Data:
@@ -109,3 +113,22 @@ def test_routes_with_another_layer_count_than_the_trainer_fail_the_rollout(rollo
     seen["layers"] = 5
     with pytest.raises(RolloutError, match="5 layers and top-2, but the trainer has"):
         module.generate_rollout(args(True), 3, Data())
+
+
+def test_tis_requires_logprobs_and_temperature_one(rollout) -> None:
+    module, seen = rollout
+    module.generate_rollout(args(False, use_tis=True), 3, Data())
+    assert seen["configs"][-1].require_logprobs is True
+    module.generate_rollout(args(False), 4, Data())
+    assert seen["configs"][-1].require_logprobs is False
+    with pytest.raises(CWTrainError, match="--use-tis compares log-probs"):
+        module.generate_rollout(args(False, use_tis=True, rollout_temperature=0.7), 5, Data())
+
+
+def test_each_rollout_is_salted_with_the_run_and_the_rollout(rollout, monkeypatch) -> None:
+    module, seen = rollout
+    monkeypatch.setenv("CWTRAIN_HOTLOAD_RUN_ID", "grpo-7")
+    module.generate_rollout(args(False), 3, Data())
+    from cwtrain.integrations.nvext import _PROCESS_TOKEN
+
+    assert seen["salts"] == [f"grpo-7-{_PROCESS_TOKEN}-r3"]

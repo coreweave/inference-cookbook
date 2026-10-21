@@ -13,13 +13,19 @@ Tool calls use the Qwen3-coder XML format of the Nemotron 3 chat templates
 turn of a multi-turn trajectory starts from the previous turn's exact prompt and generated token
 IDs. Only the messages after that turn are rendered, so the trajectory's token prefix never
 changes.
+
+Each request carries the identity that the deployment serves as its cache salt, read from the
+file that the weight synchronizer writes (:mod:`cwtrain.integrations.nvext`). A request fails if
+the file holds no identity, instead of going out unsalted.
 """
 
 import json
 import math
+import secrets
 from typing import Any
 
 from cwtrain.integrations.gym_tool_calls import parse_tool_calls
+from cwtrain.integrations.nvext import require_served_salt, with_nvext
 
 __all__ = ["chat_response", "completion_request", "parse_tool_calls"]
 
@@ -120,11 +126,20 @@ def _prompt_ids(body: dict, tokenizer: Any) -> list[int]:
     return list(previous["prompt_token_ids"]) + generated + list(added)
 
 
-def completion_request(body: dict, tokenizer: Any, max_model_len: int | None = None) -> dict:
+def completion_request(
+    body: dict,
+    tokenizer: Any,
+    max_model_len: int | None = None,
+    *,
+    cache_salt: str | None = None,
+    seed: bool = True,
+) -> dict:
     """Convert a text chat request, with optional tools, into a token-ID completions request.
 
     With ``max_model_len``, ``max_tokens`` is capped to the room the prompt leaves, so a long
-    trajectory generates until its context is full instead of failing the request.
+    trajectory generates until its context is full instead of failing the request. A
+    ``cache_salt`` goes into ``nvext``. With ``seed``, a request without its own seed gets a
+    random one.
 
     Raises:
         ContextFull: The prompt leaves no room for a generated token.
@@ -161,6 +176,12 @@ def completion_request(body: dict, tokenizer: Any, max_model_len: int | None = N
         logprobs=0,
         return_tokens_as_token_ids=True,
     )
+    if cache_salt:
+        result = with_nvext(result, cache_salt=cache_salt)
+    # As cwtrain's sampler does: a request without its own seed takes the replica's random state,
+    # which every replica starts from the same default (cwtrain.integrations.rollout, "Seeds").
+    if seed and "seed" not in result:
+        result["seed"] = secrets.randbelow(2**62)
     return result
 
 
@@ -233,6 +254,8 @@ def run_server() -> None:
     class Config(VLLMModelConfig):
         tokenizer_path: str
         max_model_len: int | None = None
+        cache_salt_file: str | None = None
+        seeds: bool = True
 
     def bad_request(url: str, content: bytes) -> ClientResponseError:
         info = RequestInfo(URL(url), "POST", CIMultiDictProxy(CIMultiDict()), URL(url))
@@ -243,11 +266,17 @@ def run_server() -> None:
     class Client(NeMoGymAsyncOpenAI):
         tokenizer: Any
         max_model_len: int | None = None
+        cache_salt_file: str | None = None
+        seeds: bool = True
 
         async def create_chat_completion(self, **kwargs):
             url = self.base_url + "/completions"
+            # fails closed: a request must not go out unsalted (cwtrain.integrations.nvext)
+            salt = require_served_salt(self.cache_salt_file) if self.cache_salt_file else None
             try:
-                body = completion_request(kwargs, self.tokenizer, self.max_model_len)
+                body = completion_request(
+                    kwargs, self.tokenizer, self.max_model_len, cache_salt=salt, seed=self.seeds
+                )
             except ContextFull:
                 raise bad_request(url, CONTEXT_FULL) from None
             request = {"url": url, "json": body}
@@ -276,6 +305,8 @@ def run_server() -> None:
                     default_headers=self.config.default_headers,
                     tokenizer=tokenizer,
                     max_model_len=self.config.max_model_len,
+                    cache_salt_file=self.config.cache_salt_file,
+                    seeds=self.config.seeds,
                 )
                 for url in self.config.base_url
             ]

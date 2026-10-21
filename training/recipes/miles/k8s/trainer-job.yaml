@@ -48,6 +48,7 @@ spec:
         # train.py (synchronous) or train_async.py (generate the next rollout while training)
         - {name: TRAIN_SCRIPT, value: "${TRAIN_SCRIPT}"}
         - {name: ASYNC_CORRECTION, value: "${ASYNC_CORRECTION}"}
+        - {name: USE_TIS, value: "${USE_TIS}"}
         # rollouts from the deployment
         - {name: CWTRAIN_ROLLOUT_BASE_URL, value: "${ROLLOUT_BASE_URL}"}
         - {name: CWTRAIN_ROLLOUT_MODEL, value: "${ROLLOUT_MODEL}"}

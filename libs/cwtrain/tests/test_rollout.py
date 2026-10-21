@@ -19,11 +19,15 @@ import pytest
 
 from cwtrain.errors import CWTrainError
 from cwtrain.integrations.rollout import (
+    LOGPROB_READERS,
+    SEED_LIMIT,
     Completion,
     CompletionSampler,
     RolloutConfig,
     RolloutError,
+    as_cache_salt,
     decode_routed_experts,
+    rollout_cache_salt,
     sample_groups,
     sample_prompt,
 )
@@ -239,6 +243,37 @@ def test_logprobs_kept_when_every_sample_aligns() -> None:
     assert groups[0][0].rollout_log_probs == [-0.1, -0.2]  # EOS entry dropped
     assert groups[0][1].rollout_log_probs == [-1.0, -2.0, -3.0]
     assert metrics["coreweave/logprobs_kept"] == 1.0
+
+
+ALIGNED = completions_response(["ab"], ["stop"], [[-0.1, -0.2, -0.3]])
+# "x" has 4 log-probs for its 1 token, as in the test above
+MISALIGNED = completions_response(["x"], ["stop"], [[-0.5, -0.5, -0.5, -0.5]])
+
+
+def test_a_group_whose_required_logprobs_do_not_align_is_sampled_again() -> None:
+    transport, seen = make_server([ALIGNED, MISALIGNED, ALIGNED])
+    config = RolloutConfig(base_url="https://gw/v1", model="m", require_logprobs=True)
+    sampler = CompletionSampler(config, transport=transport)
+    groups = [[Sample(prompt="p1")], [Sample(prompt="p2")]]
+    metrics = asyncio.run(
+        sample_groups(sampler, groups, tokenizer=Tokenizer(), max_tokens=8, temperature=1.0)
+    )
+    assert len(seen) == 3 and metrics["coreweave/resampled_groups"] == 1.0
+    assert all(g[0].rollout_log_probs is not None for g in groups)
+
+
+def test_required_logprobs_that_never_align_fail_the_rollout() -> None:
+    transport, seen = make_server([ALIGNED] + [MISALIGNED] * 3)
+    config = RolloutConfig(base_url="https://gw/v1", model="m", require_logprobs=True)
+    sampler = CompletionSampler(config, transport=transport)
+    groups = [[Sample(prompt="p1")], [Sample(prompt="p2")]]
+    with pytest.raises(RolloutError, match="1/2 samples came back without log-probs"):
+        asyncio.run(
+            sample_groups(sampler, groups, tokenizer=Tokenizer(), max_tokens=8, temperature=1.0)
+        )
+    assert len(seen) == 4  # the group, then two more tries
+    with pytest.raises(CWTrainError, match="require_logprobs needs logprobs on"):
+        RolloutConfig(base_url="u", model="m", logprobs=False, require_logprobs=True)
 
 
 def test_logprobs_can_be_disabled() -> None:
@@ -723,6 +758,92 @@ def test_routed_experts_take_one_request_per_choice_and_come_back_decoded() -> N
         assert np.array_equal(completion.routed_experts, expected[completion.token_ids])
 
 
+def test_a_cache_salt_goes_out_in_nvext_next_to_the_routes_request() -> None:
+    prompt = [1, 2, 3]
+    transport, seen = make_server(
+        [routed_response([97, 98], encode_routes(routes_for(4, seed=s))) for s in (1, 2)]
+    )
+    sampler = CompletionSampler(ROUTED, transport=transport)
+    asyncio.run(sampler.sample(prompt, 2, max_tokens=4, temperature=1.0, cache_salt="run-r3"))
+    expected = {"cache_salt": "run-r3", "extra_fields": ["routed_experts"]}
+    assert [req["nvext"] for req in seen] == [expected, expected]
+
+
+@pytest.mark.parametrize("salt", [None, ""])
+def test_no_salt_sends_no_nvext(salt) -> None:
+    transport, seen = make_server([completions_response(["ab"])])
+    config = RolloutConfig(base_url="https://gw/v1", model="m")
+    sampler = CompletionSampler(config, transport=transport)
+    asyncio.run(sampler.sample([1], 1, max_tokens=4, temperature=1.0, cache_salt=salt))
+    assert "nvext" not in seen[0]
+
+
+def test_salts_follow_vllms_rules() -> None:
+    assert as_cache_salt("run-7-r3") == "run-7-r3"
+    for name in ("a/b", "a@b", "x" * 129, ""):
+        salt = as_cache_salt(name)
+        assert len(salt) == 64 and salt == as_cache_salt(name)  # SHA-256, stable
+    sampler = CompletionSampler(RolloutConfig(base_url="https://gw/v1", model="m"))
+    with pytest.raises(RolloutError, match="as_cache_salt"):
+        asyncio.run(sampler.sample([1], 1, max_tokens=4, temperature=1.0, cache_salt="a/b"))
+
+
+def test_a_rollouts_salt_names_the_run_the_process_and_the_rollout(monkeypatch) -> None:
+    from cwtrain.integrations import nvext
+
+    env = {"CWTRAIN_HOTLOAD_RUN_ID": "grpo-7"}
+    monkeypatch.setattr(nvext, "_PROCESS_TOKEN", "a1b2c3")
+    assert rollout_cache_salt(3, env) == "grpo-7-a1b2c3-r3"
+    assert rollout_cache_salt(3, env) != rollout_cache_salt(4, env)
+    # a run resumed from a checkpoint keeps its run ID and rollout numbers, in a new process
+    monkeypatch.setattr(nvext, "_PROCESS_TOKEN", "d4e5f6")
+    assert rollout_cache_salt(3, env) == "grpo-7-d4e5f6-r3"
+    assert rollout_cache_salt(3, {}) == "run-d4e5f6-r3"  # no run ID
+
+
+def test_sample_groups_salts_every_request() -> None:
+    transport, seen = make_server([completions_response(["ab"]), completions_response(["cd"])])
+    config = RolloutConfig(base_url="https://gw/v1", model="m")
+    sampler = CompletionSampler(config, transport=transport)
+    groups = [[Sample(prompt="p1")], [Sample(prompt="p2")]]
+    asyncio.run(
+        sample_groups(
+            sampler, groups, tokenizer=Tokenizer(), max_tokens=8, temperature=1.0, cache_salt="s"
+        )
+    )
+    assert [req["nvext"] for req in seen] == [{"cache_salt": "s"}] * 2
+
+
+def test_a_request_with_several_choices_goes_unseeded() -> None:
+    # one engine samples all of its choices with distinct noise, and a seed costs throughput
+    transport, seen = make_server([completions_response(["ab", "cd"])])
+    config = RolloutConfig(base_url="https://gw/v1", model="m")
+    sampler = CompletionSampler(config, transport=transport)
+    asyncio.run(sampler.sample([1], 2, max_tokens=4, temperature=1.0))
+    assert "seed" not in seen[0]
+
+
+def test_each_choice_with_routes_gets_its_own_seed() -> None:
+    transport, seen = make_server(
+        [routed_response([97, 98], encode_routes(routes_for(4, seed=s))) for s in (1, 2)]
+    )
+    sampler = CompletionSampler(ROUTED, transport=transport)
+    asyncio.run(sampler.sample([1, 2, 3], 2, max_tokens=4, temperature=1.0))
+    seeds = [req["seed"] for req in seen]
+    assert len(set(seeds)) == 2  # equal seeds would sample equal choices
+    assert all(0 <= seed < SEED_LIMIT for seed in seeds)
+
+
+def test_seeds_can_be_turned_off() -> None:
+    assert RolloutConfig.from_env({**ROLLOUT_ENV, "CWTRAIN_ROLLOUT_SEEDS": "0"}).seeds is False
+    transport, seen = make_server(
+        [routed_response([97, 98], encode_routes(routes_for(4, seed=s))) for s in (1, 2)]
+    )
+    sampler = CompletionSampler(dataclasses.replace(ROUTED, seeds=False), transport=transport)
+    asyncio.run(sampler.sample([1, 2, 3], 2, max_tokens=4, temperature=1.0))
+    assert all("seed" not in req for req in seen)
+
+
 def test_routes_are_not_requested_unless_asked_for() -> None:
     transport, seen = make_server([completions_response(["ab", "cd"])])
     sampler = CompletionSampler(
@@ -911,6 +1032,38 @@ def test_the_replay_flag_decides_and_a_setting_that_disagrees_is_ignored(caplog)
         assert RolloutConfig.for_trainer(TrainerArgs(True), on).routed_experts is True
         assert RolloutConfig.for_trainer(TrainerArgs(False), ROLLOUT_ENV).routed_experts is False
     assert caplog.text == ""
+
+
+@dataclass
+class ScoringArgs:  # the slime and miles flags that read every sample's rollout_log_probs
+    use_tis: bool = False
+    use_rollout_logprobs: bool = False
+    get_mismatch_metrics: bool = False
+    rollout_temperature: float = 1.0
+
+
+@pytest.mark.parametrize("reader", LOGPROB_READERS)
+def test_a_trainer_that_reads_logprobs_requires_them(reader) -> None:
+    args = ScoringArgs(**{reader: True})
+    assert RolloutConfig.for_trainer(args, ROLLOUT_ENV).require_logprobs is True
+    assert RolloutConfig.for_trainer(ScoringArgs(), ROLLOUT_ENV).require_logprobs is False
+    assert RolloutConfig.for_trainer(object(), ROLLOUT_ENV).require_logprobs is False
+    flag = "--" + reader.replace("_", "-")
+    with pytest.raises(CWTrainError, match=f"{flag} reads the endpoint's log-probs"):
+        RolloutConfig.for_trainer(args, {**ROLLOUT_ENV, "CWTRAIN_ROLLOUT_LOGPROBS": "0"})
+
+
+def test_a_trainer_that_reads_logprobs_samples_at_temperature_one(caplog) -> None:
+    with pytest.raises(CWTrainError, match="--rollout-temperature 0.8 with the endpoint's"):
+        RolloutConfig.for_trainer(ScoringArgs(use_tis=True, rollout_temperature=0.8), ROLLOUT_ENV)
+    # without TIS nothing compares the log-probs, so any temperature goes
+    cooler = RolloutConfig.for_trainer(ScoringArgs(rollout_temperature=0.8), ROLLOUT_ENV)
+    assert cooler.require_logprobs is False
+    # the mismatch metrics only report, so they get a warning, and still need the log-probs
+    metrics_only = ScoringArgs(get_mismatch_metrics=True, rollout_temperature=0.8)
+    with caplog.at_level(logging.WARNING, logger="cwtrain.integrations.rollout"):
+        assert RolloutConfig.for_trainer(metrics_only, ROLLOUT_ENV).require_logprobs is True
+    assert "the mismatch metrics are off" in caplog.text
 
 
 def test_routes_must_have_the_trainers_layer_count_and_top_k() -> None:

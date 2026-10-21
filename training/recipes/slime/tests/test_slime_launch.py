@@ -78,6 +78,14 @@ def test_train_args_wire_the_hot_load_hook_and_keep_extras_intact() -> None:
         launch.SlimeJob.from_env({**BASE, "EXTRA_TRAIN_ARGS": "--x 'unterminated"})
 
 
+@pytest.mark.parametrize(("given", "on"), [(None, True), ("", True), ("1", True), ("off", False)])
+def test_truncated_importance_sampling_is_on_unless_turned_off(given, on) -> None:
+    env = {**BASE} if given is None else {**BASE, "USE_TIS": given}
+    assert ("--use-tis" in launch.train_args(launch.SlimeJob.from_env(env))) is on
+    with pytest.raises(LaunchError, match="USE_TIS must be a boolean"):
+        launch.SlimeJob.from_env({**BASE, "USE_TIS": "sometimes"})
+
+
 def test_runtime_env_forwards_settings_to_the_workers() -> None:
     env = {"CWTRAIN_HOTLOAD_RUN_ID": "r", "SLIME_RELAX_NUMPY_CHECK": "1", "HOME": "/root"}
     vars_ = launch.runtime_env("/work/py:/root/slime", env)["env_vars"]

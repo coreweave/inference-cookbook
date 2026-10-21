@@ -56,7 +56,7 @@ slime ships an equivalent.
 | --- | --- | --- | --- |
 | `0001-standalone-delta-publish` | about 40 lines | adds `--update-weight-standalone-publish` as described above | always, until slime can publish deltas without its own engines |
 | `0002-relax-numpy-check` | about 7 lines | lets slime's numpy 1 assertion be skipped with `SLIME_RELAX_NUMPY_CHECK=1` | only on images that ship numpy 2, such as the arm64 miles image |
-| `0003-zero-kl-without-rollout-logprobs` | about 8 lines | shapes slime's zero KL from response lengths when a sample has no `rollout_log_probs` | only as a fallback when the endpoint's log-probs cannot be aligned with a batch |
+| `0003-zero-kl-without-rollout-logprobs` | about 8 lines | shapes slime's zero KL from response lengths when a sample has no `rollout_log_probs` | only with `USE_TIS=0`, as a fallback when the endpoint's log-probs cannot be aligned with a batch |
 
 The launcher (`launch.py`) applies the patches in order and checks each one before it applies it.
 If a patch does not apply, the launcher reverts the patches it applied and stops the job. The
@@ -108,6 +108,14 @@ hot-loaded. So, unless you set it, the launcher sets
 under the previous weights, instead of reusing cached prompt prefixes across the swap. Set
 `preserve` to keep the cache.
 
+Either way, each rollout's requests carry a cache salt of the run, the rollout and a token drawn
+once per process (`nvext.cache_salt`). A run resumed from a checkpoint repeats rollout numbers
+under the same run ID, and the token keeps it from reusing the earlier process's salts. So a
+prompt cached under earlier weights never serves a later rollout, even with `preserve`, as long
+as the hook waits for every replica (`HOTLOAD_WAIT=1`, the default). With
+`HOTLOAD_WAIT=0`, the rollout function logs a warning: a replica that has not switched yet would
+cache old KV under the new salt.
+
 Snapshot identities are `<RUN_ID>-vNNNNNN`. The platform keys weight versions by identity, so never
 reuse a run ID for different weights.
 
@@ -139,14 +147,41 @@ mode does not work with `--colocate`.
 - takes the exact sampled token ids. It re-tokenizes the text only when the endpoint does not
   report them.
 - scores the responses with slime's own `--rm-type`.
+- with routed experts, which takes one request per choice, gives each request its own random
+  seed. Replicas that start together then can't sample a group's choices alike.
+  `CWTRAIN_ROLLOUT_SEEDS=0` turns this off. A request with `n` choices runs them all on one
+  engine and goes unseeded.
 - attaches the endpoint's sampled-token log-probs as `rollout_log_probs` when they align with the
-  response tokens, including the token that ended the response. Otherwise it leaves them unset.
-  The trainer recomputes log-probs in both cases.
+  response tokens, including the token that ended the response. With `--use-tis`, a group where
+  they do not align is sampled again, up to twice, before the rollout fails. Without it, they stay
+  unset, and the trainer recomputes log-probs either way.
 
 It is a thin slime adapter over `cwtrain.integrations.rollout`. Configure it with
 `CWTRAIN_ROLLOUT_BASE_URL`, `CWTRAIN_ROLLOUT_MODEL` and, optionally,
 `CWTRAIN_ROLLOUT_API_KEY_FILE`. The hook blocks until every replica serves the new version, so the
 next rollout is on-policy without an engine handshake.
+
+## Truncated importance sampling
+
+The deployment and the trainer compute slightly different log-probs for the same tokens, so even
+fresh rollouts are a little off-policy. The recipe passes `--use-tis`: slime weights each token's
+loss by the trainer's probability over the deployment's, capped at 2 (`--tis-clip`). On a
+Mixture-of-Experts model, combine it with routing replay (next section), which removes most of
+the gap first. The [routing replay case study](../../case-studies/rollout-routing-replay/README.md)
+measures the gap with and without replay.
+
+- `USE_TIS=0` in `run.env` turns it off.
+  A `run.env` written before this setting needs a `USE_TIS` line, because `render.sh` refuses a
+  manifest that uses a variable the file doesn't set. `USE_TIS=1`, or an empty `USE_TIS=`,
+  keeps TIS on.
+- TIS reads `rollout_log_probs` from every sample. A group whose log-probs do not line up with
+  its tokens is sampled again, up to twice, before the rollout fails. With the sampled token ids
+  from the deployment, they always line up.
+- Sample at temperature 1, the recipe's `--rollout-temperature`. The deployment reports log-probs
+  before temperature and slime scores after it, so the rollout function refuses TIS at any other
+  temperature.
+- slime logs the weights as `tis`, the clipped share as `tis_clipfrac`, and the mean gap between
+  the two log-probs as `train_rollout_logprob_abs_diff`.
 
 ## Routing replay for MoE models
 

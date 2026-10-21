@@ -142,7 +142,9 @@ which one computed it:
 
 With `PRESERVE`, a cached prompt keeps the previous version's KV cache and routes. The synchronous
 recipes (slime, miles `train.py`, NeMo-RL, Axolotl) publish with `RESET_ALL`; miles' `train_async.py`
-keeps `PRESERVE`.
+keeps `PRESERVE`. The slime, miles and NeMo-RL rollouts also salt their requests with the rollout
+or the served version (`nvext.cache_salt`), so under either policy no later version reuses these
+blocks.
 
 ## Using the routes
 
@@ -162,8 +164,8 @@ keeps `PRESERVE`.
 - **One model, one recording.** Transformers stands in for a trainer's kernels.
 - **Up to 2,048 tokens.** Longer sequences need a trainer that implements the sparse attention
   layers.
-- **Replay removes only the routing part of the gap.** The rest, 0.0094 here, still needs off-policy
-  corrections such as TIS.
+- **Replay removes only the routing part of the gap.** The rest, 0.0094 here, is left to an
+  off-policy correction such as TIS, which the slime, miles and NeMo-RL recipes turn on.
 
 ## Reproduce
 

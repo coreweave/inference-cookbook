@@ -16,7 +16,11 @@ grpo:
 
 loss_fn:
   reference_policy_kl_penalty: 0.0
-  use_importance_sampling_correction: false
+  # Truncated importance sampling: weight each token's loss by the policy's probability over the
+  # deployment's, capped at 2 (the recipe's README, "Truncated importance sampling").
+  use_importance_sampling_correction: true
+  truncated_importance_sampling_type: tis
+  truncated_importance_sampling_ratio: 2.0
 
 checkpointing:
   enabled: false        # the synchronizer exports the weights; enable to resume training
@@ -91,8 +95,10 @@ policy:
       api_key_file: ${oc.env:CWTRAIN_ROLLOUT_API_KEY_FILE,null}
       max_model_len: ${policy.max_total_sequence_length}
       concurrency: ${oc.env:CWTRAIN_ROLLOUT_CONCURRENCY,32}  # requests in flight
-      # require sampled-token log-probs when the importance-sampling correction uses them
+      # require sampled-token log-probs when the importance-sampling correction uses them, and
+      # sampling that keeps them comparable with NeMo-RL's: temperature 1, top_p 1, no top_k
       require_logprobs: ${loss_fn.use_importance_sampling_correction}
+      importance_sampling: ${loss_fn.use_importance_sampling_correction}
       # hot-load: deployment, identity prefix, full snapshot every N refits, exports/deltas dir
       deployment_id: ${oc.env:CWTRAIN_HOTLOAD_DEPLOYMENT_ID}
       run_id: ${oc.env:CWTRAIN_HOTLOAD_RUN_ID}

@@ -177,6 +177,61 @@ def test_the_launcher_stages_the_model_where_every_later_step_reads_it(
     assert f"--hf-checkpoint {checkpoint} " in train_args
 
 
+def launched_train_args(tmp_path, monkeypatch, *options: str) -> str:
+    """train.py's arguments from a launcher run with ``options``, against stand-in helpers."""
+    module = helpers_module(UTILS)
+    calls: list[str] = []
+    module.exec_command_cpu = lambda cmd: None
+    module.hf_download_dataset = lambda *a, **kw: None
+    module.convert_checkpoint = lambda **kw: None
+    module.execute_train = lambda **kw: calls.append(kw["train_args"])
+    module.ExecuteTrainConfig = lambda **kw: kw
+    variant = load_launcher(monkeypatch, module)
+    monkeypatch.setattr(variant, "megatron_model_type", lambda name: name)
+    monkeypatch.setattr(sys, "argv", [
+        "run_hotload.py", "--model-name", "Qwen/Qwen3-4B", "--skip-download",
+        "--model-dir", str(tmp_path / "models"), "--data-dir", str(tmp_path / "data"),
+        "--prompt-data", str(tmp_path / "prompts.jsonl"), "--work-dir", str(tmp_path), *options,
+    ])  # fmt: skip
+    monkeypatch.setattr(variant.os, "environ", {})
+    variant.main()
+    return calls[0]
+
+
+@pytest.mark.parametrize(
+    ("options", "tis", "old_actor"),
+    [
+        ((), True, False),
+        (("--tis", "0"), False, False),
+        (("--train-script", "train_async.py"), True, True),
+        (("--train-script", "train_async.py", "--async-correction", "none"), True, False),
+    ],
+)
+def test_tis_is_on_in_both_loops_unless_turned_off(
+    tmp_path, monkeypatch, options, tis, old_actor
+) -> None:
+    args = launched_train_args(tmp_path, monkeypatch, *options)
+    assert ("--use-tis " in args) is tis
+    assert ("--keep-old-actor " in args) is old_actor
+
+
+def test_the_old_tis_async_correction_says_what_to_set_instead() -> None:
+    with pytest.raises(launch.argparse.ArgumentTypeError, match="set ASYNC_CORRECTION=none"):
+        launch.async_correction("tis")
+    with pytest.raises(launch.argparse.ArgumentTypeError, match="keep_old_actor or none"):
+        launch.async_correction("sometimes")
+    assert launch.async_correction("none") == "none"
+
+
+def test_tis_takes_cwtrains_boolean_values_from_run_env() -> None:
+    assert launch.on_off("off") is False and launch.on_off("yes") is True
+    with pytest.raises(launch.argparse.ArgumentTypeError, match="--tis must be a boolean"):
+        launch.on_off("sometimes")
+    script = (K8S / "run-trainer.sh").read_text()
+    assert '--tis "${USE_TIS:-1}"' in script
+    assert "{name: USE_TIS," in (K8S / "trainer-job.yaml").read_text()
+
+
 def test_run_trainer_hands_the_model_and_its_source_to_the_launcher() -> None:
     script = (K8S / "run-trainer.sh").read_text()
     assert '--model-name "$HF_MODEL"' in script, "the launcher must train the model run.env names"

@@ -31,6 +31,7 @@ from miles.utils.processing_utils import load_tokenizer
 from cwtrain.integrations.rollout import (
     RolloutConfig,
     check_routes_fit,
+    rollout_cache_salt,
     sample_groups,
     shared_sampler,
 )
@@ -62,6 +63,8 @@ class CoreWeaveRolloutFn(BaseRolloutFn):
             temperature=float(args.rollout_temperature),
             top_p=float(getattr(args, "rollout_top_p", 1.0) or 1.0),
             stop=getattr(args, "rollout_stop", None),
+            # one rollout samples one version; keep its prompts out of later versions' cache
+            cache_salt=rollout_cache_salt(input.rollout_id),
         )
         if self.config.routed_experts:
             check_routes_fit(groups, int(args.num_layers), int(args.moe_router_topk))

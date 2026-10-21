@@ -14,8 +14,8 @@ honors vLLM's ``return_tokens_as_token_ids``. Otherwise the text is re-tokenized
 token is appended.
 
 Configuration lives under ``policy.generation.coreweave_cfg``. The rollout keys (all but
-``max_model_len`` and ``require_logprobs``) can also come from the ``CWTRAIN_ROLLOUT_*``
-environment (see :mod:`cwtrain.integrations.rollout`):
+``max_model_len``, ``require_logprobs`` and ``importance_sampling``) can also come from the
+``CWTRAIN_ROLLOUT_*`` environment (see :mod:`cwtrain.integrations.rollout`):
 
 ``base_url``          OpenAI-compatible base URL of the deployment, ending in ``/v1``.
 ``model``             Served model name.
@@ -25,7 +25,15 @@ environment (see :mod:`cwtrain.integrations.rollout`):
                       ``policy.max_total_sequence_length``.
 ``token_id_prompts``  Send prompts as token ids (default true). If the endpoint rejects them and
                       a text request succeeds, the run sends text from then on.
+``seeds``             Seed every Gym request, each of which samples one choice (default true).
+                      The backend's own requests sample all of a prompt's choices on one engine
+                      and go unseeded.
 ``require_logprobs``  Fail the step when a response has no aligned log-probs (default true).
+``importance_sampling`` NeMo-RL's importance-sampling correction compares the log-probs with its
+                      own (default false; the recipe's config ties it to
+                      ``loss_fn.use_importance_sampling_correction``). Needs ``temperature`` 1,
+                      ``top_p`` 1 and no ``top_k``: the endpoint's log-probs come before them,
+                      NeMo-RL's after.
 """
 
 from __future__ import annotations
@@ -36,6 +44,7 @@ import os
 from typing import Any
 
 from cwtrain.integrations.nemo_rl import _missing_dependency
+from cwtrain.integrations.nvext import as_cache_salt, warn_without_wait
 from cwtrain.integrations.rollout import (
     ENV_PREFIX,
     Completion,
@@ -67,6 +76,7 @@ _ENV_KEYS = {
     "logprobs": "LOGPROBS",
     "token_ids": "TOKEN_IDS",
     "token_id_prompts": "TOKEN_ID_PROMPTS",
+    "seeds": "SEEDS",
 }
 
 
@@ -103,6 +113,21 @@ class CoreWeaveGeneration(GenerationInterface):
             raise RolloutError(
                 "coreweave_cfg.require_logprobs needs sampled-token log-probs: keep "
                 "CWTRAIN_ROLLOUT_LOGPROBS enabled or set require_logprobs: false"
+            )
+        # NeMo-RL scores with policy.generation's temperature, top_p and top_k. The endpoint
+        # reports log-probs before them (vLLM's default), so the two compare only without them.
+        top_k = config.get("top_k")
+        shaped = (
+            float(config.get("temperature", 1.0)) != 1.0
+            or float(config.get("top_p", 1.0)) != 1.0
+            or (top_k is not None and int(top_k) > 0)
+        )
+        if bool(cw.get("importance_sampling", False)) and shaped:
+            raise RolloutError(
+                "the importance-sampling correction compares NeMo-RL's log-probs, which apply "
+                "policy.generation's temperature, top_p and top_k, with the endpoint's, which "
+                "it reports before them. Keep temperature 1.0, top_p 1.0 and top_k null, or turn "
+                "the correction off (loss_fn.use_importance_sampling_correction: false)"
             )
         # As in NeMo-RL's vLLM backend, configured stops apply to every request, merged with
         # per-row stop strings.
@@ -252,6 +277,7 @@ class CoreWeaveGeneration(GenerationInterface):
             "stop_token_ids": self.stop_token_ids or None,
             # NeMo-RL's own backends keep the stop string in the output, so do the same here.
             "include_stop_str_in_output": True if stops else None,
+            "cache_salt": self._cache_salt(),
         }
         completions, still = await sample_prompt(
             sampler,
@@ -264,6 +290,15 @@ class CoreWeaveGeneration(GenerationInterface):
         # Rows finish in any order. After one row falls back to text, none switches back.
         self.token_id_prompts = self.token_id_prompts and still
         return completions
+
+    def _cache_salt(self) -> str | None:
+        """The served identity, so that no version reuses prompts another one cached."""
+        sync = self.weight_synchronizer
+        identity = getattr(sync, "served_identity", None)
+        if not identity:
+            return None
+        warn_without_wait(getattr(getattr(sync, "config", None), "wait", True))
+        return as_cache_salt(identity)
 
     def _decode(self, completion: Completion) -> tuple[list[int], list[float], bool]:
         """Response token ids, aligned log-probs (or none) and the truncation flag."""

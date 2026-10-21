@@ -31,6 +31,8 @@ Configuration (environment of the process that runs the rollout function):
                                  trainer encodes and trains on; ``0`` sends the rendered text.
 ``CWTRAIN_ROLLOUT_ROUTED_EXPERTS`` ``1`` asks a Mixture-of-Experts deployment for each sequence's
                                  routed experts; ``0`` (default) does not. See "Routed experts".
+``CWTRAIN_ROLLOUT_SEEDS``        ``1`` (default) seeds every request that samples one choice of a
+                                 group on its own; ``0`` never sends a seed. See "Seeds".
 ==============================  =====================================================
 
 Responses
@@ -52,6 +54,15 @@ batch-wide.)
 slime's advantage step needs a per-token tensor to shape its zero KL. A run without aligned
 log-probs therefore also needs the ``0003`` patch in the slime recipe.
 
+slime and miles read every sample's log-probs with ``--use-tis``, ``--use-rollout-logprobs`` or
+``--get-mismatch-metrics``, and cannot train a batch without them. With any of these flags,
+:meth:`RolloutConfig.for_trainer` makes them required. A group whose log-probs do not align is then
+sampled again, up to :data:`LOGPROB_RESAMPLES` times, and the rollout fails only if it still does
+not align. The trainer must also sample at temperature 1. The endpoint reports log-probs before
+temperature (vLLM's default), but slime and miles score at ``--rollout-temperature``, so at any
+other temperature the two are not comparable. With ``--get-mismatch-metrics`` alone, which only
+reports, that is a warning.
+
 Prompts
 -------
 
@@ -66,6 +77,33 @@ changes.
 
 A request carries at most four stop strings and four stop token ids. CoreWeave's frontend rejects
 more, so such a request fails before it is sent.
+
+Prefix cache
+------------
+
+The deployment caches the KV of prompt blocks, and with routed experts their routes. A hot-load
+with the ``PRESERVE`` prompt-cache policy keeps them, so a later version could serve a prompt from
+blocks that an earlier one computed. A cache salt (Dynamo's ``nvext.cache_salt``) goes into the
+cache key, so requests reuse blocks only when their salts are equal. slime and miles salt each
+rollout with :func:`rollout_cache_salt`. NeMo-RL salts with the identity that the deployment
+serves, on its own path and on Gym's (see :mod:`cwtrain.integrations.nvext`).
+
+The salt must change only after every replica serves the new version, as it does when the
+hot-load hook waits for the hot-load (the default). A request with the new salt could otherwise
+reach a replica that has not switched yet, which would cache old KV under the new salt. Without
+the wait, the rollout function logs a warning.
+
+Seeds
+-----
+
+A request that samples one choice of a group on its own carries a random ``seed``, below 2**62. That
+is each request of a group with routed experts, and each of the Gym model server's. Without a seed,
+a replica takes a request's sampling noise from its engine's random state, and every replica starts
+that state from the same default seed. So replicas that start together sample a prompt identically
+when it arrives as the same request on each, and a group's choices on different replicas could
+come back equal. A request with ``n`` > 1 samples every choice on one engine, which draws distinct
+noise for each, so it goes unseeded: a seed costs 1-3% of decode throughput. Seeds make sampling
+independent of the replica, not reproducible: decoding on a deployment is not bit-exact.
 
 Routed experts
 --------------
@@ -98,6 +136,7 @@ import logging
 import math
 import os
 import random
+import secrets
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -109,6 +148,12 @@ import numpy as np
 
 from cwtrain.errors import CWTrainError
 from cwtrain.integrations._env import flag, positive_float, positive_int
+from cwtrain.integrations.nvext import (
+    MAX_CACHE_SALT,
+    as_cache_salt,
+    rollout_cache_salt,
+    with_nvext,
+)
 
 log = logging.getLogger(__name__)
 
@@ -118,6 +163,12 @@ RETRY_STATUS = {408, 409, 425, 429, 500, 502, 503, 504}
 
 class RolloutError(CWTrainError):
     """The completions endpoint returned something the trainer cannot train on."""
+
+
+#: slime and miles flags that read ``rollout_log_probs`` from every sample of a batch.
+LOGPROB_READERS = ("use_tis", "use_rollout_logprobs", "get_mismatch_metrics")
+#: With log-probs required, how many more times a group whose log-probs do not align is sampled.
+LOGPROB_RESAMPLES = 2
 
 
 #: CoreWeave's OpenAI frontend rejects a request with more stop strings or stop token ids.
@@ -133,6 +184,16 @@ def check_stop_limits(
             raise RolloutError(
                 f"a completions request takes at most {MAX_STOPS} {what}, got {len(items)}"
             )
+
+
+#: Request seeds stay below this, so that vLLM's ``seed + n - 1`` for a request's last choice still
+#: fits the engine's int64.
+SEED_LIMIT = 2**62
+
+
+def request_seed() -> int:
+    """A random seed for one request (see "Seeds" above)."""
+    return secrets.randbelow(SEED_LIMIT)
 
 
 @dataclass(frozen=True)
@@ -153,6 +214,11 @@ class RolloutConfig:
     #: Ask a Mixture-of-Experts deployment for each sequence's routed experts (see "Routed
     #: experts" above).
     routed_experts: bool = False
+    #: Fail a batch in which a sample's log-probs do not align, instead of dropping them from the
+    #: whole batch. For a trainer that reads them from every sample (see :meth:`for_trainer`).
+    require_logprobs: bool = False
+    #: Seed every request that samples one choice of a group on its own (see "Seeds" above).
+    seeds: bool = True
 
     def __post_init__(self) -> None:
         for name, value in (("concurrency", self.concurrency), ("max_attempts", self.max_attempts)):
@@ -167,6 +233,8 @@ class RolloutConfig:
                 "RolloutConfig.routed_experts needs exact tokens: keep logprobs, token_ids and "
                 "token_id_prompts on"
             )
+        if self.require_logprobs and not self.logprobs:
+            raise CWTrainError("RolloutConfig.require_logprobs needs logprobs on")
 
     def without_routed_experts(self, trainer: str) -> RolloutConfig:
         """This config with routed experts off, for a trainer that cannot replay them.
@@ -217,33 +285,62 @@ class RolloutConfig:
             token_ids=flag(env, f"{ENV_PREFIX}TOKEN_IDS", True, labels=names),
             token_id_prompts=flag(env, f"{ENV_PREFIX}TOKEN_ID_PROMPTS", True, labels=names),
             routed_experts=flag(env, f"{ENV_PREFIX}ROUTED_EXPERTS", False, labels=names),
+            seeds=flag(env, f"{ENV_PREFIX}SEEDS", True, labels=names),
         )
 
     @classmethod
     def for_trainer(cls, args: Any, environ: Mapping[str, str] | None = None) -> RolloutConfig:
-        """:meth:`from_env`, with routed experts on exactly when the trainer replays them.
+        """:meth:`from_env`, with routed experts on exactly when the trainer replays them, and
+        log-probs required when it reads them.
 
         slime and miles replay the rollout's routes with ``--use-rollout-routing-replay``
         (``args.use_rollout_routing_replay``), and then fail on a sample without them. Without
         it, routes would cost a request per choice and go unread. The flag decides, and an
         explicit ``CWTRAIN_ROLLOUT_ROUTED_EXPERTS`` that disagrees is ignored with a warning. For
         a trainer without the flag, the environment decides.
+
+        With one of :data:`LOGPROB_READERS` on, such as ``--use-tis``, log-probs are required
+        (see "Responses" above).
+
+        Raises:
+            CWTrainError: The trainer reads log-probs, but they are off, or it trains on them at
+                a temperature other than 1.
         """
         env = os.environ if environ is None else environ
         config = cls.from_env(env)
         flag = getattr(args, "use_rollout_routing_replay", None)
-        if flag is None:
+        if flag is not None:
+            replay = bool(flag)
+            explicit = env.get(f"{ENV_PREFIX}ROUTED_EXPERTS", "").strip()
+            if explicit and config.routed_experts != replay:
+                log.warning(
+                    "ignoring %sROUTED_EXPERTS=%s: --use-rollout-routing-replay is %s",
+                    ENV_PREFIX,
+                    explicit,
+                    "on" if replay else "off",
+                )
+            config = dataclasses.replace(config, routed_experts=replay)
+        readers = [
+            "--" + name.replace("_", "-") for name in LOGPROB_READERS if getattr(args, name, False)
+        ]
+        if not readers:
             return config
-        replay = bool(flag)
-        explicit = env.get(f"{ENV_PREFIX}ROUTED_EXPERTS", "").strip()
-        if explicit and config.routed_experts != replay:
-            log.warning(
-                "ignoring %sROUTED_EXPERTS=%s: --use-rollout-routing-replay is %s",
-                ENV_PREFIX,
-                explicit,
-                "on" if replay else "off",
+        if not config.logprobs:
+            raise CWTrainError(
+                f"{readers[0]} reads the endpoint's log-probs: keep {ENV_PREFIX}LOGPROBS on"
             )
-        return dataclasses.replace(config, routed_experts=replay)
+        temperature = float(getattr(args, "rollout_temperature", 1.0))
+        if temperature != 1.0:
+            mismatch = (
+                f"{readers[0]} compares log-probs that the trainer computes at "
+                f"--rollout-temperature {temperature:g} with the endpoint's, which it reports "
+                "before temperature"
+            )
+            if readers != ["--get-mismatch-metrics"]:
+                raise CWTrainError(f"{mismatch}. Sample at temperature 1, or turn {readers[0]} off")
+            # the metrics only report; training does not use them
+            log.warning("%s, so the mismatch metrics are off", mismatch)
+        return dataclasses.replace(config, require_logprobs=True)
 
 
 @dataclass(frozen=True)
@@ -305,20 +402,27 @@ class CompletionSampler:
         stop: Sequence[str] | None = None,
         stop_token_ids: Sequence[int] | None = None,
         include_stop_str_in_output: bool | None = None,
+        cache_salt: str | None = None,
     ) -> list[Completion]:
         """Return exactly ``n`` completions for ``prompt``, ordered by choice index.
 
         ``prompt`` is text or a list of token ids. The OpenAI completions API accepts both. Token
         ids avoid re-tokenizing the trainer's prompt. ``stop_token_ids`` and
-        ``include_stop_str_in_output`` are vLLM extensions of the API.
+        ``include_stop_str_in_output`` are vLLM extensions of the API. ``cache_salt`` keys the
+        deployment's prefix cache (see "Prefix cache" above); empty or ``None`` sends none.
 
         Raises:
-            RolloutError: The request has too many stops, fails after all retries, gets a status
-                that is not retried, or returns a choice count other than ``n``. With routed
-                experts: the prompt is text, or a response lacks routes or token ids, or its
-                routes do not line up with its tokens.
+            RolloutError: The request has too many stops or a cache salt that vLLM rejects, fails
+                after all retries, gets a status that is not retried, or returns a choice count
+                other than ``n``. With routed experts: the prompt is text, or a response lacks
+                routes or token ids, or its routes do not line up with its tokens.
         """
         check_stop_limits(stop, stop_token_ids)
+        if cache_salt and as_cache_salt(cache_salt) != cache_salt:
+            raise RolloutError(
+                f"a cache salt takes at most {MAX_CACHE_SALT} characters and none of @ / \\ or "
+                f"NUL; as_cache_salt() makes one from any name, got {cache_salt!r}"
+            )
         payload: dict[str, Any] = {
             "model": self.config.model,
             "prompt": prompt if isinstance(prompt, str) else list(prompt),
@@ -336,6 +440,8 @@ class CompletionSampler:
             payload["include_stop_str_in_output"] = bool(include_stop_str_in_output)
         if top_k is not None and top_k > 0:
             payload["top_k"] = int(top_k)
+        if cache_salt:
+            payload = with_nvext(payload, cache_salt=cache_salt)
         if isinstance(prompt, str):
             # The trainer encodes prompts without special tokens. vLLM adds them (often a BOS)
             # unless told not to, and then the served prompt differs from the scored one.
@@ -373,9 +479,14 @@ class CompletionSampler:
         """``n`` requests of one choice each, because a response carries one sequence's routes."""
         if isinstance(prompt, str):
             raise RolloutError("routed experts need a token-id prompt")
-        payload = {**payload, "n": 1, "nvext": {"extra_fields": ["routed_experts"]}}
+        payload = with_nvext({**payload, "n": 1}, extra_fields=["routed_experts"])
+        # Each choice is its own request and may reach another replica, so each gets its own
+        # seed (see "Seeds" above). Equal seeds would sample equal choices.
+        payloads = [
+            {**payload, "seed": request_seed()} if self.config.seeds else payload for _ in range(n)
+        ]
         async with self._semaphore:
-            bodies = await _gather_all([self._post_with_retry(payload) for _ in range(n)])
+            bodies = await _gather_all([self._post_with_retry(body) for body in payloads])
         completions = []
         for index, body in enumerate(bodies):
             choices = body.get("choices") or []
@@ -788,31 +899,54 @@ async def sample_groups(
     temperature: float,
     top_p: float = 1.0,
     stop: Sequence[str] | None = None,
+    cache_salt: str | None = None,
 ) -> dict[str, float]:
-    """Sample every group concurrently and fill its samples; returns timing/shape metrics."""
+    """Sample every group concurrently and fill its samples; returns timing/shape metrics.
+
+    Every request carries ``cache_salt``, such as :func:`rollout_cache_salt` of the rollout.
+
+    With log-probs required, a group whose log-probs do not align is sampled again, up to
+    :data:`LOGPROB_RESAMPLES` times.
+
+    Raises:
+        RolloutError: The config requires log-probs, and a group's still do not align.
+    """
     started = time.monotonic()
+    resampled = 0
 
     async def one(group: Sequence[Any]) -> None:
+        nonlocal resampled
         prompt = group[0].prompt
         if not isinstance(prompt, str):
             raise RolloutError(
                 "prompts must arrive rendered as strings; enable --apply-chat-template"
             )
         prompt_ids = list(tokenizer.encode(prompt, add_special_tokens=False))
-        completions, still = await sample_prompt(
-            sampler,
-            prompt_ids,
-            len(group),
-            text=lambda: prompt,
-            token_id_prompts=sampler.token_id_prompts,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            top_p=top_p,
-            stop=stop,
-        )
-        # Groups finish in any order. After one group falls back to text, none switches back.
-        sampler.token_id_prompts = sampler.token_id_prompts and still
-        fill_group(group, completions, prompt_ids=prompt_ids, tokenizer=tokenizer)
+        for attempt in range(LOGPROB_RESAMPLES + 1):
+            completions, still = await sample_prompt(
+                sampler,
+                prompt_ids,
+                len(group),
+                text=lambda: prompt,
+                token_id_prompts=sampler.token_id_prompts,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                stop=stop,
+                cache_salt=cache_salt,
+            )
+            # Groups finish in any order. After one group falls back to text, none switches back.
+            sampler.token_id_prompts = sampler.token_id_prompts and still
+            fill_group(group, completions, prompt_ids=prompt_ids, tokenizer=tokenizer)
+            aligned = all(getattr(s, "rollout_log_probs", None) is not None for s in group)
+            if aligned or not sampler.config.require_logprobs or attempt == LOGPROB_RESAMPLES:
+                return
+            resampled += 1
+            log.warning(
+                "sampling a group again: its log-probs do not line up with its tokens (try %d/%d)",
+                attempt + 1,
+                LOGPROB_RESAMPLES,
+            )
 
     await asyncio.gather(*(one(g) for g in groups))
     flat = [s for g in groups for s in g]
@@ -821,6 +955,13 @@ async def sample_groups(
     # The trainers tensorize rollout_log_probs for the whole batch, so keep all or none. If any
     # sample's log-probs do not align, drop them everywhere and let the trainer recompute them.
     kept = aligned == len(flat)
+    if not kept and sampler.config.require_logprobs:
+        raise RolloutError(
+            f"{len(flat) - aligned}/{len(flat)} samples came back without log-probs that line up "
+            "with their tokens, and the trainer reads them from every sample (as with --use-tis). "
+            f"With {ENV_PREFIX}TOKEN_IDS on, an endpoint that reports the sampled token ids lines "
+            "them up exactly"
+        )
     if not kept:
         for sample in flat:
             sample.rollout_log_probs = None
@@ -838,19 +979,25 @@ async def sample_groups(
         "coreweave/truncated_fraction": truncated / max(1, len(flat)),
         "coreweave/logprobs_aligned_fraction": aligned / max(1, len(flat)),
         "coreweave/logprobs_kept": 1.0 if kept else 0.0,
+        "coreweave/resampled_groups": float(resampled),
     }
 
 
 __all__ = [
     "Completion",
     "CompletionSampler",
+    "LOGPROB_READERS",
+    "LOGPROB_RESAMPLES",
     "RolloutConfig",
     "RolloutError",
     "align_logprobs",
+    "as_cache_salt",
     "check_stop_limits",
     "decode_routed_experts",
     "fill_group",
     "omitted_stop_token",
+    "request_seed",
+    "rollout_cache_salt",
     "same_token",
     "same_tokens",
     "sample_groups",

@@ -28,6 +28,8 @@ from itertools import islice
 from pathlib import Path
 from typing import Any
 
+from cwtrain.integrations._env import flag
+from cwtrain.integrations.nvext import SERVED_IDENTITY_FILE
 from cwtrain.integrations.rollout import RolloutConfig
 
 
@@ -100,6 +102,10 @@ def prepare_config(config: dict[str, Any], *, rows=None) -> dict[str, Any]:
     gym["coreweave_api_key_file"] = cw.get("api_key_file")
     gym["coreweave_training"] = True
     gym["coreweave_tokenizer"] = config["policy"]["tokenizer"]["name"]
+    # where the weight synchronizer records the identity the deployment serves
+    state_dir = cw.get("state_dir") or os.environ.get("CWTRAIN_HOTLOAD_STATE_DIR", "").strip()
+    # Absolute: Gym's servers do not start in the driver's working directory.
+    served = Path(state_dir or "/work/hotload").resolve() / SERVED_IDENTITY_FILE
     gym.setdefault("policy_model", {}).setdefault("responses_api_models", {}).setdefault(
         "vllm_model", {}
     ).update(
@@ -108,6 +114,10 @@ def prepare_config(config: dict[str, Any], *, rows=None) -> dict[str, Any]:
             "chat_template_kwargs": config["policy"]["tokenizer"].get("chat_template_kwargs"),
             # cwtrain's Gym model caps max_tokens to the room the prompt leaves.
             "max_model_len": int(cw["max_model_len"]),
+            # and salts each request with the served identity (cwtrain.integrations.nvext)
+            "cache_salt_file": str(served),
+            # and seeds each one, unless coreweave_cfg.seeds or CWTRAIN_ROLLOUT_SEEDS turns it off
+            "seeds": _seeds(cw),
         }
     )
     for field, path in (gym.get("coreweave_secrets") or {}).items():
@@ -161,6 +171,13 @@ def prepare_config(config: dict[str, Any], *, rows=None) -> dict[str, Any]:
         if not gym.get("config_paths"):
             raise ValueError("Custom Gym data requires env.nemo_gym.config_paths")
     return config
+
+
+def _seeds(cw: Mapping[str, Any]) -> bool:
+    """``coreweave_cfg.seeds``, else ``CWTRAIN_ROLLOUT_SEEDS``, as the generation backend does."""
+    if cw.get("seeds") is None:
+        return flag(os.environ, "CWTRAIN_ROLLOUT_SEEDS", True)
+    return flag({"coreweave_cfg.seeds": str(cw["seeds"])}, "coreweave_cfg.seeds", True)
 
 
 def actor_config(initial: dict[str, Any], environ=None) -> dict[str, Any]:

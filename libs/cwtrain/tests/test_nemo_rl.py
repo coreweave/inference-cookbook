@@ -347,6 +347,9 @@ def test_weight_synchronizer_publishes_full_then_deltas_then_cuts(
         policy, SimpleNamespace(), cfg, hf_checkpoint=str(base), loader=loader
     )
     assert sync.is_stale and sync.config.identity(0) == "nemo-test-v000000"
+    assert sync.served_identity is None
+    served = tmp_path / "state" / "served_identity"  # where the Gym model server reads it
+    assert not served.exists()
 
     m0 = sync.sync_weights()  # v0: full snapshot of the export
     assert not sync.is_stale and m0["hotload/incremental"] == 0.0
@@ -355,6 +358,8 @@ def test_weight_synchronizer_publishes_full_then_deltas_then_cuts(
     assert m1["hotload/incremental"] == 1.0 and m1["hotload/tensors_changed"] == 1
     m2 = sync.sync_weights()  # v2: identical export, nothing published
     assert m2["hotload/skipped_empty"] == 1.0
+    assert sync.served_identity == "nemo-test-v000001"  # the deployment still serves v1
+    assert served.read_text().strip() == "nemo-test-v000001"
     m3 = sync.sync_weights()  # v3: full_every=3, chain cut with a full snapshot
     assert m3["hotload/incremental"] == 0.0
 
@@ -972,6 +977,51 @@ def test_generate_forwards_configured_stop_criteria(monkeypatch) -> None:
     assert by_prompt[(7, 8)]["stop"] == ["</answer>"]
     assert all(b["stop_token_ids"] == [999, 2] for b in seen)
     assert all(b["include_stop_str_in_output"] is True for b in seen)
+
+
+@pytest.mark.parametrize(
+    ("sampling", "compared"),
+    [({"temperature": 0.7}, False), ({"top_p": 0.9}, False), ({"top_k": 20}, False),
+     ({"top_k": -1}, True)],
+)  # fmt: skip
+def test_required_logprobs_need_sampling_without_temperature_top_p_or_top_k(
+    sampling, compared
+) -> None:
+    from cwtrain.integrations.nemo_rl.generation import CoreWeaveGeneration
+    from cwtrain.integrations.rollout import RolloutError
+
+    config = {**gen_config(importance_sampling=True), **sampling}
+    if compared:  # top_k -1 turns top-k off, as in vLLM
+        CoreWeaveGeneration(config, Tokenizer())
+    else:
+        with pytest.raises(RolloutError, match="which it reports before them"):
+            CoreWeaveGeneration(config, Tokenizer())
+    # without the correction nothing compares them, even with log-probs required (as Gym does)
+    CoreWeaveGeneration({**gen_config(require_logprobs=True), **sampling}, Tokenizer())
+
+
+def test_requests_are_salted_with_the_identity_the_deployment_serves(monkeypatch) -> None:
+    from cwtrain.integrations.nemo_rl.generation import CoreWeaveGeneration
+
+    def respond(body):
+        choice = {
+            "index": 0,
+            "text": "ab",
+            "finish_reason": "length",
+            "logprobs": {"token_logprobs": [-0.1, -0.2], "tokens": ["token_id:97", "token_id:98"]},
+        }
+        return httpx.Response(200, json={"choices": [choice]})
+
+    seen = use_transport(monkeypatch, respond)
+    data = {"input_ids": torch.tensor([[5, 6]]), "input_lengths": torch.tensor([2])}
+    gen = CoreWeaveGeneration(gen_config(), Tokenizer())
+    gen.generate(data, greedy=False)  # no synchronizer yet: no salt
+    gen.weight_synchronizer = SimpleNamespace(served_identity="nemo-test-v000004")
+    gen.generate(data, greedy=False)
+    assert "nvext" not in seen[0]
+    assert seen[1]["nvext"] == {"cache_salt": "nemo-test-v000004"}
+    # one request per distinct prompt, with n choices on one engine: no seed needed
+    assert "seed" not in seen[0] and "seed" not in seen[1]
 
 
 def test_generate_rejects_missing_logprobs_when_required(monkeypatch) -> None:

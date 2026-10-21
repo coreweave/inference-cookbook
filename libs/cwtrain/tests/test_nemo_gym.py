@@ -48,6 +48,44 @@ def test_flag_converts_dapo_without_mutating_source(config):
     assert result["grpo"]["max_rollout_turns"] == 1
     assert result["policy"]["generation"]["coreweave_cfg"]["require_logprobs"] is True
     assert result["data"]["default"]["processor"] == "nemo_gym_data_processor"
+    model = result["env"]["nemo_gym"]["policy_model"]["responses_api_models"]["vllm_model"]
+    # the Gym model server salts with what the weight synchronizer records in the state dir
+    state_dir = config["policy"]["generation"]["coreweave_cfg"]["state_dir"]
+    assert model["cache_salt_file"] == str(Path(state_dir).resolve() / "served_identity")
+
+
+def test_the_served_identity_path_is_absolute(config, monkeypatch, tmp_path):
+    # Gym's servers do not start in the driver's working directory
+    monkeypatch.chdir(tmp_path)
+    config["policy"]["generation"]["coreweave_cfg"]["state_dir"] = "relative/state"
+    rows = [
+        {"prompt": [{"role": "user", "content": "1 + 1?"}], "reward_model": {"ground_truth": "2"}}
+    ]
+    model = prepare_config(config, rows=rows)["env"]["nemo_gym"]["policy_model"][
+        "responses_api_models"
+    ]["vllm_model"]
+    assert model["cache_salt_file"] == str(tmp_path.resolve() / "relative/state/served_identity")
+
+
+@pytest.mark.parametrize(
+    ("cw_seeds", "env_seeds", "expected"),
+    [(None, None, True), (False, None, False), ("false", "1", False), (None, "0", False)],
+)
+def test_gym_seeds_follow_coreweave_cfg_then_the_environment(
+    config, monkeypatch, cw_seeds, env_seeds, expected
+):
+    if cw_seeds is not None:
+        config["policy"]["generation"]["coreweave_cfg"]["seeds"] = cw_seeds
+    if env_seeds is None:
+        monkeypatch.delenv("CWTRAIN_ROLLOUT_SEEDS", raising=False)
+    else:
+        monkeypatch.setenv("CWTRAIN_ROLLOUT_SEEDS", env_seeds)
+    rows = [
+        {"prompt": [{"role": "user", "content": "1 + 1?"}], "reward_model": {"ground_truth": "2"}}
+    ]
+    result = prepare_config(config, rows=rows)
+    model = result["env"]["nemo_gym"]["policy_model"]["responses_api_models"]["vllm_model"]
+    assert model["seeds"] is expected
 
 
 def test_disabled_flag_does_not_load_data(config):

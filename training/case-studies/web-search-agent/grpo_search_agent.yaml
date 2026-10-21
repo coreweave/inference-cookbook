@@ -10,6 +10,14 @@ defaults: "grpo_coreweave.yaml"
 grpo:
   max_val_samples: null
 
+loss_fn:
+  # The results in the README were trained without the recipe's truncated importance sampling.
+  # Remove these three lines to train with it. The ratio must go too: NeMo-RL applies a ratio
+  # with no truncation type as an error at the first training step.
+  use_importance_sampling_correction: false
+  truncated_importance_sampling_type: null
+  truncated_importance_sampling_ratio: null
+
 policy:
   # Tokens per trajectory: the prompt, every turn and every tool result. At most the deployment's
   # max-model-len. One sequence's fp32 logits take about 0.5 MiB per token on top of 64 GiB of
