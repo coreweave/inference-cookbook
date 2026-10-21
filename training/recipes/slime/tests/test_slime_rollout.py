@@ -129,4 +129,6 @@ def test_each_rollout_is_salted_with_the_run_and_the_rollout(rollout, monkeypatc
     module, seen = rollout
     monkeypatch.setenv("CWTRAIN_HOTLOAD_RUN_ID", "grpo-7")
     module.generate_rollout(args(False), 3, Data())
-    assert seen["salts"] == ["grpo-7-r3"]
+    from cwtrain.integrations.nvext import _PROCESS_TOKEN
+
+    assert seen["salts"] == [f"grpo-7-{_PROCESS_TOKEN}-r3"]

@@ -110,7 +110,7 @@ class HotLoadWeightSynchronizer(WeightSynchronizer):
         self.state_dir = Path(self.config.state_dir or cw.get("state_dir") or "/work/hotload")
         # The Gym model server salts its requests with the identity recorded here. A record left
         # by an earlier run would name weights the deployment may no longer serve.
-        self._served_file = self.state_dir / SERVED_IDENTITY_FILE
+        self._served_file = (self.state_dir / SERVED_IDENTITY_FILE).resolve()
         write_served_identity(self._served_file, None)
         # The deployment serves this layout. Every export must match each tensor's dtype and shape.
         self.base_layout = {

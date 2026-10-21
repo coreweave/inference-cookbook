@@ -144,7 +144,8 @@ from the previous weights. Either way, requests carry the identity that the depl
 cache salt (`nvext.cache_salt`), so a prompt cached under earlier weights never serves a later
 step, even with `preserve`. The Gym rollout path salts its requests the same way: the
 synchronizer records the served identity in `<state_dir>/served_identity`, and cwtrain's Gym
-model server reads it for every request.
+model server reads it for every request. So Gym's servers must be able to read the trainer's
+`state_dir`. A request that can't read it fails instead of going out unsalted.
 
 The recipe runs the DTensor (Automodel) policy backend. The Megatron worker extension exists but is
 not tested on a live deployment.

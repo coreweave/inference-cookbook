@@ -787,12 +787,17 @@ def test_salts_follow_vllms_rules() -> None:
         asyncio.run(sampler.sample([1], 1, max_tokens=4, temperature=1.0, cache_salt="a/b"))
 
 
-def test_a_rollouts_salt_names_the_run_and_the_rollout() -> None:
+def test_a_rollouts_salt_names_the_run_the_process_and_the_rollout(monkeypatch) -> None:
+    from cwtrain.integrations import nvext
+
     env = {"CWTRAIN_HOTLOAD_RUN_ID": "grpo-7"}
-    assert rollout_cache_salt(3, env) == "grpo-7-r3"
+    monkeypatch.setattr(nvext, "_PROCESS_TOKEN", "a1b2c3")
+    assert rollout_cache_salt(3, env) == "grpo-7-a1b2c3-r3"
     assert rollout_cache_salt(3, env) != rollout_cache_salt(4, env)
-    # without a run ID, the process draws one: still unique per run, stable within it
-    assert rollout_cache_salt(3, {}) == rollout_cache_salt(3, {}) != "grpo-7-r3"
+    # a run resumed from a checkpoint keeps its run ID and rollout numbers, in a new process
+    monkeypatch.setattr(nvext, "_PROCESS_TOKEN", "d4e5f6")
+    assert rollout_cache_salt(3, env) == "grpo-7-d4e5f6-r3"
+    assert rollout_cache_salt(3, {}) == "run-d4e5f6-r3"  # no run ID
 
 
 def test_sample_groups_salts_every_request() -> None:

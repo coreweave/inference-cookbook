@@ -108,9 +108,11 @@ hot-loaded. So, unless you set it, the launcher sets
 under the previous weights, instead of reusing cached prompt prefixes across the swap. Set
 `preserve` to keep the cache.
 
-Either way, each rollout's requests carry a cache salt of the run and the rollout
-(`nvext.cache_salt`), so a prompt cached under earlier weights never serves a later rollout, even
-with `preserve`, as long as the hook waits for every replica (`HOTLOAD_WAIT=1`, the default). With
+Either way, each rollout's requests carry a cache salt of the run, the rollout and a token drawn
+once per process (`nvext.cache_salt`). A run resumed from a checkpoint repeats rollout numbers
+under the same run ID, and the token keeps it from reusing the earlier process's salts. So a
+prompt cached under earlier weights never serves a later rollout, even with `preserve`, as long
+as the hook waits for every replica (`HOTLOAD_WAIT=1`, the default). With
 `HOTLOAD_WAIT=0`, the rollout function logs a warning: a replica that has not switched yet would
 cache old KV under the new salt.
 

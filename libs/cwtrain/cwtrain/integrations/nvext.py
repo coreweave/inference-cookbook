@@ -32,8 +32,9 @@ log = logging.getLogger(__name__)
 MAX_CACHE_SALT = 128
 _SALT_FORBIDDEN = frozenset("@/\\\0")
 
-#: Names the run when ``CWTRAIN_HOTLOAD_RUN_ID`` is unset; drawn once per process.
-_PROCESS_RUN = "run-" + secrets.token_hex(6)
+#: Drawn once per process. A run resumed from a checkpoint keeps its run ID and rollout numbers but
+#: trains other weights, so its salts must not repeat the ones an earlier process sent.
+_PROCESS_TOKEN = secrets.token_hex(6)
 
 #: The file in a NeMo-RL run's state directory that holds the identity the deployment serves.
 SERVED_IDENTITY_FILE = "served_identity"
@@ -71,17 +72,18 @@ def warn_without_wait(wait: bool) -> None:
 
 
 def rollout_cache_salt(rollout: int | str, environ: Mapping[str, str] | None = None) -> str:
-    """The cache salt of one rollout of this run, ``<run>-r<rollout>``.
+    """The cache salt of one rollout of this process, ``<run>-<token>-r<rollout>``.
 
-    The run is ``CWTRAIN_HOTLOAD_RUN_ID``, the prefix of every identity the run publishes, or a
-    token drawn once per process. Neither two runs on one deployment nor two rollouts of one run
-    share cached prompts. Within a rollout, the choices of a group and the turns of a
-    conversation still do. Warns once when ``CWTRAIN_HOTLOAD_WAIT`` is off.
+    The run is ``CWTRAIN_HOTLOAD_RUN_ID``, the prefix of every identity the run publishes, and the
+    token is drawn once per process. Neither two runs on one deployment, nor two rollouts of one
+    run, nor a run and its resumption from a checkpoint share cached prompts. Within a rollout,
+    the choices of a group and the turns of a conversation still do. Warns once when
+    ``CWTRAIN_HOTLOAD_WAIT`` is off.
     """
     env = os.environ if environ is None else environ
     warn_without_wait(flag(env, "CWTRAIN_HOTLOAD_WAIT", True))
-    run = env.get("CWTRAIN_HOTLOAD_RUN_ID", "").strip() or _PROCESS_RUN
-    return as_cache_salt(f"{run}-r{rollout}")
+    run = env.get("CWTRAIN_HOTLOAD_RUN_ID", "").strip() or "run"
+    return as_cache_salt(f"{run}-{_PROCESS_TOKEN}-r{rollout}")
 
 
 def write_served_identity(path: str | os.PathLike[str], identity: str | None) -> None:
@@ -105,10 +107,31 @@ def served_salt(path: str | os.PathLike[str]) -> str | None:
     return as_cache_salt(identity) if identity else None
 
 
+def require_served_salt(path: str | os.PathLike[str]) -> str:
+    """:func:`served_salt` for a request that must be salted.
+
+    NeMo-RL's weight synchronizer records the identity at every refit, the first one before any
+    rollout. So a request that finds no record runs where it can't read the trainer's state
+    directory, and it must not go out unsalted.
+
+    Raises:
+        RuntimeError: ``path`` holds no identity.
+    """
+    salt = served_salt(path)
+    if salt is None:
+        raise RuntimeError(
+            f"no served identity in {path}: the weight synchronizer records it at every refit, "
+            "so Gym's servers must run where they can read the trainer's coreweave_cfg.state_dir. "
+            "Requests would otherwise go out without a cache salt"
+        )
+    return salt
+
+
 __all__ = [
     "MAX_CACHE_SALT",
     "SERVED_IDENTITY_FILE",
     "as_cache_salt",
+    "require_served_salt",
     "rollout_cache_salt",
     "served_salt",
     "warn_without_wait",

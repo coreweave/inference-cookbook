@@ -12,6 +12,7 @@ import pytest
 from cwtrain.integrations import nvext
 from cwtrain.integrations.nvext import (
     as_cache_salt,
+    require_served_salt,
     rollout_cache_salt,
     served_salt,
     with_nvext,
@@ -42,7 +43,7 @@ def fresh_warning(monkeypatch):
 def test_a_rollouts_salt_warns_once_when_hot_loads_are_not_awaited(caplog, fresh_warning) -> None:
     env = {"CWTRAIN_HOTLOAD_RUN_ID": "grpo-7", "CWTRAIN_HOTLOAD_WAIT": "0"}
     with caplog.at_level(logging.WARNING, logger="cwtrain.integrations.nvext"):
-        assert rollout_cache_salt(3, env) == "grpo-7-r3"
+        assert rollout_cache_salt(3, env) == f"grpo-7-{nvext._PROCESS_TOKEN}-r3"
         rollout_cache_salt(4, env)
     assert caplog.text.count("CWTRAIN_HOTLOAD_WAIT is off") == 1
     caplog.clear()
@@ -61,3 +62,11 @@ def test_the_served_identity_is_recorded_and_read_as_a_salt(tmp_path: Path) -> N
     assert served_salt(path) == "run-7-v000004" and not list(path.parent.glob("*.tmp"))
     write_served_identity(path, None)
     assert served_salt(path) is None and not path.exists()
+
+
+def test_a_request_that_must_be_salted_fails_without_a_served_identity(tmp_path: Path) -> None:
+    path = tmp_path / "served_identity"
+    with pytest.raises(RuntimeError, match="must run where they can read the trainer's"):
+        require_served_salt(path)
+    write_served_identity(path, "run-7-v000003")
+    assert require_served_salt(path) == "run-7-v000003"

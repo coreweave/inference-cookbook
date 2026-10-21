@@ -15,18 +15,16 @@ IDs. Only the messages after that turn are rendered, so the trajectory's token p
 changes.
 
 Each request carries the identity that the deployment serves as its cache salt, read from the
-file that the weight synchronizer writes (:mod:`cwtrain.integrations.nvext`).
+file that the weight synchronizer writes (:mod:`cwtrain.integrations.nvext`). A request fails if
+the file holds no identity, instead of going out unsalted.
 """
 
 import json
-import logging
 import math
 from typing import Any
 
 from cwtrain.integrations.gym_tool_calls import parse_tool_calls
-from cwtrain.integrations.nvext import served_salt, with_nvext
-
-log = logging.getLogger(__name__)
+from cwtrain.integrations.nvext import require_served_salt, with_nvext
 
 __all__ = ["chat_response", "completion_request", "parse_tool_calls"]
 
@@ -260,11 +258,8 @@ def run_server() -> None:
 
         async def create_chat_completion(self, **kwargs):
             url = self.base_url + "/completions"
-            salt = served_salt(self.cache_salt_file) if self.cache_salt_file else None
-            if self.cache_salt_file and salt is None:
-                log.warning(
-                    "no served identity in %s yet; sending no cache salt", self.cache_salt_file
-                )
+            # fails closed: a request must not go out unsalted (cwtrain.integrations.nvext)
+            salt = require_served_salt(self.cache_salt_file) if self.cache_salt_file else None
             try:
                 body = completion_request(
                     kwargs, self.tokenizer, self.max_model_len, cache_salt=salt

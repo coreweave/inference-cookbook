@@ -103,7 +103,8 @@ def prepare_config(config: dict[str, Any], *, rows=None) -> dict[str, Any]:
     gym["coreweave_tokenizer"] = config["policy"]["tokenizer"]["name"]
     # where the weight synchronizer records the identity the deployment serves
     state_dir = cw.get("state_dir") or os.environ.get("CWTRAIN_HOTLOAD_STATE_DIR", "").strip()
-    served = Path(state_dir or "/work/hotload") / SERVED_IDENTITY_FILE
+    # Absolute: Gym's servers do not start in the driver's working directory.
+    served = Path(state_dir or "/work/hotload").resolve() / SERVED_IDENTITY_FILE
     gym.setdefault("policy_model", {}).setdefault("responses_api_models", {}).setdefault(
         "vllm_model", {}
     ).update(
