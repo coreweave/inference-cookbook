@@ -25,6 +25,7 @@ Configuration lives under ``policy.generation.coreweave_cfg``. The rollout keys 
                       ``policy.max_total_sequence_length``.
 ``token_id_prompts``  Send prompts as token ids (default true). If the endpoint rejects them and
                       a text request succeeds, the run sends text from then on.
+``seeds``             Send a random seed with every request (default true).
 ``require_logprobs``  Fail the step when a response has no aligned log-probs (default true).
 ``importance_sampling`` NeMo-RL's importance-sampling correction compares the log-probs with its
                       own (default false; the recipe's config ties it to
@@ -73,6 +74,7 @@ _ENV_KEYS = {
     "logprobs": "LOGPROBS",
     "token_ids": "TOKEN_IDS",
     "token_id_prompts": "TOKEN_ID_PROMPTS",
+    "seeds": "SEEDS",
 }
 
 

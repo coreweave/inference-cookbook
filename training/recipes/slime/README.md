@@ -147,6 +147,8 @@ mode does not work with `--colocate`.
 - takes the exact sampled token ids. It re-tokenizes the text only when the endpoint does not
   report them.
 - scores the responses with slime's own `--rm-type`.
+- gives every request its own random seed, so that replicas that start together do not sample
+  alike (`CWTRAIN_ROLLOUT_SEEDS=0` turns this off).
 - attaches the endpoint's sampled-token log-probs as `rollout_log_probs` when they align with the
   response tokens, including the token that ended the response. With `--use-tis`, a group where
   they do not align is sampled again, up to twice, before the rollout fails. Without it, they stay

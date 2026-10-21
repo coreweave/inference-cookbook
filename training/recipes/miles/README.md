@@ -103,6 +103,8 @@ over `cwtrain.integrations.rollout`:
 - Responses come back as the exact sampled token ids. Only when the endpoint does not report them
   does it re-tokenize the text.
 - Rewards come from miles' own `--rm-type`.
+- Every request carries its own random seed, so that replicas that start together do not sample
+  alike (`CWTRAIN_ROLLOUT_SEEDS=0` turns this off).
 - When the endpoint's sampled-token log-probs align with the response tokens, including the token
   that ended the response, it attaches them as `rollout_log_probs`. With `--use-tis`, a group where
   they do not align is sampled again, up to twice, before the rollout fails. Without it, they stay

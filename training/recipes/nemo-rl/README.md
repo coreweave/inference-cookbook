@@ -145,7 +145,9 @@ cache salt (`nvext.cache_salt`), so a prompt cached under earlier weights never 
 step, even with `preserve`. The Gym rollout path salts its requests the same way: the
 synchronizer records the served identity in `<state_dir>/served_identity`, and cwtrain's Gym
 model server reads it for every request. So Gym's servers must be able to read the trainer's
-`state_dir`. A request that can't read it fails instead of going out unsalted.
+`state_dir`. A request that can't read it fails instead of going out unsalted. Every request also
+carries its own random seed (`coreweave_cfg.seeds`, default on), so that replicas that start
+together do not sample alike.
 
 The recipe runs the DTensor (Automodel) policy backend. The Megatron worker extension exists but is
 not tested on a live deployment.

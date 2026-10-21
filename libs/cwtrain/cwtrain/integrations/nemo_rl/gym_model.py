@@ -21,8 +21,11 @@ the file holds no identity, instead of going out unsalted.
 
 import json
 import math
+import os
+import secrets
 from typing import Any
 
+from cwtrain.integrations._env import flag
 from cwtrain.integrations.gym_tool_calls import parse_tool_calls
 from cwtrain.integrations.nvext import require_served_salt, with_nvext
 
@@ -171,6 +174,10 @@ def completion_request(
     )
     if cache_salt:
         result = with_nvext(result, cache_salt=cache_salt)
+    # As cwtrain's sampler does: a request without its own seed takes the replica's random state,
+    # which every replica starts from the same default (cwtrain.integrations.rollout, "Seeds").
+    if "seed" not in result and flag(os.environ, "CWTRAIN_ROLLOUT_SEEDS", True):
+        result["seed"] = secrets.randbelow(2**62)
     return result
 
 

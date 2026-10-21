@@ -20,6 +20,7 @@ import pytest
 from cwtrain.errors import CWTrainError
 from cwtrain.integrations.rollout import (
     LOGPROB_READERS,
+    SEED_LIMIT,
     Completion,
     CompletionSampler,
     RolloutConfig,
@@ -811,6 +812,34 @@ def test_sample_groups_salts_every_request() -> None:
         )
     )
     assert [req["nvext"] for req in seen] == [{"cache_salt": "s"}] * 2
+
+
+def test_every_request_carries_its_own_seed() -> None:
+    transport, seen = make_server([completions_response(["ab", "cd"])] * 2)
+    config = RolloutConfig(base_url="https://gw/v1", model="m")
+    sampler = CompletionSampler(config, transport=transport)
+    for _ in range(2):
+        asyncio.run(sampler.sample([1], 2, max_tokens=4, temperature=1.0))
+    seeds = [req["seed"] for req in seen]
+    assert all(0 <= seed < SEED_LIMIT for seed in seeds) and seeds[0] != seeds[1]
+
+
+def test_each_choice_with_routes_gets_its_own_seed() -> None:
+    transport, seen = make_server(
+        [routed_response([97, 98], encode_routes(routes_for(4, seed=s))) for s in (1, 2)]
+    )
+    sampler = CompletionSampler(ROUTED, transport=transport)
+    asyncio.run(sampler.sample([1, 2, 3], 2, max_tokens=4, temperature=1.0))
+    assert len({req["seed"] for req in seen}) == 2  # equal seeds would sample equal choices
+
+
+def test_seeds_can_be_turned_off() -> None:
+    transport, seen = make_server([completions_response(["ab"])])
+    env = {**ROLLOUT_ENV, "CWTRAIN_ROLLOUT_BASE_URL": "https://gw/v1", "CWTRAIN_ROLLOUT_SEEDS": "0"}
+    config = RolloutConfig.from_env(env)
+    sampler = CompletionSampler(config, transport=transport)
+    asyncio.run(sampler.sample([1], 1, max_tokens=4, temperature=1.0))
+    assert config.seeds is False and "seed" not in seen[0]
 
 
 def test_routes_are_not_requested_unless_asked_for() -> None:

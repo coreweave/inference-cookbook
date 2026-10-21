@@ -31,6 +31,8 @@ Configuration (environment of the process that runs the rollout function):
                                  trainer encodes and trains on; ``0`` sends the rendered text.
 ``CWTRAIN_ROLLOUT_ROUTED_EXPERTS`` ``1`` asks a Mixture-of-Experts deployment for each sequence's
                                  routed experts; ``0`` (default) does not. See "Routed experts".
+``CWTRAIN_ROLLOUT_SEEDS``        ``1`` (default) sends a random seed with every request; ``0``
+                                 leaves sampling to each replica's own random state. See "Seeds".
 ==============================  =====================================================
 
 Responses
@@ -91,6 +93,16 @@ hot-load hook waits for the hot-load (the default). A request with the new salt 
 reach a replica that has not switched yet, which would cache old KV under the new salt. Without
 the wait, the rollout function logs a warning.
 
+Seeds
+-----
+
+Every request carries its own random ``seed``, below 2**62. Without one, a replica takes a request's
+sampling noise from its engine's random state. Every replica starts that state from the same
+default seed, so replicas that start together sample a prompt identically when it arrives as the
+same request on each. The one-choice requests of a group with routed experts can land like that.
+With ``n`` > 1, vLLM seeds the choices ``seed``, ``seed + 1`` and so on. Seeds make sampling
+independent of the replica, not reproducible: decoding on a deployment is not bit-exact.
+
 Routed experts
 --------------
 
@@ -122,6 +134,7 @@ import logging
 import math
 import os
 import random
+import secrets
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -171,6 +184,16 @@ def check_stop_limits(
             )
 
 
+#: Request seeds stay below this, so that vLLM's ``seed + n - 1`` for a request's last choice still
+#: fits the engine's int64.
+SEED_LIMIT = 2**62
+
+
+def request_seed() -> int:
+    """A random seed for one request (see "Seeds" above)."""
+    return secrets.randbelow(SEED_LIMIT)
+
+
 @dataclass(frozen=True)
 class RolloutConfig:
     base_url: str
@@ -192,6 +215,8 @@ class RolloutConfig:
     #: Fail a batch in which a sample's log-probs do not align, instead of dropping them from the
     #: whole batch. For a trainer that reads them from every sample (see :meth:`for_trainer`).
     require_logprobs: bool = False
+    #: Send a random seed with every request (see "Seeds" above).
+    seeds: bool = True
 
     def __post_init__(self) -> None:
         for name, value in (("concurrency", self.concurrency), ("max_attempts", self.max_attempts)):
@@ -258,6 +283,7 @@ class RolloutConfig:
             token_ids=flag(env, f"{ENV_PREFIX}TOKEN_IDS", True, labels=names),
             token_id_prompts=flag(env, f"{ENV_PREFIX}TOKEN_ID_PROMPTS", True, labels=names),
             routed_experts=flag(env, f"{ENV_PREFIX}ROUTED_EXPERTS", False, labels=names),
+            seeds=flag(env, f"{ENV_PREFIX}SEEDS", True, labels=names),
         )
 
     @classmethod
@@ -425,6 +451,8 @@ class CompletionSampler:
                 payload["return_tokens_as_token_ids"] = True
         if self.config.routed_experts:
             return await self._sample_with_routes(prompt, n, payload)
+        if self.config.seeds:
+            payload["seed"] = request_seed()
         async with self._semaphore:
             body = await self._post_with_retry(payload)
         choices = sorted(body.get("choices") or [], key=lambda c: c.get("index", 0))
@@ -452,8 +480,12 @@ class CompletionSampler:
         if isinstance(prompt, str):
             raise RolloutError("routed experts need a token-id prompt")
         payload = with_nvext({**payload, "n": 1}, extra_fields=["routed_experts"])
+        # one seed per request: choices of one prompt with the same seed would come back equal
+        payloads = [
+            {**payload, "seed": request_seed()} if self.config.seeds else payload for _ in range(n)
+        ]
         async with self._semaphore:
-            bodies = await _gather_all([self._post_with_retry(payload) for _ in range(n)])
+            bodies = await _gather_all([self._post_with_retry(body) for body in payloads])
         completions = []
         for index, body in enumerate(bodies):
             choices = body.get("choices") or []
@@ -963,6 +995,7 @@ __all__ = [
     "decode_routed_experts",
     "fill_group",
     "omitted_stop_token",
+    "request_seed",
     "rollout_cache_salt",
     "same_token",
     "same_tokens",
