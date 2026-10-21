@@ -347,6 +347,7 @@ def test_weight_synchronizer_publishes_full_then_deltas_then_cuts(
         policy, SimpleNamespace(), cfg, hf_checkpoint=str(base), loader=loader
     )
     assert sync.is_stale and sync.config.identity(0) == "nemo-test-v000000"
+    assert sync.served_identity is None
 
     m0 = sync.sync_weights()  # v0: full snapshot of the export
     assert not sync.is_stale and m0["hotload/incremental"] == 0.0
@@ -355,6 +356,7 @@ def test_weight_synchronizer_publishes_full_then_deltas_then_cuts(
     assert m1["hotload/incremental"] == 1.0 and m1["hotload/tensors_changed"] == 1
     m2 = sync.sync_weights()  # v2: identical export, nothing published
     assert m2["hotload/skipped_empty"] == 1.0
+    assert sync.served_identity == "nemo-test-v000001"  # the deployment still serves v1
     m3 = sync.sync_weights()  # v3: full_every=3, chain cut with a full snapshot
     assert m3["hotload/incremental"] == 0.0
 
@@ -993,6 +995,28 @@ def test_required_logprobs_need_sampling_without_temperature_top_p_or_top_k(
             CoreWeaveGeneration(config, Tokenizer())
     # without the correction nothing compares them, even with log-probs required (as Gym does)
     CoreWeaveGeneration({**gen_config(require_logprobs=True), **sampling}, Tokenizer())
+
+
+def test_requests_are_salted_with_the_identity_the_deployment_serves(monkeypatch) -> None:
+    from cwtrain.integrations.nemo_rl.generation import CoreWeaveGeneration
+
+    def respond(body):
+        choice = {
+            "index": 0,
+            "text": "ab",
+            "finish_reason": "length",
+            "logprobs": {"token_logprobs": [-0.1, -0.2], "tokens": ["token_id:97", "token_id:98"]},
+        }
+        return httpx.Response(200, json={"choices": [choice]})
+
+    seen = use_transport(monkeypatch, respond)
+    data = {"input_ids": torch.tensor([[5, 6]]), "input_lengths": torch.tensor([2])}
+    gen = CoreWeaveGeneration(gen_config(), Tokenizer())
+    gen.generate(data, greedy=False)  # no synchronizer yet: no salt
+    gen.weight_synchronizer = SimpleNamespace(served_identity="nemo-test-v000004")
+    gen.generate(data, greedy=False)
+    assert "nvext" not in seen[0]
+    assert seen[1]["nvext"] == {"cache_salt": "nemo-test-v000004"}
 
 
 def test_generate_rejects_missing_logprobs_when_required(monkeypatch) -> None:

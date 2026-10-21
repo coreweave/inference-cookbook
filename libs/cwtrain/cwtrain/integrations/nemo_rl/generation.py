@@ -48,6 +48,7 @@ from cwtrain.integrations.rollout import (
     RolloutConfig,
     RolloutError,
     align_logprobs,
+    as_cache_salt,
     check_stop_limits,
     omitted_stop_token,
     sample_prompt,
@@ -272,6 +273,7 @@ class CoreWeaveGeneration(GenerationInterface):
             "stop_token_ids": self.stop_token_ids or None,
             # NeMo-RL's own backends keep the stop string in the output, so do the same here.
             "include_stop_str_in_output": True if stops else None,
+            "cache_salt": self._cache_salt(),
         }
         completions, still = await sample_prompt(
             sampler,
@@ -284,6 +286,11 @@ class CoreWeaveGeneration(GenerationInterface):
         # Rows finish in any order. After one row falls back to text, none switches back.
         self.token_id_prompts = self.token_id_prompts and still
         return completions
+
+    def _cache_salt(self) -> str | None:
+        """The served identity, so that no version reuses prompts another one cached."""
+        identity = getattr(self.weight_synchronizer, "served_identity", None)
+        return as_cache_salt(identity) if identity else None
 
     def _decode(self, completion: Completion) -> tuple[list[int], list[float], bool]:
         """Response token ids, aligned log-probs (or none) and the truncation flag."""

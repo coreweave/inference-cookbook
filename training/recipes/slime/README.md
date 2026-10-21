@@ -108,6 +108,10 @@ hot-loaded. So, unless you set it, the launcher sets
 under the previous weights, instead of reusing cached prompt prefixes across the swap. Set
 `preserve` to keep the cache.
 
+Either way, each rollout's requests carry a cache salt of the run and the rollout
+(`nvext.cache_salt`), so a prompt cached under earlier weights never serves a later rollout, even
+with `preserve`, as long as the hook waits for every replica (`HOTLOAD_WAIT=1`, the default).
+
 Snapshot identities are `<RUN_ID>-vNNNNNN`. The platform keys weight versions by identity, so never
 reuse a run ID for different weights.
 

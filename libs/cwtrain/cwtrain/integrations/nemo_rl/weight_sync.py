@@ -144,6 +144,13 @@ class HotLoadWeightSynchronizer(WeightSynchronizer):
     def is_stale(self) -> bool:
         return self._stale
 
+    @property
+    def served_identity(self) -> str | None:
+        """The identity the deployment serves after the last sync; ``None`` before the first."""
+        if self._last_published is None:
+            return None
+        return self.config.identity(self._last_published[0])
+
     def mark_stale(self) -> None:
         self._stale = True
 

@@ -24,7 +24,9 @@ from cwtrain.integrations.rollout import (
     CompletionSampler,
     RolloutConfig,
     RolloutError,
+    as_cache_salt,
     decode_routed_experts,
+    rollout_cache_salt,
     sample_groups,
     sample_prompt,
 )
@@ -753,6 +755,57 @@ def test_routed_experts_take_one_request_per_choice_and_come_back_decoded() -> N
     for completion in out:
         assert completion.routed_experts.dtype == np.uint8
         assert np.array_equal(completion.routed_experts, expected[completion.token_ids])
+
+
+def test_a_cache_salt_goes_out_in_nvext_next_to_the_routes_request() -> None:
+    prompt = [1, 2, 3]
+    transport, seen = make_server(
+        [routed_response([97, 98], encode_routes(routes_for(4, seed=s))) for s in (1, 2)]
+    )
+    sampler = CompletionSampler(ROUTED, transport=transport)
+    asyncio.run(sampler.sample(prompt, 2, max_tokens=4, temperature=1.0, cache_salt="run-r3"))
+    expected = {"cache_salt": "run-r3", "extra_fields": ["routed_experts"]}
+    assert [req["nvext"] for req in seen] == [expected, expected]
+
+
+@pytest.mark.parametrize("salt", [None, ""])
+def test_no_salt_sends_no_nvext(salt) -> None:
+    transport, seen = make_server([completions_response(["ab"])])
+    config = RolloutConfig(base_url="https://gw/v1", model="m")
+    sampler = CompletionSampler(config, transport=transport)
+    asyncio.run(sampler.sample([1], 1, max_tokens=4, temperature=1.0, cache_salt=salt))
+    assert "nvext" not in seen[0]
+
+
+def test_salts_follow_vllms_rules() -> None:
+    assert as_cache_salt("run-7-r3") == "run-7-r3"
+    for name in ("a/b", "a@b", "x" * 129, ""):
+        salt = as_cache_salt(name)
+        assert len(salt) == 64 and salt == as_cache_salt(name)  # SHA-256, stable
+    sampler = CompletionSampler(RolloutConfig(base_url="https://gw/v1", model="m"))
+    with pytest.raises(RolloutError, match="as_cache_salt"):
+        asyncio.run(sampler.sample([1], 1, max_tokens=4, temperature=1.0, cache_salt="a/b"))
+
+
+def test_a_rollouts_salt_names_the_run_and_the_rollout() -> None:
+    env = {"CWTRAIN_HOTLOAD_RUN_ID": "grpo-7"}
+    assert rollout_cache_salt(3, env) == "grpo-7-r3"
+    assert rollout_cache_salt(3, env) != rollout_cache_salt(4, env)
+    # without a run ID, the process draws one: still unique per run, stable within it
+    assert rollout_cache_salt(3, {}) == rollout_cache_salt(3, {}) != "grpo-7-r3"
+
+
+def test_sample_groups_salts_every_request() -> None:
+    transport, seen = make_server([completions_response(["ab"]), completions_response(["cd"])])
+    config = RolloutConfig(base_url="https://gw/v1", model="m")
+    sampler = CompletionSampler(config, transport=transport)
+    groups = [[Sample(prompt="p1")], [Sample(prompt="p2")]]
+    asyncio.run(
+        sample_groups(
+            sampler, groups, tokenizer=Tokenizer(), max_tokens=8, temperature=1.0, cache_salt="s"
+        )
+    )
+    assert [req["nvext"] for req in seen] == [{"cache_salt": "s"}] * 2
 
 
 def test_routes_are_not_requested_unless_asked_for() -> None:

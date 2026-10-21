@@ -142,7 +142,9 @@ which one computed it:
 
 With `PRESERVE`, a cached prompt keeps the previous version's KV cache and routes. The synchronous
 recipes (slime, miles `train.py`, NeMo-RL, Axolotl) publish with `RESET_ALL`; miles' `train_async.py`
-keeps `PRESERVE`.
+keeps `PRESERVE`. The slime, miles and NeMo-RL rollouts also salt their requests with the rollout
+or the served version (`nvext.cache_salt`), so under either policy no later version reuses these
+blocks.
 
 ## Using the routes
 

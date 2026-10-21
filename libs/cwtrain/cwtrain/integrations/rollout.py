@@ -76,6 +76,20 @@ changes.
 A request carries at most four stop strings and four stop token ids. CoreWeave's frontend rejects
 more, so such a request fails before it is sent.
 
+Prefix cache
+------------
+
+The deployment caches the KV of prompt blocks, and with routed experts their routes. A hot-load
+with the ``PRESERVE`` prompt-cache policy keeps them, so a later version could serve a prompt from
+blocks that an earlier one computed. A cache salt (Dynamo's ``nvext.cache_salt``) goes into the
+cache key, so requests reuse blocks only when their salts are equal. slime and miles salt each
+rollout with :func:`rollout_cache_salt`; NeMo-RL salts with the identity that the deployment
+serves.
+
+The salt must change only after every replica serves the new version, as it does when the
+hot-load hook waits for the hot-load (the default). A request with the new salt could otherwise
+reach a replica that has not switched yet, which would cache old KV under the new salt.
+
 Routed experts
 --------------
 
@@ -103,10 +117,12 @@ from __future__ import annotations
 import asyncio
 import base64
 import dataclasses
+import hashlib
 import logging
 import math
 import os
 import random
+import secrets
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -148,6 +164,35 @@ def check_stop_limits(
             raise RolloutError(
                 f"a completions request takes at most {MAX_STOPS} {what}, got {len(items)}"
             )
+
+
+#: vLLM's rules for a cache salt: at most this many characters, and none of ``@ / \`` or NUL.
+MAX_CACHE_SALT = 128
+_SALT_FORBIDDEN = frozenset("@/\\\0")
+
+
+def as_cache_salt(name: str) -> str:
+    """``name`` as a cache salt: itself if vLLM accepts it, else its SHA-256 in hex."""
+    if 0 < len(name) <= MAX_CACHE_SALT and not _SALT_FORBIDDEN.intersection(name):
+        return name
+    return hashlib.sha256(name.encode()).hexdigest()
+
+
+#: Names the run when ``CWTRAIN_HOTLOAD_RUN_ID`` is unset; drawn once per process.
+_PROCESS_RUN = "run-" + secrets.token_hex(6)
+
+
+def rollout_cache_salt(rollout: int | str, environ: Mapping[str, str] | None = None) -> str:
+    """The cache salt of one rollout of this run, ``<run>-r<rollout>`` (see "Prefix cache").
+
+    The run is ``CWTRAIN_HOTLOAD_RUN_ID``, the prefix of every identity the run publishes, or a
+    token drawn once per process. Neither two runs on one deployment nor two rollouts of one run
+    share cached prompts. Within a rollout, the choices of a group and the turns of a
+    conversation still do.
+    """
+    env = os.environ if environ is None else environ
+    run = env.get("CWTRAIN_HOTLOAD_RUN_ID", "").strip() or _PROCESS_RUN
+    return as_cache_salt(f"{run}-r{rollout}")
 
 
 @dataclass(frozen=True)
@@ -353,20 +398,27 @@ class CompletionSampler:
         stop: Sequence[str] | None = None,
         stop_token_ids: Sequence[int] | None = None,
         include_stop_str_in_output: bool | None = None,
+        cache_salt: str | None = None,
     ) -> list[Completion]:
         """Return exactly ``n`` completions for ``prompt``, ordered by choice index.
 
         ``prompt`` is text or a list of token ids. The OpenAI completions API accepts both. Token
         ids avoid re-tokenizing the trainer's prompt. ``stop_token_ids`` and
-        ``include_stop_str_in_output`` are vLLM extensions of the API.
+        ``include_stop_str_in_output`` are vLLM extensions of the API. ``cache_salt`` keys the
+        deployment's prefix cache (see "Prefix cache" above); empty or ``None`` sends none.
 
         Raises:
-            RolloutError: The request has too many stops, fails after all retries, gets a status
-                that is not retried, or returns a choice count other than ``n``. With routed
-                experts: the prompt is text, or a response lacks routes or token ids, or its
-                routes do not line up with its tokens.
+            RolloutError: The request has too many stops or a cache salt that vLLM rejects, fails
+                after all retries, gets a status that is not retried, or returns a choice count
+                other than ``n``. With routed experts: the prompt is text, or a response lacks
+                routes or token ids, or its routes do not line up with its tokens.
         """
         check_stop_limits(stop, stop_token_ids)
+        if cache_salt and as_cache_salt(cache_salt) != cache_salt:
+            raise RolloutError(
+                f"a cache salt takes at most {MAX_CACHE_SALT} characters and none of @ / \\ or "
+                f"NUL; as_cache_salt() makes one from any name, got {cache_salt!r}"
+            )
         payload: dict[str, Any] = {
             "model": self.config.model,
             "prompt": prompt if isinstance(prompt, str) else list(prompt),
@@ -384,6 +436,8 @@ class CompletionSampler:
             payload["include_stop_str_in_output"] = bool(include_stop_str_in_output)
         if top_k is not None and top_k > 0:
             payload["top_k"] = int(top_k)
+        if cache_salt:
+            payload["nvext"] = {"cache_salt": cache_salt}
         if isinstance(prompt, str):
             # The trainer encodes prompts without special tokens. vLLM adds them (often a BOS)
             # unless told not to, and then the served prompt differs from the scored one.
@@ -421,7 +475,8 @@ class CompletionSampler:
         """``n`` requests of one choice each, because a response carries one sequence's routes."""
         if isinstance(prompt, str):
             raise RolloutError("routed experts need a token-id prompt")
-        payload = {**payload, "n": 1, "nvext": {"extra_fields": ["routed_experts"]}}
+        nvext = {**payload.get("nvext", {}), "extra_fields": ["routed_experts"]}
+        payload = {**payload, "n": 1, "nvext": nvext}
         async with self._semaphore:
             bodies = await _gather_all([self._post_with_retry(payload) for _ in range(n)])
         completions = []
@@ -836,8 +891,11 @@ async def sample_groups(
     temperature: float,
     top_p: float = 1.0,
     stop: Sequence[str] | None = None,
+    cache_salt: str | None = None,
 ) -> dict[str, float]:
     """Sample every group concurrently and fill its samples; returns timing/shape metrics.
+
+    Every request carries ``cache_salt``, such as :func:`rollout_cache_salt` of the rollout.
 
     With log-probs required, a group whose log-probs do not align is sampled again, up to
     :data:`LOGPROB_RESAMPLES` times.
@@ -867,6 +925,7 @@ async def sample_groups(
                 temperature=temperature,
                 top_p=top_p,
                 stop=stop,
+                cache_salt=cache_salt,
             )
             # Groups finish in any order. After one group falls back to text, none switches back.
             sampler.token_id_prompts = sampler.token_id_prompts and still
@@ -924,10 +983,12 @@ __all__ = [
     "RolloutConfig",
     "RolloutError",
     "align_logprobs",
+    "as_cache_salt",
     "check_stop_limits",
     "decode_routed_experts",
     "fill_group",
     "omitted_stop_token",
+    "rollout_cache_salt",
     "same_token",
     "same_tokens",
     "sample_groups",

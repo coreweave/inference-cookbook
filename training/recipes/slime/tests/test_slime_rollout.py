@@ -67,6 +67,7 @@ def rollout(monkeypatch):
 
     async def sample_groups(sampler, groups, **kwargs):
         seen["configs"].append(sampler)
+        seen.setdefault("salts", []).append(kwargs.get("cache_salt"))
         for group in groups:
             for sample in group:
                 if sampler.routed_experts:
@@ -122,3 +123,10 @@ def test_tis_requires_logprobs_and_temperature_one(rollout) -> None:
     assert seen["configs"][-1].require_logprobs is False
     with pytest.raises(CWTrainError, match="--use-tis compares log-probs"):
         module.generate_rollout(args(False, use_tis=True, rollout_temperature=0.7), 5, Data())
+
+
+def test_each_rollout_is_salted_with_the_run_and_the_rollout(rollout, monkeypatch) -> None:
+    module, seen = rollout
+    monkeypatch.setenv("CWTRAIN_HOTLOAD_RUN_ID", "grpo-7")
+    module.generate_rollout(args(False), 3, Data())
+    assert seen["salts"] == ["grpo-7-r3"]
