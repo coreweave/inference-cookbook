@@ -348,6 +348,8 @@ def test_weight_synchronizer_publishes_full_then_deltas_then_cuts(
     )
     assert sync.is_stale and sync.config.identity(0) == "nemo-test-v000000"
     assert sync.served_identity is None
+    served = tmp_path / "state" / "served_identity"  # where the Gym model server reads it
+    assert not served.exists()
 
     m0 = sync.sync_weights()  # v0: full snapshot of the export
     assert not sync.is_stale and m0["hotload/incremental"] == 0.0
@@ -357,6 +359,7 @@ def test_weight_synchronizer_publishes_full_then_deltas_then_cuts(
     m2 = sync.sync_weights()  # v2: identical export, nothing published
     assert m2["hotload/skipped_empty"] == 1.0
     assert sync.served_identity == "nemo-test-v000001"  # the deployment still serves v1
+    assert served.read_text().strip() == "nemo-test-v000001"
     m3 = sync.sync_weights()  # v3: full_every=3, chain cut with a full snapshot
     assert m3["hotload/incremental"] == 0.0
 

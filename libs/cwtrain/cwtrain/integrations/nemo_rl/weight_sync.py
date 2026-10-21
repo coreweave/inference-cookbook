@@ -42,6 +42,7 @@ from cwtrain.hotload.delta import checkpoint_checksums, write_delta, write_full_
 from cwtrain.hotload.mirror import tensor_locations
 from cwtrain.infra.client import InferenceClient
 from cwtrain.integrations.nemo_rl import _missing_dependency
+from cwtrain.integrations.nvext import SERVED_IDENTITY_FILE, write_served_identity
 from cwtrain.integrations.slime import ENV_PREFIX, HookConfig
 
 try:
@@ -107,6 +108,10 @@ class HotLoadWeightSynchronizer(WeightSynchronizer):
         self._generation = generation
         self.hf_checkpoint = Path(hf_checkpoint)
         self.state_dir = Path(self.config.state_dir or cw.get("state_dir") or "/work/hotload")
+        # The Gym model server salts its requests with the identity recorded here. A record left
+        # by an earlier run would name weights the deployment may no longer serve.
+        self._served_file = self.state_dir / SERVED_IDENTITY_FILE
+        write_served_identity(self._served_file, None)
         # The deployment serves this layout. Every export must match each tensor's dtype and shape.
         self.base_layout = {
             name: (loc.dtype, loc.shape)
@@ -213,6 +218,7 @@ class HotLoadWeightSynchronizer(WeightSynchronizer):
             if self._last_published is not None:
                 shutil.rmtree(self._last_published[1], ignore_errors=True)
             self._last_published = (version, export_dir)
+            write_served_identity(self._served_file, identity)
             self._version += 1
             self._stale = False
             metrics["hotload/reused_existing"] = 1.0
@@ -264,6 +270,7 @@ class HotLoadWeightSynchronizer(WeightSynchronizer):
         if self._last_published is not None:
             shutil.rmtree(self._last_published[1], ignore_errors=True)
         self._last_published = (version, export_dir)
+        write_served_identity(self._served_file, identity)
         self._version += 1
         self._stale = False
         # NeMo-RL's driver does not surface library logging; print one line per refit.

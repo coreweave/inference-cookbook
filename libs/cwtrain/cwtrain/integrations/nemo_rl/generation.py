@@ -41,6 +41,7 @@ import os
 from typing import Any
 
 from cwtrain.integrations.nemo_rl import _missing_dependency
+from cwtrain.integrations.nvext import as_cache_salt, warn_without_wait
 from cwtrain.integrations.rollout import (
     ENV_PREFIX,
     Completion,
@@ -48,7 +49,6 @@ from cwtrain.integrations.rollout import (
     RolloutConfig,
     RolloutError,
     align_logprobs,
-    as_cache_salt,
     check_stop_limits,
     omitted_stop_token,
     sample_prompt,
@@ -289,8 +289,12 @@ class CoreWeaveGeneration(GenerationInterface):
 
     def _cache_salt(self) -> str | None:
         """The served identity, so that no version reuses prompts another one cached."""
-        identity = getattr(self.weight_synchronizer, "served_identity", None)
-        return as_cache_salt(identity) if identity else None
+        sync = self.weight_synchronizer
+        identity = getattr(sync, "served_identity", None)
+        if not identity:
+            return None
+        warn_without_wait(getattr(getattr(sync, "config", None), "wait", True))
+        return as_cache_salt(identity)
 
     def _decode(self, completion: Completion) -> tuple[list[int], list[float], bool]:
         """Response token ids, aligned log-probs (or none) and the truncation flag."""

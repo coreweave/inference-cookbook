@@ -57,7 +57,9 @@ computed under the previous weights, instead of reusing cached prompt prefixes a
 
 Either way, each rollout's requests carry a cache salt of the run and the rollout
 (`nvext.cache_salt`), so a prompt cached under earlier weights never serves a later rollout, even
-with `preserve`, as long as the hook waits for every replica (`HOTLOAD_WAIT=1`, the default).
+with `preserve`, as long as the hook waits for every replica (`HOTLOAD_WAIT=1`, the default). With
+`HOTLOAD_WAIT=0`, the rollout function logs a warning: a replica that has not switched yet would
+cache old KV under the new salt.
 
 Snapshot identities are `<RUN_ID>-vNNNNNN`. The platform keys weight versions by identity, so
 never reuse a run ID for different weights.

@@ -48,6 +48,10 @@ def test_flag_converts_dapo_without_mutating_source(config):
     assert result["grpo"]["max_rollout_turns"] == 1
     assert result["policy"]["generation"]["coreweave_cfg"]["require_logprobs"] is True
     assert result["data"]["default"]["processor"] == "nemo_gym_data_processor"
+    model = result["env"]["nemo_gym"]["policy_model"]["responses_api_models"]["vllm_model"]
+    # the Gym model server salts with what the weight synchronizer records in the state dir
+    state_dir = config["policy"]["generation"]["coreweave_cfg"]["state_dir"]
+    assert model["cache_salt_file"] == str(Path(state_dir) / "served_identity")
 
 
 def test_disabled_flag_does_not_load_data(config):

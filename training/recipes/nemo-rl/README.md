@@ -142,7 +142,9 @@ GRPO here is synchronous. So, unless you set it, the launcher sets
 `CWTRAIN_HOTLOAD_PROMPT_CACHE_POLICY=reset_all`: each rollout round then starts without KV cache
 from the previous weights. Either way, requests carry the identity that the deployment serves as a
 cache salt (`nvext.cache_salt`), so a prompt cached under earlier weights never serves a later
-step, even with `preserve`. The Gym rollout path does not send a salt yet.
+step, even with `preserve`. The Gym rollout path salts its requests the same way: the
+synchronizer records the served identity in `<state_dir>/served_identity`, and cwtrain's Gym
+model server reads it for every request.
 
 The recipe runs the DTensor (Automodel) policy backend. The Megatron worker extension exists but is
 not tested on a live deployment.

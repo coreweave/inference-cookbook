@@ -40,6 +40,14 @@ def test_sends_exact_prompt_ids_and_sampling_parameters():
     assert calls[0][1]["enable_thinking"] is False
 
 
+def test_a_cache_salt_goes_out_in_nvext() -> None:
+    tokenizer = SimpleNamespace(apply_chat_template=lambda messages, **kwargs: [10, 20])
+    body = {"model": "m", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 5}
+    salted = completion_request(body, tokenizer, cache_salt="run-7-v000003")
+    assert salted["nvext"] == {"cache_salt": "run-7-v000003"}
+    assert "nvext" not in completion_request(body, tokenizer)
+
+
 @pytest.fixture
 def response():
     return {

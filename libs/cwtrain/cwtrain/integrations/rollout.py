@@ -83,12 +83,13 @@ The deployment caches the KV of prompt blocks, and with routed experts their rou
 with the ``PRESERVE`` prompt-cache policy keeps them, so a later version could serve a prompt from
 blocks that an earlier one computed. A cache salt (Dynamo's ``nvext.cache_salt``) goes into the
 cache key, so requests reuse blocks only when their salts are equal. slime and miles salt each
-rollout with :func:`rollout_cache_salt`; NeMo-RL salts with the identity that the deployment
-serves.
+rollout with :func:`rollout_cache_salt`. NeMo-RL salts with the identity that the deployment
+serves, on its own path and on Gym's (see :mod:`cwtrain.integrations.nvext`).
 
 The salt must change only after every replica serves the new version, as it does when the
 hot-load hook waits for the hot-load (the default). A request with the new salt could otherwise
-reach a replica that has not switched yet, which would cache old KV under the new salt.
+reach a replica that has not switched yet, which would cache old KV under the new salt. Without
+the wait, the rollout function logs a warning.
 
 Routed experts
 --------------
@@ -117,12 +118,10 @@ from __future__ import annotations
 import asyncio
 import base64
 import dataclasses
-import hashlib
 import logging
 import math
 import os
 import random
-import secrets
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -134,6 +133,12 @@ import numpy as np
 
 from cwtrain.errors import CWTrainError
 from cwtrain.integrations._env import flag, positive_float, positive_int
+from cwtrain.integrations.nvext import (
+    MAX_CACHE_SALT,
+    as_cache_salt,
+    rollout_cache_salt,
+    with_nvext,
+)
 
 log = logging.getLogger(__name__)
 
@@ -164,35 +169,6 @@ def check_stop_limits(
             raise RolloutError(
                 f"a completions request takes at most {MAX_STOPS} {what}, got {len(items)}"
             )
-
-
-#: vLLM's rules for a cache salt: at most this many characters, and none of ``@ / \`` or NUL.
-MAX_CACHE_SALT = 128
-_SALT_FORBIDDEN = frozenset("@/\\\0")
-
-
-def as_cache_salt(name: str) -> str:
-    """``name`` as a cache salt: itself if vLLM accepts it, else its SHA-256 in hex."""
-    if 0 < len(name) <= MAX_CACHE_SALT and not _SALT_FORBIDDEN.intersection(name):
-        return name
-    return hashlib.sha256(name.encode()).hexdigest()
-
-
-#: Names the run when ``CWTRAIN_HOTLOAD_RUN_ID`` is unset; drawn once per process.
-_PROCESS_RUN = "run-" + secrets.token_hex(6)
-
-
-def rollout_cache_salt(rollout: int | str, environ: Mapping[str, str] | None = None) -> str:
-    """The cache salt of one rollout of this run, ``<run>-r<rollout>`` (see "Prefix cache").
-
-    The run is ``CWTRAIN_HOTLOAD_RUN_ID``, the prefix of every identity the run publishes, or a
-    token drawn once per process. Neither two runs on one deployment nor two rollouts of one run
-    share cached prompts. Within a rollout, the choices of a group and the turns of a
-    conversation still do.
-    """
-    env = os.environ if environ is None else environ
-    run = env.get("CWTRAIN_HOTLOAD_RUN_ID", "").strip() or _PROCESS_RUN
-    return as_cache_salt(f"{run}-r{rollout}")
 
 
 @dataclass(frozen=True)
@@ -437,7 +413,7 @@ class CompletionSampler:
         if top_k is not None and top_k > 0:
             payload["top_k"] = int(top_k)
         if cache_salt:
-            payload["nvext"] = {"cache_salt": cache_salt}
+            payload = with_nvext(payload, cache_salt=cache_salt)
         if isinstance(prompt, str):
             # The trainer encodes prompts without special tokens. vLLM adds them (often a BOS)
             # unless told not to, and then the served prompt differs from the scored one.
@@ -475,8 +451,7 @@ class CompletionSampler:
         """``n`` requests of one choice each, because a response carries one sequence's routes."""
         if isinstance(prompt, str):
             raise RolloutError("routed experts need a token-id prompt")
-        nvext = {**payload.get("nvext", {}), "extra_fields": ["routed_experts"]}
-        payload = {**payload, "n": 1, "nvext": nvext}
+        payload = with_nvext({**payload, "n": 1}, extra_fields=["routed_experts"])
         async with self._semaphore:
             bodies = await _gather_all([self._post_with_retry(payload) for _ in range(n)])
         completions = []
