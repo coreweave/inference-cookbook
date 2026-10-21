@@ -32,6 +32,7 @@ from cwtrain.integrations.launch import (
     bash_array,
     checkout,
     default_prompt_cache_policy,
+    env_flag,
     env_int,
     env_text,
     fetch_commit,
@@ -77,6 +78,7 @@ class SlimeJob:
     rollout_max_response_len: int = 2048
     global_batch_size: int = 32
     max_tokens_per_gpu: int = 9216
+    use_tis: bool = True
     extra_train_args: tuple[str, ...] = ()
 
     @classmethod
@@ -110,6 +112,7 @@ class SlimeJob:
             rollout_max_response_len=env_int(env, "ROLLOUT_MAX_RESPONSE_LEN", 2048),
             global_batch_size=env_int(env, "GLOBAL_BATCH_SIZE", 32),
             max_tokens_per_gpu=env_int(env, "MAX_TOKENS_PER_GPU", 9216),
+            use_tis=env_flag(env, "USE_TIS", True),
             extra_train_args=tuple(
                 split_args(env.get("EXTRA_TRAIN_ARGS"), name="EXTRA_TRAIN_ARGS")
             ),
@@ -141,6 +144,8 @@ def train_args(job: SlimeJob) -> list[str]:
         "--weight-decay", "0.1", "--adam-beta1", "0.9", "--adam-beta2", "0.98",
         "--advantage-estimator", "grpo", "--kl-loss-coef", "0.00", "--kl-loss-type", "low_var_kl",
         "--entropy-coef", "0.00", "--eps-clip", "0.2", "--eps-clip-high", "0.28",
+        # truncated importance sampling against the deployment's log-probs (README)
+        *(["--use-tis"] if job.use_tis else []),
         "--tensor-model-parallel-size", str(job.tp_size),
         # sequence parallelism splits activations across tensor-parallel ranks; it needs TP > 1
         *(["--sequence-parallel"] if job.tp_size > 1 else []),

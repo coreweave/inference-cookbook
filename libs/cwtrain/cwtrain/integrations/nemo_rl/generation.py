@@ -14,8 +14,8 @@ honors vLLM's ``return_tokens_as_token_ids``. Otherwise the text is re-tokenized
 token is appended.
 
 Configuration lives under ``policy.generation.coreweave_cfg``. The rollout keys (all but
-``max_model_len`` and ``require_logprobs``) can also come from the ``CWTRAIN_ROLLOUT_*``
-environment (see :mod:`cwtrain.integrations.rollout`):
+``max_model_len``, ``require_logprobs`` and ``importance_sampling``) can also come from the
+``CWTRAIN_ROLLOUT_*`` environment (see :mod:`cwtrain.integrations.rollout`):
 
 ``base_url``          OpenAI-compatible base URL of the deployment, ending in ``/v1``.
 ``model``             Served model name.
@@ -26,6 +26,11 @@ environment (see :mod:`cwtrain.integrations.rollout`):
 ``token_id_prompts``  Send prompts as token ids (default true). If the endpoint rejects them and
                       a text request succeeds, the run sends text from then on.
 ``require_logprobs``  Fail the step when a response has no aligned log-probs (default true).
+``importance_sampling`` NeMo-RL's importance-sampling correction compares the log-probs with its
+                      own (default false; the recipe's config ties it to
+                      ``loss_fn.use_importance_sampling_correction``). Needs ``temperature`` 1,
+                      ``top_p`` 1 and no ``top_k``: the endpoint's log-probs come before them,
+                      NeMo-RL's after.
 """
 
 from __future__ import annotations
@@ -103,6 +108,21 @@ class CoreWeaveGeneration(GenerationInterface):
             raise RolloutError(
                 "coreweave_cfg.require_logprobs needs sampled-token log-probs: keep "
                 "CWTRAIN_ROLLOUT_LOGPROBS enabled or set require_logprobs: false"
+            )
+        # NeMo-RL scores with policy.generation's temperature, top_p and top_k. The endpoint
+        # reports log-probs before them (vLLM's default), so the two compare only without them.
+        top_k = config.get("top_k")
+        shaped = (
+            float(config.get("temperature", 1.0)) != 1.0
+            or float(config.get("top_p", 1.0)) != 1.0
+            or (top_k is not None and int(top_k) > 0)
+        )
+        if bool(cw.get("importance_sampling", False)) and shaped:
+            raise RolloutError(
+                "the importance-sampling correction compares NeMo-RL's log-probs, which apply "
+                "policy.generation's temperature, top_p and top_k, with the endpoint's, which "
+                "it reports before them. Keep temperature 1.0, top_p 1.0 and top_k null, or turn "
+                "the correction off (loss_fn.use_importance_sampling_correction: false)"
             )
         # As in NeMo-RL's vLLM backend, configured stops apply to every request, merged with
         # per-row stop strings.

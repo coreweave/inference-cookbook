@@ -51,6 +51,7 @@ spec:
             ${EXTRA_TRAIN_ARGS}
         - {name: ROLLOUT_MAX_RESPONSE_LEN, value: "${ROLLOUT_MAX_RESPONSE_LEN}"}
         - {name: RM_TYPE, value: "${RM_TYPE}"}
+        - {name: USE_TIS, value: "${USE_TIS}"}
         # rollouts from the deployment
         - {name: CWTRAIN_ROLLOUT_BASE_URL, value: "${ROLLOUT_BASE_URL}"}
         - {name: CWTRAIN_ROLLOUT_MODEL, value: "${ROLLOUT_MODEL}"}

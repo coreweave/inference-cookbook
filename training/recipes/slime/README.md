@@ -56,7 +56,7 @@ slime ships an equivalent.
 | --- | --- | --- | --- |
 | `0001-standalone-delta-publish` | about 40 lines | adds `--update-weight-standalone-publish` as described above | always, until slime can publish deltas without its own engines |
 | `0002-relax-numpy-check` | about 7 lines | lets slime's numpy 1 assertion be skipped with `SLIME_RELAX_NUMPY_CHECK=1` | only on images that ship numpy 2, such as the arm64 miles image |
-| `0003-zero-kl-without-rollout-logprobs` | about 8 lines | shapes slime's zero KL from response lengths when a sample has no `rollout_log_probs` | only as a fallback when the endpoint's log-probs cannot be aligned with a batch |
+| `0003-zero-kl-without-rollout-logprobs` | about 8 lines | shapes slime's zero KL from response lengths when a sample has no `rollout_log_probs` | only with `USE_TIS=0`, as a fallback when the endpoint's log-probs cannot be aligned with a batch |
 
 The launcher (`launch.py`) applies the patches in order and checks each one before it applies it.
 If a patch does not apply, the launcher reverts the patches it applied and stops the job. The
@@ -140,13 +140,33 @@ mode does not work with `--colocate`.
   report them.
 - scores the responses with slime's own `--rm-type`.
 - attaches the endpoint's sampled-token log-probs as `rollout_log_probs` when they align with the
-  response tokens, including the token that ended the response. Otherwise it leaves them unset.
-  The trainer recomputes log-probs in both cases.
+  response tokens, including the token that ended the response. With `--use-tis`, a batch where
+  they do not align fails the rollout. Without it, they stay unset, and the trainer recomputes
+  log-probs either way.
 
 It is a thin slime adapter over `cwtrain.integrations.rollout`. Configure it with
 `CWTRAIN_ROLLOUT_BASE_URL`, `CWTRAIN_ROLLOUT_MODEL` and, optionally,
 `CWTRAIN_ROLLOUT_API_KEY_FILE`. The hook blocks until every replica serves the new version, so the
 next rollout is on-policy without an engine handshake.
+
+## Truncated importance sampling
+
+The deployment and the trainer compute slightly different log-probs for the same tokens, so even
+fresh rollouts are a little off-policy. The recipe passes `--use-tis`: slime weights each token's
+loss by the trainer's probability over the deployment's, capped at 2 (`--tis-clip`). On a
+Mixture-of-Experts model, combine it with routing replay (next section), which removes most of
+the gap first. The [routing replay case study](../../case-studies/rollout-routing-replay/README.md)
+measures the gap with and without replay.
+
+- `USE_TIS=0` in `run.env` turns it off.
+- TIS reads `rollout_log_probs` from every sample, so a batch where a sample's log-probs do not
+  line up with its tokens fails the rollout. With the sampled token ids from the deployment, they
+  always do.
+- Sample at temperature 1, the recipe's `--rollout-temperature`. The deployment reports log-probs
+  before temperature and slime scores after it, so the rollout function refuses TIS at any other
+  temperature.
+- slime logs the weights as `tis`, the clipped share as `tis_clipfrac`, and the mean gap between
+  the two log-probs as `train_rollout_logprob_abs_diff`.
 
 ## Routing replay for MoE models
 

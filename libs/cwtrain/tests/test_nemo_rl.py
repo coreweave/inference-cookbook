@@ -974,6 +974,27 @@ def test_generate_forwards_configured_stop_criteria(monkeypatch) -> None:
     assert all(b["include_stop_str_in_output"] is True for b in seen)
 
 
+@pytest.mark.parametrize(
+    ("sampling", "compared"),
+    [({"temperature": 0.7}, False), ({"top_p": 0.9}, False), ({"top_k": 20}, False),
+     ({"top_k": -1}, True)],
+)  # fmt: skip
+def test_required_logprobs_need_sampling_without_temperature_top_p_or_top_k(
+    sampling, compared
+) -> None:
+    from cwtrain.integrations.nemo_rl.generation import CoreWeaveGeneration
+    from cwtrain.integrations.rollout import RolloutError
+
+    config = {**gen_config(importance_sampling=True), **sampling}
+    if compared:  # top_k -1 turns top-k off, as in vLLM
+        CoreWeaveGeneration(config, Tokenizer())
+    else:
+        with pytest.raises(RolloutError, match="which it reports before them"):
+            CoreWeaveGeneration(config, Tokenizer())
+    # without the correction nothing compares them, even with log-probs required (as Gym does)
+    CoreWeaveGeneration({**gen_config(require_logprobs=True), **sampling}, Tokenizer())
+
+
 def test_generate_rejects_missing_logprobs_when_required(monkeypatch) -> None:
     from cwtrain.integrations.nemo_rl.generation import CoreWeaveGeneration
     from cwtrain.integrations.rollout import RolloutError

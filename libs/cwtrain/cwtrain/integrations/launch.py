@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from cwtrain.errors import CWTrainError
+from cwtrain.integrations._env import flag
 
 #: Environment the hot-load hook, the rollout function and the object-storage client read inside
 #: the Ray workers. Credentials among them are never forwarded; see :func:`forwarded_env`.
@@ -339,6 +340,14 @@ def env_int(environ: Mapping[str, str], name: str, default: int) -> int:
         raise LaunchError(f"{name} must be an integer, got {raw!r}") from exc
 
 
+def env_flag(environ: Mapping[str, str], name: str, default: bool) -> bool:
+    """A boolean setting (1/0, true/false, yes/no, on/off); unset or blank means ``default``."""
+    try:
+        return flag(environ, name, default)
+    except CWTrainError as exc:
+        raise LaunchError(str(exc)) from exc
+
+
 def require(environ: Mapping[str, str], name: str) -> str:
     value = environ.get(name, "").strip()
     if not value:
@@ -376,6 +385,7 @@ __all__ = [
     "bash_array",
     "checkout",
     "default_prompt_cache_policy",
+    "env_flag",
     "env_int",
     "env_text",
     "fetch_commit",

@@ -127,8 +127,9 @@ policy:
       state_dir: /work/hotload                          # exports, deltas, manifests
 ```
 
-Every `coreweave_cfg` key except `max_model_len` and `require_logprobs` can also come from the
-`CWTRAIN_ROLLOUT_*` and `CWTRAIN_HOTLOAD_*` environment variables that the other recipes use. The
+Every `coreweave_cfg` key except `max_model_len`, `require_logprobs` and `importance_sampling` can
+also come from the `CWTRAIN_ROLLOUT_*` and `CWTRAIN_HOTLOAD_*` environment variables that the other
+recipes use. The
 API token (`COREWEAVE_API_TOKEN`, from a Secret in the Job) and the object storage credentials come
 only from the environment.
 
@@ -143,6 +144,24 @@ from the previous weights.
 
 The recipe runs the DTensor (Automodel) policy backend. The Megatron worker extension exists but is
 not tested on a live deployment.
+
+### Truncated importance sampling
+
+The deployment and the trainer compute slightly different log-probs for the same tokens, so even
+fresh rollouts are a little off-policy. The config turns on NeMo-RL's importance-sampling
+correction with `truncated_importance_sampling_type: tis`: each token's loss is weighted by the
+policy's probability over the deployment's, capped at 2. The
+[routing replay case study](../../case-studies/rollout-routing-replay/README.md) measures the gap
+on a Mixture-of-Experts model.
+
+- To turn it off, add `loss_fn.use_importance_sampling_correction=false` and
+  `loss_fn.truncated_importance_sampling_type=null` to `EXTRA_OVERRIDES`. NeMo-RL refuses a
+  truncation type without the correction.
+- A response without aligned log-probs stops the step (`coreweave_cfg.require_logprobs`).
+- Keep `policy.generation` at `temperature: 1.0`, `top_p: 1.0` and `top_k: null`. NeMo-RL
+  computes its log-probs after them, and the deployment reports its own before them, so the backend
+  refuses other values while the correction is on (`coreweave_cfg.importance_sampling`).
+- NeMo-RL logs the share of tokens whose weight the cap clips as `is_oob_ratio`.
 
 ## Sequence of one training step
 

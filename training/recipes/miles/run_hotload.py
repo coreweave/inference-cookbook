@@ -25,14 +25,17 @@ Any model with a ``scripts/models/<type>.py`` works. ``--model-name`` takes a Hu
     python3 run_hotload.py --model-name Qwen3-8B --tp 2 --num-gpus 2 --num-rollout 30
     python3 run_hotload.py --model-name meta-llama/Llama-3.1-8B --tp 2 --num-gpus 2
 
+``--tis`` (default ``1``) passes miles' ``--use-tis`` in both loops: truncated importance sampling
+against the deployment's log-probs, which every sample then needs.
+
 ``--train-script train_async.py`` selects miles' one-step-ahead loop. It generates rollout ``i+1``
 while step ``i`` trains, and drains the in-flight generation before the weight update; then the
-hook hot-loads. Samples are one policy step stale, so ``--async-correction`` picks the
-behaviour-policy correction:
+hook hot-loads. Samples are one policy step stale, so ``--async-correction`` picks the ratio's
+denominator:
 
-* ``keep_old_actor`` recomputes the ratio denominator with the weights that generated the rollout;
-* ``tis`` needs rollout log-probs on every sample;
-* ``none`` trains plain GRPO on stale data.
+* ``keep_old_actor`` recomputes it with the weights that generated the rollout;
+* ``none`` recomputes it with the current weights, which leaves the stale step to TIS, or, with
+  ``--tis 0``, trains plain GRPO on stale data.
 """
 
 from __future__ import annotations
@@ -45,7 +48,13 @@ from collections.abc import Mapping
 from pathlib import Path
 from types import ModuleType
 
-from cwtrain.integrations.launch import default_prompt_cache_policy, forwarded_env, stage_from_s3
+from cwtrain.integrations.launch import (
+    LaunchError,
+    default_prompt_cache_policy,
+    env_flag,
+    forwarded_env,
+    stage_from_s3,
+)
 
 DAPO = "zhuzilin/dapo-math-17k"
 PINNED_IMAGE = "radixark/miles:v0.1.1"
@@ -117,6 +126,14 @@ def megatron_model_type(model_name: str) -> str:
         return model_name[:1].lower() + model_name[1:]
 
 
+def on_off(raw: str) -> bool:
+    """``--tis`` takes the values of cwtrain's boolean settings: 1/0, true/false, yes/no, on/off."""
+    try:
+        return env_flag({"--tis": raw}, "--tis", True)
+    except LaunchError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--model-name", default="Qwen3-4B",
@@ -139,7 +156,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--rm-type", default="math")
     p.add_argument("--prompt-data", default=None, help="jsonl with prompt/label keys; default dapo-math-17k")
     p.add_argument("--train-script", default="train.py", choices=["train.py", "train_async.py"])
-    p.add_argument("--async-correction", default="keep_old_actor", choices=["keep_old_actor", "tis", "none"])
+    p.add_argument("--tis", type=on_off, default=True, help="truncated importance sampling: 1 or 0")
+    p.add_argument("--async-correction", default="keep_old_actor", choices=["keep_old_actor", "none"])
     p.add_argument("--rollout-function", default="coreweave_rollout.CoreWeaveRolloutFn")
     p.add_argument("--rollout-module-dir", default=str(Path(__file__).resolve().parent),
                    help="directory holding coreweave_rollout.py (added to the workers' PYTHONPATH)")
@@ -234,16 +252,18 @@ def main() -> None:
         "--update-weight-delta-encoding xor --update-weight-delta-checksum adler32 "
         "--custom-update-weight-post-write-path cwtrain.integrations.slime.hook "
     )
+    # truncated importance sampling against the deployment's log-probs (README)
+    tis_args = "--use-tis " if args.tis else ""
     async_args = ""
     if args.train_script == "train_async.py":
-        async_args = {"keep_old_actor": "--keep-old-actor ", "tis": "--use-tis ", "none": ""}[args.async_correction]
+        async_args = {"keep_old_actor": "--keep-old-actor ", "none": ""}[args.async_correction]
     # Split and re-join: unbalanced quotes fail here, before any GPU work, and every token reaches
     # train.py quoted exactly once.
     extra = shlex.join(shlex.split(args.extra_args)) + " " if args.extra_args.strip() else ""
 
     train_args = (
-        ckpt_args + rollout_args + optimizer_args + grpo_args + perf_args + train_backend_args
-        + misc_args + coreweave_args + async_args + extra
+        ckpt_args + rollout_args + optimizer_args + grpo_args + tis_args + perf_args
+        + train_backend_args + misc_args + coreweave_args + async_args + extra
     )
 
     # ---- environment: the hook and the rollout function read these inside the Ray workers

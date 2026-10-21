@@ -19,6 +19,7 @@ import pytest
 
 from cwtrain.errors import CWTrainError
 from cwtrain.integrations.rollout import (
+    LOGPROB_READERS,
     Completion,
     CompletionSampler,
     RolloutConfig,
@@ -239,6 +240,25 @@ def test_logprobs_kept_when_every_sample_aligns() -> None:
     assert groups[0][0].rollout_log_probs == [-0.1, -0.2]  # EOS entry dropped
     assert groups[0][1].rollout_log_probs == [-1.0, -2.0, -3.0]
     assert metrics["coreweave/logprobs_kept"] == 1.0
+
+
+def test_required_logprobs_that_do_not_align_fail_the_batch() -> None:
+    # "x" has 4 log-probs for its 1 token, as in the test above
+    transport, _ = make_server(
+        [
+            completions_response(["ab"], ["stop"], [[-0.1, -0.2, -0.3]]),
+            completions_response(["x"], ["stop"], [[-0.5, -0.5, -0.5, -0.5]]),
+        ]
+    )
+    config = RolloutConfig(base_url="https://gw/v1", model="m", require_logprobs=True)
+    sampler = CompletionSampler(config, transport=transport)
+    groups = [[Sample(prompt="p1")], [Sample(prompt="p2")]]
+    with pytest.raises(RolloutError, match="1/2 samples came back without log-probs"):
+        asyncio.run(
+            sample_groups(sampler, groups, tokenizer=Tokenizer(), max_tokens=8, temperature=1.0)
+        )
+    with pytest.raises(CWTrainError, match="require_logprobs needs logprobs on"):
+        RolloutConfig(base_url="u", model="m", logprobs=False, require_logprobs=True)
 
 
 def test_logprobs_can_be_disabled() -> None:
@@ -911,6 +931,33 @@ def test_the_replay_flag_decides_and_a_setting_that_disagrees_is_ignored(caplog)
         assert RolloutConfig.for_trainer(TrainerArgs(True), on).routed_experts is True
         assert RolloutConfig.for_trainer(TrainerArgs(False), ROLLOUT_ENV).routed_experts is False
     assert caplog.text == ""
+
+
+@dataclass
+class ScoringArgs:  # the slime and miles flags that read every sample's rollout_log_probs
+    use_tis: bool = False
+    use_rollout_logprobs: bool = False
+    get_mismatch_metrics: bool = False
+    rollout_temperature: float = 1.0
+
+
+@pytest.mark.parametrize("reader", LOGPROB_READERS)
+def test_a_trainer_that_reads_logprobs_requires_them(reader) -> None:
+    args = ScoringArgs(**{reader: True})
+    assert RolloutConfig.for_trainer(args, ROLLOUT_ENV).require_logprobs is True
+    assert RolloutConfig.for_trainer(ScoringArgs(), ROLLOUT_ENV).require_logprobs is False
+    assert RolloutConfig.for_trainer(object(), ROLLOUT_ENV).require_logprobs is False
+    flag = "--" + reader.replace("_", "-")
+    with pytest.raises(CWTrainError, match=f"{flag} reads the endpoint's log-probs"):
+        RolloutConfig.for_trainer(args, {**ROLLOUT_ENV, "CWTRAIN_ROLLOUT_LOGPROBS": "0"})
+
+
+def test_a_trainer_that_reads_logprobs_samples_at_temperature_one() -> None:
+    with pytest.raises(CWTrainError, match="--rollout-temperature 0.8 with the endpoint's"):
+        RolloutConfig.for_trainer(ScoringArgs(use_tis=True, rollout_temperature=0.8), ROLLOUT_ENV)
+    # without TIS nothing compares the log-probs, so any temperature goes
+    cooler = RolloutConfig.for_trainer(ScoringArgs(rollout_temperature=0.8), ROLLOUT_ENV)
+    assert cooler.require_logprobs is False
 
 
 def test_routes_must_have_the_trainers_layer_count_and_top_k() -> None:

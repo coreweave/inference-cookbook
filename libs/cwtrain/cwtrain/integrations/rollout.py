@@ -52,6 +52,13 @@ batch-wide.)
 slime's advantage step needs a per-token tensor to shape its zero KL. A run without aligned
 log-probs therefore also needs the ``0003`` patch in the slime recipe.
 
+slime and miles read every sample's log-probs with ``--use-tis``, ``--use-rollout-logprobs`` or
+``--get-mismatch-metrics``, and cannot train a batch without them. With any of these flags,
+:meth:`RolloutConfig.for_trainer` makes them required, and a batch in which a sample's log-probs
+do not align is an error. The trainer must then also sample at temperature 1. The endpoint reports
+log-probs before temperature (vLLM's default), but slime and miles score at
+``--rollout-temperature``, so at any other temperature the two are not comparable.
+
 Prompts
 -------
 
@@ -120,6 +127,10 @@ class RolloutError(CWTrainError):
     """The completions endpoint returned something the trainer cannot train on."""
 
 
+#: slime and miles flags that read ``rollout_log_probs`` from every sample of a batch.
+LOGPROB_READERS = ("use_tis", "use_rollout_logprobs", "get_mismatch_metrics")
+
+
 #: CoreWeave's OpenAI frontend rejects a request with more stop strings or stop token ids.
 MAX_STOPS = 4
 
@@ -153,6 +164,9 @@ class RolloutConfig:
     #: Ask a Mixture-of-Experts deployment for each sequence's routed experts (see "Routed
     #: experts" above).
     routed_experts: bool = False
+    #: Fail a batch in which a sample's log-probs do not align, instead of dropping them from the
+    #: whole batch. For a trainer that reads them from every sample (see :meth:`for_trainer`).
+    require_logprobs: bool = False
 
     def __post_init__(self) -> None:
         for name, value in (("concurrency", self.concurrency), ("max_attempts", self.max_attempts)):
@@ -167,6 +181,8 @@ class RolloutConfig:
                 "RolloutConfig.routed_experts needs exact tokens: keep logprobs, token_ids and "
                 "token_id_prompts on"
             )
+        if self.require_logprobs and not self.logprobs:
+            raise CWTrainError("RolloutConfig.require_logprobs needs logprobs on")
 
     def without_routed_experts(self, trainer: str) -> RolloutConfig:
         """This config with routed experts off, for a trainer that cannot replay them.
@@ -221,29 +237,53 @@ class RolloutConfig:
 
     @classmethod
     def for_trainer(cls, args: Any, environ: Mapping[str, str] | None = None) -> RolloutConfig:
-        """:meth:`from_env`, with routed experts on exactly when the trainer replays them.
+        """:meth:`from_env`, with routed experts on exactly when the trainer replays them, and
+        log-probs required when it reads them.
 
         slime and miles replay the rollout's routes with ``--use-rollout-routing-replay``
         (``args.use_rollout_routing_replay``), and then fail on a sample without them. Without
         it, routes would cost a request per choice and go unread. The flag decides, and an
         explicit ``CWTRAIN_ROLLOUT_ROUTED_EXPERTS`` that disagrees is ignored with a warning. For
         a trainer without the flag, the environment decides.
+
+        With one of :data:`LOGPROB_READERS` on, such as ``--use-tis``, log-probs are required
+        (see "Responses" above).
+
+        Raises:
+            CWTrainError: The trainer reads log-probs, but they are off, or it samples at a
+                temperature other than 1.
         """
         env = os.environ if environ is None else environ
         config = cls.from_env(env)
         flag = getattr(args, "use_rollout_routing_replay", None)
-        if flag is None:
+        if flag is not None:
+            replay = bool(flag)
+            explicit = env.get(f"{ENV_PREFIX}ROUTED_EXPERTS", "").strip()
+            if explicit and config.routed_experts != replay:
+                log.warning(
+                    "ignoring %sROUTED_EXPERTS=%s: --use-rollout-routing-replay is %s",
+                    ENV_PREFIX,
+                    explicit,
+                    "on" if replay else "off",
+                )
+            config = dataclasses.replace(config, routed_experts=replay)
+        readers = [
+            "--" + name.replace("_", "-") for name in LOGPROB_READERS if getattr(args, name, False)
+        ]
+        if not readers:
             return config
-        replay = bool(flag)
-        explicit = env.get(f"{ENV_PREFIX}ROUTED_EXPERTS", "").strip()
-        if explicit and config.routed_experts != replay:
-            log.warning(
-                "ignoring %sROUTED_EXPERTS=%s: --use-rollout-routing-replay is %s",
-                ENV_PREFIX,
-                explicit,
-                "on" if replay else "off",
+        if not config.logprobs:
+            raise CWTrainError(
+                f"{readers[0]} reads the endpoint's log-probs: keep {ENV_PREFIX}LOGPROBS on"
             )
-        return dataclasses.replace(config, routed_experts=replay)
+        temperature = float(getattr(args, "rollout_temperature", 1.0))
+        if temperature != 1.0:
+            raise CWTrainError(
+                f"{readers[0]} compares log-probs that the trainer computes at "
+                f"--rollout-temperature {temperature:g} with the endpoint's, which it reports "
+                f"before temperature. Sample at temperature 1, or turn {readers[0]} off"
+            )
+        return dataclasses.replace(config, require_logprobs=True)
 
 
 @dataclass(frozen=True)
@@ -789,7 +829,11 @@ async def sample_groups(
     top_p: float = 1.0,
     stop: Sequence[str] | None = None,
 ) -> dict[str, float]:
-    """Sample every group concurrently and fill its samples; returns timing/shape metrics."""
+    """Sample every group concurrently and fill its samples; returns timing/shape metrics.
+
+    Raises:
+        RolloutError: The config requires log-probs, and a sample's do not align.
+    """
     started = time.monotonic()
 
     async def one(group: Sequence[Any]) -> None:
@@ -821,6 +865,13 @@ async def sample_groups(
     # The trainers tensorize rollout_log_probs for the whole batch, so keep all or none. If any
     # sample's log-probs do not align, drop them everywhere and let the trainer recompute them.
     kept = aligned == len(flat)
+    if not kept and sampler.config.require_logprobs:
+        raise RolloutError(
+            f"{len(flat) - aligned}/{len(flat)} samples came back without log-probs that line up "
+            "with their tokens, and the trainer reads them from every sample (as with --use-tis). "
+            f"With {ENV_PREFIX}TOKEN_IDS on, an endpoint that reports the sampled token ids lines "
+            "them up exactly"
+        )
     if not kept:
         for sample in flat:
             sample.rollout_log_probs = None
@@ -844,6 +895,7 @@ async def sample_groups(
 __all__ = [
     "Completion",
     "CompletionSampler",
+    "LOGPROB_READERS",
     "RolloutConfig",
     "RolloutError",
     "align_logprobs",
