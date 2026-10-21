@@ -154,9 +154,11 @@ policy's probability over the deployment's, capped at 2. The
 [routing replay case study](../../case-studies/rollout-routing-replay/README.md) measures the gap
 on a Mixture-of-Experts model.
 
-- To turn it off, add `loss_fn.use_importance_sampling_correction=false` and
-  `loss_fn.truncated_importance_sampling_type=null` to `EXTRA_OVERRIDES`. NeMo-RL refuses a
-  truncation type without the correction.
+- To turn it off, add `loss_fn.use_importance_sampling_correction=false`,
+  `loss_fn.truncated_importance_sampling_type=null` and
+  `loss_fn.truncated_importance_sampling_ratio=null` to `EXTRA_OVERRIDES`. NeMo-RL refuses a
+  truncation type without the correction, and fails at the first training step on a ratio without
+  a type.
 - A response without aligned log-probs stops the step (`coreweave_cfg.require_logprobs`).
 - Keep `policy.generation` at `temperature: 1.0`, `top_p: 1.0` and `top_k: null`. NeMo-RL
   computes its log-probs after them, and the deployment reports its own before them, so the backend

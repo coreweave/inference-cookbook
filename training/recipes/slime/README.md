@@ -159,6 +159,9 @@ the gap first. The [routing replay case study](../../case-studies/rollout-routin
 measures the gap with and without replay.
 
 - `USE_TIS=0` in `run.env` turns it off.
+  A `run.env` written before this setting needs a `USE_TIS` line, because `render.sh` refuses a
+  manifest that uses a variable the file doesn't set. `USE_TIS=1`, or an empty `USE_TIS=`,
+  keeps TIS on.
 - TIS reads `rollout_log_probs` from every sample. A group whose log-probs do not line up with
   its tokens is sampled again, up to twice, before the rollout fails. With the sampled token ids
   from the deployment, they always line up.
