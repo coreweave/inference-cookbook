@@ -48,14 +48,13 @@ def test_a_cache_salt_goes_out_in_nvext() -> None:
     assert "nvext" not in completion_request(body, tokenizer)
 
 
-def test_a_request_without_a_seed_gets_a_random_one(monkeypatch) -> None:
+def test_a_request_without_a_seed_gets_a_random_one() -> None:
     tokenizer = SimpleNamespace(apply_chat_template=lambda messages, **kwargs: [10, 20])
     body = {"model": "m", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 5}
     first, second = (completion_request(body, tokenizer)["seed"] for _ in range(2))
     assert first != second and 0 <= first < 2**62
     assert completion_request({**body, "seed": 7}, tokenizer)["seed"] == 7  # Gym's own seed stays
-    monkeypatch.setenv("CWTRAIN_ROLLOUT_SEEDS", "0")
-    assert "seed" not in completion_request(body, tokenizer)
+    assert "seed" not in completion_request(body, tokenizer, seed=False)
 
 
 @pytest.fixture
