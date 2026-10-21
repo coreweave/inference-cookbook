@@ -1020,9 +1020,8 @@ def test_requests_are_salted_with_the_identity_the_deployment_serves(monkeypatch
     gen.generate(data, greedy=False)
     assert "nvext" not in seen[0]
     assert seen[1]["nvext"] == {"cache_salt": "nemo-test-v000004"}
-    assert seen[0]["seed"] != seen[1]["seed"]
-    CoreWeaveGeneration(gen_config(seeds=False), Tokenizer()).generate(data, greedy=False)
-    assert "seed" not in seen[2]  # coreweave_cfg.seeds: false
+    # one request per distinct prompt, with n choices on one engine: no seed needed
+    assert "seed" not in seen[0] and "seed" not in seen[1]
 
 
 def test_generate_rejects_missing_logprobs_when_required(monkeypatch) -> None:

@@ -31,8 +31,8 @@ Configuration (environment of the process that runs the rollout function):
                                  trainer encodes and trains on; ``0`` sends the rendered text.
 ``CWTRAIN_ROLLOUT_ROUTED_EXPERTS`` ``1`` asks a Mixture-of-Experts deployment for each sequence's
                                  routed experts; ``0`` (default) does not. See "Routed experts".
-``CWTRAIN_ROLLOUT_SEEDS``        ``1`` (default) sends a random seed with every request; ``0``
-                                 leaves sampling to each replica's own random state. See "Seeds".
+``CWTRAIN_ROLLOUT_SEEDS``        ``1`` (default) seeds every request that samples one choice of a
+                                 group on its own; ``0`` never sends a seed. See "Seeds".
 ==============================  =====================================================
 
 Responses
@@ -96,11 +96,13 @@ the wait, the rollout function logs a warning.
 Seeds
 -----
 
-Every request carries its own random ``seed``, below 2**62. Without one, a replica takes a request's
-sampling noise from its engine's random state. Every replica starts that state from the same
-default seed, so replicas that start together sample a prompt identically when it arrives as the
-same request on each. The one-choice requests of a group with routed experts can land like that.
-With ``n`` > 1, vLLM seeds the choices ``seed``, ``seed + 1`` and so on. Seeds make sampling
+A request that samples one choice of a group on its own carries a random ``seed``, below 2**62. That
+is each request of a group with routed experts, and each of the Gym model server's. Without a seed,
+a replica takes a request's sampling noise from its engine's random state, and every replica starts
+that state from the same default seed. So replicas that start together sample a prompt identically
+when it arrives as the same request on each, and a group's choices on different replicas could
+come back equal. A request with ``n`` > 1 samples every choice on one engine, which draws distinct
+noise for each, so it goes unseeded: a seed costs 1-3% of decode throughput. Seeds make sampling
 independent of the replica, not reproducible: decoding on a deployment is not bit-exact.
 
 Routed experts
@@ -215,7 +217,7 @@ class RolloutConfig:
     #: Fail a batch in which a sample's log-probs do not align, instead of dropping them from the
     #: whole batch. For a trainer that reads them from every sample (see :meth:`for_trainer`).
     require_logprobs: bool = False
-    #: Send a random seed with every request (see "Seeds" above).
+    #: Seed every request that samples one choice of a group on its own (see "Seeds" above).
     seeds: bool = True
 
     def __post_init__(self) -> None:
@@ -451,8 +453,6 @@ class CompletionSampler:
                 payload["return_tokens_as_token_ids"] = True
         if self.config.routed_experts:
             return await self._sample_with_routes(prompt, n, payload)
-        if self.config.seeds:
-            payload["seed"] = request_seed()
         async with self._semaphore:
             body = await self._post_with_retry(payload)
         choices = sorted(body.get("choices") or [], key=lambda c: c.get("index", 0))
@@ -480,7 +480,8 @@ class CompletionSampler:
         if isinstance(prompt, str):
             raise RolloutError("routed experts need a token-id prompt")
         payload = with_nvext({**payload, "n": 1}, extra_fields=["routed_experts"])
-        # one seed per request: choices of one prompt with the same seed would come back equal
+        # Each choice is its own request and may reach another replica, so each gets its own
+        # seed (see "Seeds" above). Equal seeds would sample equal choices.
         payloads = [
             {**payload, "seed": request_seed()} if self.config.seeds else payload for _ in range(n)
         ]

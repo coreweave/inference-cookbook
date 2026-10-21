@@ -25,7 +25,9 @@ Configuration lives under ``policy.generation.coreweave_cfg``. The rollout keys 
                       ``policy.max_total_sequence_length``.
 ``token_id_prompts``  Send prompts as token ids (default true). If the endpoint rejects them and
                       a text request succeeds, the run sends text from then on.
-``seeds``             Send a random seed with every request (default true).
+``seeds``             Seed every Gym request, each of which samples one choice (default true).
+                      The backend's own requests sample all of a prompt's choices on one engine
+                      and go unseeded.
 ``require_logprobs``  Fail the step when a response has no aligned log-probs (default true).
 ``importance_sampling`` NeMo-RL's importance-sampling correction compares the log-probs with its
                       own (default false; the recipe's config ties it to
