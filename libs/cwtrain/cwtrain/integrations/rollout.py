@@ -54,10 +54,12 @@ log-probs therefore also needs the ``0003`` patch in the slime recipe.
 
 slime and miles read every sample's log-probs with ``--use-tis``, ``--use-rollout-logprobs`` or
 ``--get-mismatch-metrics``, and cannot train a batch without them. With any of these flags,
-:meth:`RolloutConfig.for_trainer` makes them required, and a batch in which a sample's log-probs
-do not align is an error. The trainer must then also sample at temperature 1. The endpoint reports
-log-probs before temperature (vLLM's default), but slime and miles score at
-``--rollout-temperature``, so at any other temperature the two are not comparable.
+:meth:`RolloutConfig.for_trainer` makes them required. A group whose log-probs do not align is then
+sampled again, up to :data:`LOGPROB_RESAMPLES` times, and the rollout fails only if it still does
+not align. The trainer must also sample at temperature 1. The endpoint reports log-probs before
+temperature (vLLM's default), but slime and miles score at ``--rollout-temperature``, so at any
+other temperature the two are not comparable. With ``--get-mismatch-metrics`` alone, which only
+reports, that is a warning.
 
 Prompts
 -------
@@ -129,6 +131,8 @@ class RolloutError(CWTrainError):
 
 #: slime and miles flags that read ``rollout_log_probs`` from every sample of a batch.
 LOGPROB_READERS = ("use_tis", "use_rollout_logprobs", "get_mismatch_metrics")
+#: With log-probs required, how many more times a group whose log-probs do not align is sampled.
+LOGPROB_RESAMPLES = 2
 
 
 #: CoreWeave's OpenAI frontend rejects a request with more stop strings or stop token ids.
@@ -250,8 +254,8 @@ class RolloutConfig:
         (see "Responses" above).
 
         Raises:
-            CWTrainError: The trainer reads log-probs, but they are off, or it samples at a
-                temperature other than 1.
+            CWTrainError: The trainer reads log-probs, but they are off, or it trains on them at
+                a temperature other than 1.
         """
         env = os.environ if environ is None else environ
         config = cls.from_env(env)
@@ -278,11 +282,15 @@ class RolloutConfig:
             )
         temperature = float(getattr(args, "rollout_temperature", 1.0))
         if temperature != 1.0:
-            raise CWTrainError(
+            mismatch = (
                 f"{readers[0]} compares log-probs that the trainer computes at "
                 f"--rollout-temperature {temperature:g} with the endpoint's, which it reports "
-                f"before temperature. Sample at temperature 1, or turn {readers[0]} off"
+                "before temperature"
             )
+            if readers != ["--get-mismatch-metrics"]:
+                raise CWTrainError(f"{mismatch}. Sample at temperature 1, or turn {readers[0]} off")
+            # the metrics only report; training does not use them
+            log.warning("%s, so the mismatch metrics are off", mismatch)
         return dataclasses.replace(config, require_logprobs=True)
 
 
@@ -831,32 +839,47 @@ async def sample_groups(
 ) -> dict[str, float]:
     """Sample every group concurrently and fill its samples; returns timing/shape metrics.
 
+    With log-probs required, a group whose log-probs do not align is sampled again, up to
+    :data:`LOGPROB_RESAMPLES` times.
+
     Raises:
-        RolloutError: The config requires log-probs, and a sample's do not align.
+        RolloutError: The config requires log-probs, and a group's still do not align.
     """
     started = time.monotonic()
+    resampled = 0
 
     async def one(group: Sequence[Any]) -> None:
+        nonlocal resampled
         prompt = group[0].prompt
         if not isinstance(prompt, str):
             raise RolloutError(
                 "prompts must arrive rendered as strings; enable --apply-chat-template"
             )
         prompt_ids = list(tokenizer.encode(prompt, add_special_tokens=False))
-        completions, still = await sample_prompt(
-            sampler,
-            prompt_ids,
-            len(group),
-            text=lambda: prompt,
-            token_id_prompts=sampler.token_id_prompts,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            top_p=top_p,
-            stop=stop,
-        )
-        # Groups finish in any order. After one group falls back to text, none switches back.
-        sampler.token_id_prompts = sampler.token_id_prompts and still
-        fill_group(group, completions, prompt_ids=prompt_ids, tokenizer=tokenizer)
+        for attempt in range(LOGPROB_RESAMPLES + 1):
+            completions, still = await sample_prompt(
+                sampler,
+                prompt_ids,
+                len(group),
+                text=lambda: prompt,
+                token_id_prompts=sampler.token_id_prompts,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                stop=stop,
+            )
+            # Groups finish in any order. After one group falls back to text, none switches back.
+            sampler.token_id_prompts = sampler.token_id_prompts and still
+            fill_group(group, completions, prompt_ids=prompt_ids, tokenizer=tokenizer)
+            aligned = all(getattr(s, "rollout_log_probs", None) is not None for s in group)
+            if aligned or not sampler.config.require_logprobs or attempt == LOGPROB_RESAMPLES:
+                return
+            resampled += 1
+            log.warning(
+                "sampling a group again: its log-probs do not line up with its tokens (try %d/%d)",
+                attempt + 1,
+                LOGPROB_RESAMPLES,
+            )
 
     await asyncio.gather(*(one(g) for g in groups))
     flat = [s for g in groups for s in g]
@@ -889,6 +912,7 @@ async def sample_groups(
         "coreweave/truncated_fraction": truncated / max(1, len(flat)),
         "coreweave/logprobs_aligned_fraction": aligned / max(1, len(flat)),
         "coreweave/logprobs_kept": 1.0 if kept else 0.0,
+        "coreweave/resampled_groups": float(resampled),
     }
 
 
@@ -896,6 +920,7 @@ __all__ = [
     "Completion",
     "CompletionSampler",
     "LOGPROB_READERS",
+    "LOGPROB_RESAMPLES",
     "RolloutConfig",
     "RolloutError",
     "align_logprobs",

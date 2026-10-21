@@ -96,9 +96,9 @@ over `cwtrain.integrations.rollout`:
   does it re-tokenize the text.
 - Rewards come from miles' own `--rm-type`.
 - When the endpoint's sampled-token log-probs align with the response tokens, including the token
-  that ended the response, it attaches them as `rollout_log_probs`. With `--use-tis`, a batch where
-  they do not align fails the rollout. Without it, they stay unset, and the trainer recomputes
-  log-probs either way.
+  that ended the response, it attaches them as `rollout_log_probs`. With `--use-tis`, a group where
+  they do not align is sampled again, up to twice, before the rollout fails. Without it, they stay
+  unset, and the trainer recomputes log-probs either way.
 
 Configure it with `CWTRAIN_ROLLOUT_BASE_URL`, `CWTRAIN_ROLLOUT_MODEL` and, optionally,
 `CWTRAIN_ROLLOUT_API_KEY_FILE`. The hook blocks until every replica serves the new version, so the
@@ -114,9 +114,9 @@ the gap first. The [routing replay case study](../../case-studies/rollout-routin
 measures the gap with and without replay.
 
 - `USE_TIS=0` in `run.env` (the launcher's `--tis 0`) turns it off.
-- TIS reads `rollout_log_probs` from every sample, so a batch where a sample's log-probs do not
-  line up with its tokens fails the rollout. With the sampled token ids from the deployment, they
-  always do.
+- TIS reads `rollout_log_probs` from every sample. A group whose log-probs do not line up with
+  its tokens is sampled again, up to twice, before the rollout fails. With the sampled token ids
+  from the deployment, they always line up.
 - Sample at temperature 1, the recipe's `--rollout-temperature`. The deployment reports log-probs
   before temperature and miles scores after it, so the rollout function refuses TIS at any other
   temperature.
@@ -196,6 +196,9 @@ trained. `--async-correction` picks the denominator of the PPO ratio:
 | --- | --- | --- |
 | `keep_old_actor` (default) | `--keep-old-actor` | Recomputes it with the weights that generated the rollout. Costs one extra copy of the actor weights on the trainer. TIS then corrects only for the gap between the deployment's and the trainer's numerics. |
 | `none` | | Recomputes it with the current weights. TIS then corrects for the stale step too. With `USE_TIS=0`, this is plain GRPO on one-step-stale samples. |
+
+`ASYNC_CORRECTION=tis` from earlier versions of this recipe is now `USE_TIS=1` (the default) with
+`ASYNC_CORRECTION=none`. The launcher refuses `tis` with that hint.
 
 On a hot-load deployment, the gain is that generation overlaps the training step. The hot-load
 itself still runs between steps. slime's upstream tree does not ship a `train_async.py`. Its

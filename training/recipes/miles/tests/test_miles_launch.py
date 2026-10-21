@@ -215,6 +215,14 @@ def test_tis_is_on_in_both_loops_unless_turned_off(
     assert ("--keep-old-actor " in args) is old_actor
 
 
+def test_the_old_tis_async_correction_says_what_to_set_instead() -> None:
+    with pytest.raises(launch.argparse.ArgumentTypeError, match="set ASYNC_CORRECTION=none"):
+        launch.async_correction("tis")
+    with pytest.raises(launch.argparse.ArgumentTypeError, match="keep_old_actor or none"):
+        launch.async_correction("sometimes")
+    assert launch.async_correction("none") == "none"
+
+
 def test_tis_takes_cwtrains_boolean_values_from_run_env() -> None:
     assert launch.on_off("off") is False and launch.on_off("yes") is True
     with pytest.raises(launch.argparse.ArgumentTypeError, match="--tis must be a boolean"):

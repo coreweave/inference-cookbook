@@ -140,9 +140,9 @@ mode does not work with `--colocate`.
   report them.
 - scores the responses with slime's own `--rm-type`.
 - attaches the endpoint's sampled-token log-probs as `rollout_log_probs` when they align with the
-  response tokens, including the token that ended the response. With `--use-tis`, a batch where
-  they do not align fails the rollout. Without it, they stay unset, and the trainer recomputes
-  log-probs either way.
+  response tokens, including the token that ended the response. With `--use-tis`, a group where
+  they do not align is sampled again, up to twice, before the rollout fails. Without it, they stay
+  unset, and the trainer recomputes log-probs either way.
 
 It is a thin slime adapter over `cwtrain.integrations.rollout`. Configure it with
 `CWTRAIN_ROLLOUT_BASE_URL`, `CWTRAIN_ROLLOUT_MODEL` and, optionally,
@@ -159,9 +159,9 @@ the gap first. The [routing replay case study](../../case-studies/rollout-routin
 measures the gap with and without replay.
 
 - `USE_TIS=0` in `run.env` turns it off.
-- TIS reads `rollout_log_probs` from every sample, so a batch where a sample's log-probs do not
-  line up with its tokens fails the rollout. With the sampled token ids from the deployment, they
-  always do.
+- TIS reads `rollout_log_probs` from every sample. A group whose log-probs do not line up with
+  its tokens is sampled again, up to twice, before the rollout fails. With the sampled token ids
+  from the deployment, they always line up.
 - Sample at temperature 1, the recipe's `--rollout-temperature`. The deployment reports log-probs
   before temperature and slime scores after it, so the rollout function refuses TIS at any other
   temperature.

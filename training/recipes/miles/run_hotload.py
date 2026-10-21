@@ -134,6 +134,18 @@ def on_off(raw: str) -> bool:
         raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
+def async_correction(raw: str) -> str:
+    """``--async-correction``: ``keep_old_actor`` or ``none``. ``tis`` is now ``--tis``."""
+    if raw == "tis":
+        raise argparse.ArgumentTypeError(
+            "tis is no longer an async correction: TIS is on by default in both loops (USE_TIS=1, "
+            "--tis 1). For what tis did, TIS without the old actor, set ASYNC_CORRECTION=none"
+        )
+    if raw not in ("keep_old_actor", "none"):
+        raise argparse.ArgumentTypeError(f"choose keep_old_actor or none, got {raw!r}")
+    return raw
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--model-name", default="Qwen3-4B",
@@ -157,7 +169,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--prompt-data", default=None, help="jsonl with prompt/label keys; default dapo-math-17k")
     p.add_argument("--train-script", default="train.py", choices=["train.py", "train_async.py"])
     p.add_argument("--tis", type=on_off, default=True, help="truncated importance sampling: 1 or 0")
-    p.add_argument("--async-correction", default="keep_old_actor", choices=["keep_old_actor", "none"])
+    p.add_argument("--async-correction", default="keep_old_actor", type=async_correction,
+                   help="train_async.py's ratio denominator: keep_old_actor or none")
     p.add_argument("--rollout-function", default="coreweave_rollout.CoreWeaveRolloutFn")
     p.add_argument("--rollout-module-dir", default=str(Path(__file__).resolve().parent),
                    help="directory holding coreweave_rollout.py (added to the workers' PYTHONPATH)")

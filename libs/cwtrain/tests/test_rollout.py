@@ -242,14 +242,25 @@ def test_logprobs_kept_when_every_sample_aligns() -> None:
     assert metrics["coreweave/logprobs_kept"] == 1.0
 
 
-def test_required_logprobs_that_do_not_align_fail_the_batch() -> None:
-    # "x" has 4 log-probs for its 1 token, as in the test above
-    transport, _ = make_server(
-        [
-            completions_response(["ab"], ["stop"], [[-0.1, -0.2, -0.3]]),
-            completions_response(["x"], ["stop"], [[-0.5, -0.5, -0.5, -0.5]]),
-        ]
+ALIGNED = completions_response(["ab"], ["stop"], [[-0.1, -0.2, -0.3]])
+# "x" has 4 log-probs for its 1 token, as in the test above
+MISALIGNED = completions_response(["x"], ["stop"], [[-0.5, -0.5, -0.5, -0.5]])
+
+
+def test_a_group_whose_required_logprobs_do_not_align_is_sampled_again() -> None:
+    transport, seen = make_server([ALIGNED, MISALIGNED, ALIGNED])
+    config = RolloutConfig(base_url="https://gw/v1", model="m", require_logprobs=True)
+    sampler = CompletionSampler(config, transport=transport)
+    groups = [[Sample(prompt="p1")], [Sample(prompt="p2")]]
+    metrics = asyncio.run(
+        sample_groups(sampler, groups, tokenizer=Tokenizer(), max_tokens=8, temperature=1.0)
     )
+    assert len(seen) == 3 and metrics["coreweave/resampled_groups"] == 1.0
+    assert all(g[0].rollout_log_probs is not None for g in groups)
+
+
+def test_required_logprobs_that_never_align_fail_the_rollout() -> None:
+    transport, seen = make_server([ALIGNED] + [MISALIGNED] * 3)
     config = RolloutConfig(base_url="https://gw/v1", model="m", require_logprobs=True)
     sampler = CompletionSampler(config, transport=transport)
     groups = [[Sample(prompt="p1")], [Sample(prompt="p2")]]
@@ -257,6 +268,7 @@ def test_required_logprobs_that_do_not_align_fail_the_batch() -> None:
         asyncio.run(
             sample_groups(sampler, groups, tokenizer=Tokenizer(), max_tokens=8, temperature=1.0)
         )
+    assert len(seen) == 4  # the group, then two more tries
     with pytest.raises(CWTrainError, match="require_logprobs needs logprobs on"):
         RolloutConfig(base_url="u", model="m", logprobs=False, require_logprobs=True)
 
@@ -952,12 +964,17 @@ def test_a_trainer_that_reads_logprobs_requires_them(reader) -> None:
         RolloutConfig.for_trainer(args, {**ROLLOUT_ENV, "CWTRAIN_ROLLOUT_LOGPROBS": "0"})
 
 
-def test_a_trainer_that_reads_logprobs_samples_at_temperature_one() -> None:
+def test_a_trainer_that_reads_logprobs_samples_at_temperature_one(caplog) -> None:
     with pytest.raises(CWTrainError, match="--rollout-temperature 0.8 with the endpoint's"):
         RolloutConfig.for_trainer(ScoringArgs(use_tis=True, rollout_temperature=0.8), ROLLOUT_ENV)
     # without TIS nothing compares the log-probs, so any temperature goes
     cooler = RolloutConfig.for_trainer(ScoringArgs(rollout_temperature=0.8), ROLLOUT_ENV)
     assert cooler.require_logprobs is False
+    # the mismatch metrics only report, so they get a warning, and still need the log-probs
+    metrics_only = ScoringArgs(get_mismatch_metrics=True, rollout_temperature=0.8)
+    with caplog.at_level(logging.WARNING, logger="cwtrain.integrations.rollout"):
+        assert RolloutConfig.for_trainer(metrics_only, ROLLOUT_ENV).require_logprobs is True
+    assert "the mismatch metrics are off" in caplog.text
 
 
 def test_routes_must_have_the_trainers_layer_count_and_top_k() -> None:
