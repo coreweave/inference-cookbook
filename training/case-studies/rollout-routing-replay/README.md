@@ -17,7 +17,7 @@ trainer uses them instead of its own choices. The gate weights still come from t
 router, so the router keeps learning. Replay needs exact tokens: the routes have one row per
 position.
 
-| | |
+| Component | Setup |
 | --- | --- |
 | Model | [`zai-org/GLM-5.3-Flash-BF16`](https://huggingface.co/zai-org/GLM-5.3-Flash-BF16) at `f9fed3bb`: 45 layers (42 MoE), 288 routed experts, top-8 |
 | Deployment | `dynamo-vllm` 0.30, one replica of 16 H100 GPUs (tensor parallel 16), engine option `enable-return-routed-experts` |
