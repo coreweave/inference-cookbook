@@ -155,6 +155,9 @@ mode does not work with `--colocate`.
   response tokens, including the token that ended the response. With `--use-tis`, a group where
   they do not align is sampled again, up to twice, before the rollout fails. Without it, they stay
   unset, and the trainer recomputes log-probs either way.
+- samples each prompt in one turn. It never calls a per-sample generate function, slime's hook
+  for multi-turn and agent loops, so `--custom-generate-function-path` fails the first rollout
+  instead of being skipped.
 
 It is a thin slime adapter over `cwtrain.integrations.rollout`. Configure it with
 `CWTRAIN_ROLLOUT_BASE_URL`, `CWTRAIN_ROLLOUT_MODEL` and, optionally,

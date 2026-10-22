@@ -125,6 +125,13 @@ def test_tis_requires_logprobs_and_temperature_one(rollout) -> None:
         module.generate_rollout(args(False, use_tis=True, rollout_temperature=0.7), 5, Data())
 
 
+def test_a_generate_function_is_refused_rather_than_skipped(rollout) -> None:
+    module, _ = rollout
+    retool = "examples.retool.generate_with_retool.generate"
+    with pytest.raises(CWTrainError, match="--custom-generate-function-path is not supported"):
+        module.generate_rollout(args(False, custom_generate_function_path=retool), 3, Data())
+
+
 def test_each_rollout_is_salted_with_the_run_and_the_rollout(rollout, monkeypatch) -> None:
     module, seen = rollout
     monkeypatch.setenv("CWTRAIN_HOTLOAD_RUN_ID", "grpo-7")

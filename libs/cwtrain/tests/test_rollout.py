@@ -1066,6 +1066,29 @@ def test_a_trainer_that_reads_logprobs_samples_at_temperature_one(caplog) -> Non
     assert "the mismatch metrics are off" in caplog.text
 
 
+@dataclass
+class GeneratingArgs:  # the slime and miles flags that pick the trainer's own generate step
+    custom_generate_function_path: str | None = None
+    use_session_server: bool | str = False  # miles only: True, "v1" or "v2"
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [
+        {"custom_generate_function_path": "examples.retool.generate_with_retool.generate"},
+        {"use_session_server": True},
+        {"use_session_server": "v2"},
+    ],
+)
+def test_a_trainer_that_asks_for_its_own_generate_step_is_refused(flags) -> None:
+    flag = "--" + next(iter(flags)).replace("_", "-")
+    with pytest.raises(CWTrainError, match=f"{flag} is not supported"):
+        RolloutConfig.for_trainer(GeneratingArgs(**flags), ROLLOUT_ENV)
+    # the trainers' defaults leave sampling to the rollout function, as does an empty path
+    RolloutConfig.for_trainer(GeneratingArgs(), ROLLOUT_ENV)
+    RolloutConfig.for_trainer(GeneratingArgs(custom_generate_function_path=""), ROLLOUT_ENV)
+
+
 def test_routes_must_have_the_trainers_layer_count_and_top_k() -> None:
     from cwtrain.integrations.rollout import check_routes_fit
 

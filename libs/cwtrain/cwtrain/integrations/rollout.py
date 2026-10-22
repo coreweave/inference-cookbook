@@ -169,6 +169,10 @@ class RolloutError(CWTrainError):
 LOGPROB_READERS = ("use_tis", "use_rollout_logprobs", "get_mismatch_metrics")
 #: With log-probs required, how many more times a group whose log-probs do not align is sampled.
 LOGPROB_RESAMPLES = 2
+#: slime and miles flags that hand sampling to the trainer's own generate step: a per-sample
+#: generate function, such as a multi-turn or agent loop, and miles' session server, which those
+#: loops talk to. The rollout functions here replace that step and sample each prompt in one turn.
+TRAINER_GENERATE_FLAGS = ("custom_generate_function_path", "use_session_server")
 
 
 #: CoreWeave's OpenAI frontend rejects a request with more stop strings or stop token ids.
@@ -302,10 +306,25 @@ class RolloutConfig:
         With one of :data:`LOGPROB_READERS` on, such as ``--use-tis``, log-probs are required
         (see "Responses" above).
 
+        The trainer's own generate step is what the rollout functions replace, so a flag from
+        :data:`TRAINER_GENERATE_FLAGS`, such as ``--custom-generate-function-path``, would go
+        unused. It is refused, so that a multi-turn run does not quietly train single-turn.
+
         Raises:
-            CWTrainError: The trainer reads log-probs, but they are off, or it trains on them at
-                a temperature other than 1.
+            CWTrainError: The trainer asks for its own generate step. Or it reads log-probs, but
+                they are off, or it trains on them at a temperature other than 1.
         """
+        unused = [
+            "--" + name.replace("_", "-")
+            for name in TRAINER_GENERATE_FLAGS
+            if getattr(args, name, None)
+        ]
+        if unused:
+            raise CWTrainError(
+                f"{unused[0]} is not supported: the rollout function samples each prompt in one "
+                "turn, without the trainer's generate functions or session server, so a "
+                "multi-turn or agent loop would not run"
+            )
         env = os.environ if environ is None else environ
         config = cls.from_env(env)
         flag = getattr(args, "use_rollout_routing_replay", None)
@@ -990,6 +1009,7 @@ __all__ = [
     "LOGPROB_RESAMPLES",
     "RolloutConfig",
     "RolloutError",
+    "TRAINER_GENERATE_FLAGS",
     "align_logprobs",
     "as_cache_salt",
     "check_stop_limits",

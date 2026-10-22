@@ -134,6 +134,15 @@ def test_tis_requires_logprobs_and_temperature_one(rollout) -> None:
         run(module, replay=False, use_tis=True, rollout_temperature=0.7)
 
 
+def test_a_generate_function_or_session_server_is_refused_rather_than_skipped(rollout) -> None:
+    module, _ = rollout
+    agent = "miles.rollout.generate_hub.agentic_tool_call.generate"
+    with pytest.raises(CWTrainError, match="--custom-generate-function-path is not supported"):
+        run(module, replay=False, custom_generate_function_path=agent)
+    with pytest.raises(CWTrainError, match="--use-session-server is not supported"):
+        run(module, replay=False, use_session_server="v2")
+
+
 def test_each_rollout_is_salted_with_the_run_and_the_rollout(rollout, monkeypatch) -> None:
     module, seen = rollout
     monkeypatch.setenv("CWTRAIN_HOTLOAD_RUN_ID", "grpo-7")
