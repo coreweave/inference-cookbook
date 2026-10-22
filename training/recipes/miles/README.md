@@ -111,10 +111,12 @@ over `cwtrain.integrations.rollout`:
   that ended the response, it attaches them as `rollout_log_probs`. With `--use-tis`, a group where
   they do not align is sampled again, up to twice, before the rollout fails. Without it, they stay
   unset, and the trainer recomputes log-probs either way.
-- Each prompt is sampled in one turn. The function never calls a per-sample generate function or
-  the session server, miles' hooks for multi-turn and agent loops. So
-  `--custom-generate-function-path` and `--use-session-server` stop the run at startup instead of
-  being skipped.
+- Each prompt is sampled in one turn. The function never calls a per-sample generate function,
+  miles' hook for multi-turn and agent loops. So `run_hotload.py` refuses
+  `--custom-generate-function-path` in `--extra-args` before it downloads anything. A generate
+  function set another way, such as in a `--custom-config-path` file, stops miles at startup.
+  miles' session server (`--use-session-server`) needs SGLang engines, so without them miles stops
+  at startup by itself.
 
 Configure it with `CWTRAIN_ROLLOUT_BASE_URL`, `CWTRAIN_ROLLOUT_MODEL` and, optionally,
 `CWTRAIN_ROLLOUT_API_KEY_FILE`. The hook blocks until every replica serves the new version, so the

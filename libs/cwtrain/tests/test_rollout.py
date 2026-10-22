@@ -27,6 +27,7 @@ from cwtrain.integrations.rollout import (
     RolloutError,
     as_cache_salt,
     decode_routed_experts,
+    refuse_generate_function,
     rollout_cache_salt,
     sample_groups,
     sample_prompt,
@@ -1067,26 +1068,25 @@ def test_a_trainer_that_reads_logprobs_samples_at_temperature_one(caplog) -> Non
 
 
 @dataclass
-class GeneratingArgs:  # the slime and miles flags that pick the trainer's own generate step
+class GeneratingArgs:  # the slime and miles flag that names a per-sample generate function
     custom_generate_function_path: str | None = None
-    use_session_server: bool | str = False  # miles only: True, "v1" or "v2"
 
 
-@pytest.mark.parametrize(
-    "flags",
-    [
-        {"custom_generate_function_path": "examples.retool.generate_with_retool.generate"},
-        {"use_session_server": True},
-        {"use_session_server": "v2"},
-    ],
-)
-def test_a_trainer_that_asks_for_its_own_generate_step_is_refused(flags) -> None:
-    flag = "--" + next(iter(flags)).replace("_", "-")
-    with pytest.raises(CWTrainError, match=f"{flag} is not supported"):
-        RolloutConfig.for_trainer(GeneratingArgs(**flags), ROLLOUT_ENV)
-    # the trainers' defaults leave sampling to the rollout function, as does an empty path
+def test_a_trainer_that_names_a_generate_function_is_refused() -> None:
+    retool = GeneratingArgs("examples.retool.generate_with_retool.generate")
+    with pytest.raises(CWTrainError, match="--custom-generate-function-path is not supported"):
+        RolloutConfig.for_trainer(retool, ROLLOUT_ENV)
+    # the trainers' default leaves sampling to the rollout function, as does an empty path
     RolloutConfig.for_trainer(GeneratingArgs(), ROLLOUT_ENV)
-    RolloutConfig.for_trainer(GeneratingArgs(custom_generate_function_path=""), ROLLOUT_ENV)
+    RolloutConfig.for_trainer(GeneratingArgs(""), ROLLOUT_ENV)
+
+
+@pytest.mark.parametrize("given", [["--custom-generate-function-path", "my.generate"],
+                                   ["--custom-generate-function-path=my.generate"]])  # fmt: skip
+def test_a_launcher_can_refuse_a_generate_function_before_the_trainer_starts(given) -> None:
+    with pytest.raises(CWTrainError, match="--custom-generate-function-path is not supported"):
+        refuse_generate_function(["--save-interval", "50", *given])
+    refuse_generate_function(["--save-interval", "50", "--custom-rm-path", "my.rm"])
 
 
 def test_routes_must_have_the_trainers_layer_count_and_top_k() -> None:

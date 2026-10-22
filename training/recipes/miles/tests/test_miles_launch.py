@@ -223,6 +223,13 @@ def test_the_old_tis_async_correction_says_what_to_set_instead() -> None:
     assert launch.async_correction("none") == "none"
 
 
+def test_extra_args_that_name_a_generate_function_stop_the_launcher() -> None:
+    agent = "--custom-generate-function-path miles.rollout.generate_hub.agentic_tool_call.generate"
+    with pytest.raises(launch.argparse.ArgumentTypeError, match="is not supported"):
+        launch.extra_args(f"--save-interval 50 {agent}")
+    assert launch.extra_args("--save-interval 50") == "--save-interval 50"
+
+
 def test_tis_takes_cwtrains_boolean_values_from_run_env() -> None:
     assert launch.on_off("off") is False and launch.on_off("yes") is True
     with pytest.raises(launch.argparse.ArgumentTypeError, match="--tis must be a boolean"):

@@ -156,8 +156,9 @@ mode does not work with `--colocate`.
   they do not align is sampled again, up to twice, before the rollout fails. Without it, they stay
   unset, and the trainer recomputes log-probs either way.
 - samples each prompt in one turn. It never calls a per-sample generate function, slime's hook
-  for multi-turn and agent loops, so `--custom-generate-function-path` fails the first rollout
-  instead of being skipped.
+  for multi-turn and agent loops. So `launch.py` refuses `--custom-generate-function-path` in
+  `EXTRA_TRAIN_ARGS` before it stages anything. A generate function set another way, such as in a
+  `--custom-config-path` file, stops the run at the first rollout, after the baseline hot-load.
 
 It is a thin slime adapter over `cwtrain.integrations.rollout`. Configure it with
 `CWTRAIN_ROLLOUT_BASE_URL`, `CWTRAIN_ROLLOUT_MODEL` and, optionally,

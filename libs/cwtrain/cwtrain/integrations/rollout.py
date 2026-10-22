@@ -138,7 +138,7 @@ import os
 import random
 import secrets
 import time
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -169,10 +169,26 @@ class RolloutError(CWTrainError):
 LOGPROB_READERS = ("use_tis", "use_rollout_logprobs", "get_mismatch_metrics")
 #: With log-probs required, how many more times a group whose log-probs do not align is sampled.
 LOGPROB_RESAMPLES = 2
-#: slime and miles flags that hand sampling to the trainer's own generate step: a per-sample
-#: generate function, such as a multi-turn or agent loop, and miles' session server, which those
-#: loops talk to. The rollout functions here replace that step and sample each prompt in one turn.
-TRAINER_GENERATE_FLAGS = ("custom_generate_function_path", "use_session_server")
+#: The slime and miles flag that hands sampling to a per-sample generate function, such as a
+#: multi-turn or agent loop. The rollout functions here never call one: they sample each prompt in
+#: one turn.
+GENERATE_FUNCTION_FLAG = "--custom-generate-function-path"
+_NO_GENERATE_FUNCTION = (
+    f"{GENERATE_FUNCTION_FLAG} is not supported: the rollout function samples each prompt in one "
+    "turn and never calls a generate function, so a multi-turn or agent loop would not run"
+)
+
+
+def refuse_generate_function(trainer_args: Iterable[str]) -> None:
+    """Raise if a trainer command line names a generate function, so that a launcher stops before
+    it stages anything. :meth:`RolloutConfig.for_trainer` refuses one set by any means, but only
+    once the trainer runs the rollout function.
+
+    Raises:
+        CWTrainError: ``trainer_args`` holds :data:`GENERATE_FUNCTION_FLAG`.
+    """
+    if any(arg.partition("=")[0] == GENERATE_FUNCTION_FLAG for arg in trainer_args):
+        raise CWTrainError(_NO_GENERATE_FUNCTION)
 
 
 #: CoreWeave's OpenAI frontend rejects a request with more stop strings or stop token ids.
@@ -306,25 +322,16 @@ class RolloutConfig:
         With one of :data:`LOGPROB_READERS` on, such as ``--use-tis``, log-probs are required
         (see "Responses" above).
 
-        The trainer's own generate step is what the rollout functions replace, so a flag from
-        :data:`TRAINER_GENERATE_FLAGS`, such as ``--custom-generate-function-path``, would go
-        unused. It is refused, so that a multi-turn run does not quietly train single-turn.
+        The rollout functions replace the trainer's per-sample generate step, so a
+        ``--custom-generate-function-path`` would go unused. It is refused, so that a multi-turn
+        run does not quietly train single-turn.
 
         Raises:
-            CWTrainError: The trainer asks for its own generate step. Or it reads log-probs, but
-                they are off, or it trains on them at a temperature other than 1.
+            CWTrainError: The trainer names a generate function. Or it reads log-probs, but they
+                are off, or it trains on them at a temperature other than 1.
         """
-        unused = [
-            "--" + name.replace("_", "-")
-            for name in TRAINER_GENERATE_FLAGS
-            if getattr(args, name, None)
-        ]
-        if unused:
-            raise CWTrainError(
-                f"{unused[0]} is not supported: the rollout function samples each prompt in one "
-                "turn, without the trainer's generate functions or session server, so a "
-                "multi-turn or agent loop would not run"
-            )
+        if getattr(args, "custom_generate_function_path", None):
+            raise CWTrainError(_NO_GENERATE_FUNCTION)
         env = os.environ if environ is None else environ
         config = cls.from_env(env)
         flag = getattr(args, "use_rollout_routing_replay", None)
@@ -1005,17 +1012,18 @@ async def sample_groups(
 __all__ = [
     "Completion",
     "CompletionSampler",
+    "GENERATE_FUNCTION_FLAG",
     "LOGPROB_READERS",
     "LOGPROB_RESAMPLES",
     "RolloutConfig",
     "RolloutError",
-    "TRAINER_GENERATE_FLAGS",
     "align_logprobs",
     "as_cache_salt",
     "check_stop_limits",
     "decode_routed_experts",
     "fill_group",
     "omitted_stop_token",
+    "refuse_generate_function",
     "request_seed",
     "rollout_cache_salt",
     "same_token",
