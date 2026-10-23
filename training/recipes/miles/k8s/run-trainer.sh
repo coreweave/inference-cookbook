@@ -42,4 +42,4 @@ exec python3 $WORK/py/run_hotload.py \
   --train-script "${TRAIN_SCRIPT:-train.py}" --async-correction "${ASYNC_CORRECTION:-keep_old_actor}" \
   --rollout-module-dir "$WORK/py" \
   --base-s3-uri "${BASE_S3_URI:-}" \
-  --extra-args "${EXTRA_TRAIN_ARGS:-}"
+  --extra-args="${EXTRA_TRAIN_ARGS:-}"

@@ -232,6 +232,15 @@ def test_extra_args_that_turn_on_miles_own_rollout_loop_stop_the_launcher() -> N
     assert launch.extra_args("--save-interval 50") == "--save-interval 50"
 
 
+def test_run_trainer_passes_extra_args_that_are_one_flag(tmp_path, monkeypatch) -> None:
+    # argparse reads a lone value that starts with "--" as an option, so the script joins it with "="
+    with pytest.raises(SystemExit):
+        launched_train_args(tmp_path, monkeypatch, "--extra-args", "--use-rollout-routing-replay")
+    args = launched_train_args(tmp_path, monkeypatch, "--extra-args=--use-rollout-routing-replay")
+    assert "--use-rollout-routing-replay" in args
+    assert '--extra-args="${EXTRA_TRAIN_ARGS:-}"' in (K8S / "run-trainer.sh").read_text()
+
+
 def test_tis_takes_cwtrains_boolean_values_from_run_env() -> None:
     assert launch.on_off("off") is False and launch.on_off("yes") is True
     with pytest.raises(launch.argparse.ArgumentTypeError, match="--tis must be a boolean"):
