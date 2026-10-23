@@ -2,7 +2,7 @@
 name = "cwtrain"
 # The only place the version is set. The package reads it from its installed metadata, and the
 # release workflow checks that the release tag matches it.
-version = "1.0.1"
+version = "1.0.2"
 description = "Train against CoreWeave Dedicated Inference: deployments, checkpoint hot-load and rollouts for RL training loops"
 readme = "README.md"
 license = "Apache-2.0"
