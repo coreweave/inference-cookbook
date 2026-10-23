@@ -20,7 +20,6 @@ import logging
 from miles.rollout.base_types import (
     BaseRolloutFn,
     RolloutFnConstructorInput,
-    RolloutFnEvalOutput,
     RolloutFnInput,
     RolloutFnTrainInput,
     RolloutFnTrainOutput,
@@ -28,7 +27,9 @@ from miles.rollout.base_types import (
 from miles.rollout.rm_hub import batched_async_rm
 from miles.utils.processing_utils import load_tokenizer
 
+from cwtrain.errors import CWTrainError
 from cwtrain.integrations.rollout import (
+    NO_EVALUATION,
     RolloutConfig,
     check_routes_fit,
     rollout_cache_salt,
@@ -40,7 +41,8 @@ log = logging.getLogger(__name__)
 
 
 class CoreWeaveRolloutFn(BaseRolloutFn):
-    """One ``/v1/completions`` request per GRPO group, ``n`` choices per request."""
+    """One ``/v1/completions`` request per GRPO group, ``n`` choices per request. It does not
+    evaluate."""
 
     def __init__(self, input: RolloutFnConstructorInput) -> None:
         super().__init__(input)
@@ -51,7 +53,7 @@ class CoreWeaveRolloutFn(BaseRolloutFn):
 
     async def __call__(self, input: RolloutFnInput):
         if input.evaluation:
-            return RolloutFnEvalOutput(data={}, metrics={})
+            raise CWTrainError(NO_EVALUATION)
         assert isinstance(input, RolloutFnTrainInput)
         args = self.args
         groups = self.data_source.get_samples(args.rollout_batch_size)

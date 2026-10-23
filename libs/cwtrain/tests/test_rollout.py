@@ -20,6 +20,7 @@ import pytest
 from cwtrain.errors import CWTrainError
 from cwtrain.integrations.rollout import (
     LOGPROB_READERS,
+    ROLLOUT_LOOP_FLAGS,
     SEED_LIMIT,
     Completion,
     CompletionSampler,
@@ -27,7 +28,7 @@ from cwtrain.integrations.rollout import (
     RolloutError,
     as_cache_salt,
     decode_routed_experts,
-    refuse_generate_function,
+    refuse_rollout_loop_flags,
     rollout_cache_salt,
     sample_groups,
     sample_prompt,
@@ -1068,25 +1069,43 @@ def test_a_trainer_that_reads_logprobs_samples_at_temperature_one(caplog) -> Non
 
 
 @dataclass
-class GeneratingArgs:  # the slime and miles flag that names a per-sample generate function
+class LoopArgs:  # the slime and miles flags for steps of their own rollout loop
     custom_generate_function_path: str | None = None
+    dynamic_sampling_filter_path: str | None = None
+    over_sampling_batch_size: int | None = None
+    rollout_sample_filter_path: str | None = None
+    rollout_all_samples_process_path: str | None = None
+    rollout_batch_size: int = 8
 
 
-def test_a_trainer_that_names_a_generate_function_is_refused() -> None:
-    retool = GeneratingArgs("examples.retool.generate_with_retool.generate")
-    with pytest.raises(CWTrainError, match="--custom-generate-function-path is not supported"):
-        RolloutConfig.for_trainer(retool, ROLLOUT_ENV)
-    # the trainers' default leaves sampling to the rollout function, as does an empty path
-    RolloutConfig.for_trainer(GeneratingArgs(), ROLLOUT_ENV)
-    RolloutConfig.for_trainer(GeneratingArgs(""), ROLLOUT_ENV)
+@pytest.mark.parametrize("flag", ROLLOUT_LOOP_FLAGS)
+def test_a_trainer_that_turns_on_a_step_of_its_rollout_loop_is_refused(flag) -> None:
+    name = flag.removeprefix("--").replace("-", "_")
+    value = 16 if flag == "--over-sampling-batch-size" else "my.module.function"
+    with pytest.raises(CWTrainError, match=f"{flag} is not supported"):
+        RolloutConfig.for_trainer(LoopArgs(**{name: value}), ROLLOUT_ENV)
+    # the trainers' defaults leave the loop to the rollout function, as does an empty path, and
+    # as does over-sampling by the rollout batch size, which slime and miles fill in by default
+    RolloutConfig.for_trainer(LoopArgs(), ROLLOUT_ENV)
+    RolloutConfig.for_trainer(LoopArgs(custom_generate_function_path=""), ROLLOUT_ENV)
+    RolloutConfig.for_trainer(LoopArgs(over_sampling_batch_size=8), ROLLOUT_ENV)
 
 
-@pytest.mark.parametrize("given", [["--custom-generate-function-path", "my.generate"],
-                                   ["--custom-generate-function-path=my.generate"]])  # fmt: skip
-def test_a_launcher_can_refuse_a_generate_function_before_the_trainer_starts(given) -> None:
-    with pytest.raises(CWTrainError, match="--custom-generate-function-path is not supported"):
-        refuse_generate_function(["--save-interval", "50", *given])
-    refuse_generate_function(["--save-interval", "50", "--custom-rm-path", "my.rm"])
+def test_refusing_a_generate_function_points_to_multi_turn_rollouts_that_work() -> None:
+    with pytest.raises(CWTrainError, match="NeMo-RL recipe with NeMo Gym"):
+        RolloutConfig.for_trainer(LoopArgs(custom_generate_function_path="my.gen"), ROLLOUT_ENV)
+
+
+@pytest.mark.parametrize(
+    "given",
+    [[flag, "value"] for flag in ROLLOUT_LOOP_FLAGS]
+    + [["--custom-generate-function-path=my.generate"], ["--use-session-server"]],
+)
+def test_a_launcher_can_refuse_the_flags_before_the_trainer_starts(given) -> None:
+    flag = given[0].partition("=")[0]
+    with pytest.raises(CWTrainError, match=f"{flag} is not supported"):
+        refuse_rollout_loop_flags(["--save-interval", "50", *given])
+    refuse_rollout_loop_flags(["--save-interval", "50", "--custom-rm-path", "my.rm"])
 
 
 def test_routes_must_have_the_trainers_layer_count_and_top_k() -> None:

@@ -56,7 +56,7 @@ from cwtrain.integrations.launch import (
     forwarded_env,
     stage_from_s3,
 )
-from cwtrain.integrations.rollout import refuse_generate_function
+from cwtrain.integrations.rollout import refuse_rollout_loop_flags
 
 DAPO = "zhuzilin/dapo-math-17k"
 PINNED_IMAGE = "radixark/miles:v0.1.1"
@@ -149,9 +149,10 @@ def async_correction(raw: str) -> str:
 
 
 def extra_args(raw: str) -> str:
-    """``--extra-args``, without a generate function: the rollout function never calls one."""
+    """``--extra-args``, without the flags of miles' own rollout loop, which the rollout function
+    replaces, and without ``--use-session-server``, which needs SGLang engines."""
     try:
-        refuse_generate_function(shlex.split(raw))
+        refuse_rollout_loop_flags(shlex.split(raw))
     except CWTrainError as exc:
         raise argparse.ArgumentTypeError(str(exc)) from exc
     return raw

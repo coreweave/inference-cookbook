@@ -45,7 +45,7 @@ from cwtrain.integrations.launch import (
     split_args,
     stage_from_s3,
 )
-from cwtrain.integrations.rollout import refuse_generate_function
+from cwtrain.integrations.rollout import refuse_rollout_loop_flags
 
 #: The slime commit this recipe and its patches were validated against (README, "Tested versions").
 TESTED_SLIME_COMMIT = "8ee9c1e1c8871ccd6dc8ec812edfaefa3dd1156b"
@@ -90,7 +90,7 @@ class SlimeJob:
             return env_text(env, name, default)
 
         extra = split_args(env.get("EXTRA_TRAIN_ARGS"), name="EXTRA_TRAIN_ARGS")
-        refuse_generate_function(extra)  # before anything is staged
+        refuse_rollout_loop_flags(extra)  # before anything is staged
         return cls(
             hf_model=require(env, "HF_MODEL"),
             hf_revision=text("HF_REVISION", ""),

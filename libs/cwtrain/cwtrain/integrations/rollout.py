@@ -169,26 +169,61 @@ class RolloutError(CWTrainError):
 LOGPROB_READERS = ("use_tis", "use_rollout_logprobs", "get_mismatch_metrics")
 #: With log-probs required, how many more times a group whose log-probs do not align is sampled.
 LOGPROB_RESAMPLES = 2
-#: The slime and miles flag that hands sampling to a per-sample generate function, such as a
-#: multi-turn or agent loop. The rollout functions here never call one: they sample each prompt in
-#: one turn.
-GENERATE_FUNCTION_FLAG = "--custom-generate-function-path"
-_NO_GENERATE_FUNCTION = (
-    f"{GENERATE_FUNCTION_FLAG} is not supported: the rollout function samples each prompt in one "
-    "turn and never calls a generate function, so a multi-turn or agent loop would not run"
+#: slime and miles flags for steps of their own rollout loop. The rollout functions here replace
+#: that loop with one request per group, so each would go unused; the value says what would not
+#: happen.
+ROLLOUT_LOOP_FLAGS = {
+    "--custom-generate-function-path": (
+        "a per-sample generate function, such as a multi-turn or agent loop, would not run. "
+        "Multi-turn rollouts work through the NeMo-RL recipe with NeMo Gym"
+    ),
+    "--dynamic-sampling-filter-path": "dynamic sampling would keep every group",
+    "--over-sampling-batch-size": "it samples exactly --rollout-batch-size prompts",
+    "--rollout-sample-filter-path": "the sample filter would not run",
+    "--rollout-all-samples-process-path": "the all-samples hook would not run",
+}
+_NO_SESSION_SERVER = (
+    "--use-session-server is not supported: miles' session server needs SGLang engines, and the "
+    "recipe runs none (--rollout-num-gpus 0)"
+)
+#: What the rollout functions raise when the trainer asks them to evaluate.
+NO_EVALUATION = (
+    "evaluation is not supported: the rollout function samples training rollouts only. Leave "
+    "--eval-interval unset, or point --eval-function-path at an evaluation function"
 )
 
 
-def refuse_generate_function(trainer_args: Iterable[str]) -> None:
-    """Raise if a trainer command line names a generate function, so that a launcher stops before
-    it stages anything. :meth:`RolloutConfig.for_trainer` refuses one set by any means, but only
-    once the trainer runs the rollout function.
+def _refused(flag: str) -> str:
+    return (
+        f"{flag} is not supported: the rollout function replaces the trainer's rollout loop, so "
+        f"{ROLLOUT_LOOP_FLAGS[flag]}"
+    )
+
+
+def _sets(args: Any, flag: str) -> bool:
+    """Whether the parsed trainer ``args`` turn on ``flag``, one of :data:`ROLLOUT_LOOP_FLAGS`."""
+    value = getattr(args, flag.removeprefix("--").replace("-", "_"), None)
+    if flag == "--over-sampling-batch-size" and value is not None:
+        # slime and miles set it to --rollout-batch-size when it is not given
+        return value > getattr(args, "rollout_batch_size", value)
+    return bool(value)
+
+
+def refuse_rollout_loop_flags(trainer_args: Iterable[str]) -> None:
+    """Raise if a trainer command line holds one of :data:`ROLLOUT_LOOP_FLAGS`, or miles'
+    ``--use-session-server``, so that a launcher stops before it stages anything.
+    :meth:`RolloutConfig.for_trainer` refuses the loop flags set by any means, but only once the
+    trainer runs the rollout function.
 
     Raises:
-        CWTrainError: ``trainer_args`` holds :data:`GENERATE_FUNCTION_FLAG`.
+        CWTrainError: ``trainer_args`` holds one of those flags.
     """
-    if any(arg.partition("=")[0] == GENERATE_FUNCTION_FLAG for arg in trainer_args):
-        raise CWTrainError(_NO_GENERATE_FUNCTION)
+    for arg in trainer_args:
+        flag = arg.partition("=")[0]
+        if flag in ROLLOUT_LOOP_FLAGS:
+            raise CWTrainError(_refused(flag))
+        if flag == "--use-session-server":
+            raise CWTrainError(_NO_SESSION_SERVER)
 
 
 #: CoreWeave's OpenAI frontend rejects a request with more stop strings or stop token ids.
@@ -322,16 +357,17 @@ class RolloutConfig:
         With one of :data:`LOGPROB_READERS` on, such as ``--use-tis``, log-probs are required
         (see "Responses" above).
 
-        The rollout functions replace the trainer's per-sample generate step, so a
-        ``--custom-generate-function-path`` would go unused. It is refused, so that a multi-turn
-        run does not quietly train single-turn.
+        The rollout functions replace the trainer's rollout loop, so the loop's own steps, such
+        as a ``--custom-generate-function-path`` or dynamic sampling, would go unused. The
+        :data:`ROLLOUT_LOOP_FLAGS` are refused, so that a run does not quietly train without them.
 
         Raises:
-            CWTrainError: The trainer names a generate function. Or it reads log-probs, but they
-                are off, or it trains on them at a temperature other than 1.
+            CWTrainError: The trainer sets one of :data:`ROLLOUT_LOOP_FLAGS`. Or it reads
+                log-probs, but they are off, or it trains on them at a temperature other than 1.
         """
-        if getattr(args, "custom_generate_function_path", None):
-            raise CWTrainError(_NO_GENERATE_FUNCTION)
+        for loop_flag in ROLLOUT_LOOP_FLAGS:
+            if _sets(args, loop_flag):
+                raise CWTrainError(_refused(loop_flag))
         env = os.environ if environ is None else environ
         config = cls.from_env(env)
         flag = getattr(args, "use_rollout_routing_replay", None)
@@ -1012,9 +1048,10 @@ async def sample_groups(
 __all__ = [
     "Completion",
     "CompletionSampler",
-    "GENERATE_FUNCTION_FLAG",
     "LOGPROB_READERS",
     "LOGPROB_RESAMPLES",
+    "NO_EVALUATION",
+    "ROLLOUT_LOOP_FLAGS",
     "RolloutConfig",
     "RolloutError",
     "align_logprobs",
@@ -1023,7 +1060,7 @@ __all__ = [
     "decode_routed_experts",
     "fill_group",
     "omitted_stop_token",
-    "refuse_generate_function",
+    "refuse_rollout_loop_flags",
     "request_seed",
     "rollout_cache_salt",
     "same_token",

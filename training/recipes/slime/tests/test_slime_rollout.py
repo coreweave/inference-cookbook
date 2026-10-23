@@ -132,6 +132,12 @@ def test_a_generate_function_is_refused_rather_than_skipped(rollout) -> None:
         module.generate_rollout(args(False, custom_generate_function_path=retool), 3, Data())
 
 
+def test_evaluation_is_refused_rather_than_left_empty(rollout) -> None:
+    module, _ = rollout
+    with pytest.raises(CWTrainError, match="evaluation is not supported"):
+        module.generate_rollout(args(False), 3, Data(), evaluation=True)
+
+
 def test_each_rollout_is_salted_with_the_run_and_the_rollout(rollout, monkeypatch) -> None:
     module, seen = rollout
     monkeypatch.setenv("CWTRAIN_HOTLOAD_RUN_ID", "grpo-7")
