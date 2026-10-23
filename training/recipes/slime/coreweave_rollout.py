@@ -52,13 +52,16 @@ def generate_rollout(
     """slime's ``--rollout-function-path`` entry point. It does not evaluate."""
     if evaluation:
         raise CWTrainError(NO_EVALUATION)
-    return run(_generate(args, rollout_id, data_source))
+    # first, so that trainer flags it refuses stop the rollout before it takes any prompts
+    config = RolloutConfig.for_trainer(args)
+    return run(_generate(args, rollout_id, data_source, config))
 
 
-async def _generate(args: Namespace, rollout_id: int, data_source: Any) -> RolloutFnTrainOutput:
+async def _generate(
+    args: Namespace, rollout_id: int, data_source: Any, config: RolloutConfig
+) -> RolloutFnTrainOutput:
     tokenizer = _tokenizer(args.hf_checkpoint)
     groups = data_source.get_samples(args.rollout_batch_size)
-    config = RolloutConfig.for_trainer(args)
     metrics = await sample_groups(
         shared_sampler(config),
         groups,
