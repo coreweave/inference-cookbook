@@ -21,13 +21,15 @@ import logging
 from argparse import Namespace
 from typing import Any
 
-from slime.rollout.base_types import RolloutFnEvalOutput, RolloutFnTrainOutput
+from slime.rollout.base_types import RolloutFnTrainOutput
 from slime.rollout.rm_hub import batched_async_rm
 from slime.rollout.sample_hooks import apply_rollout_sample_hooks
 from slime.utils.async_utils import run
 from slime.utils.processing_utils import load_tokenizer
 
+from cwtrain.errors import CWTrainError
 from cwtrain.integrations.rollout import (
+    NO_EVALUATION,
     RolloutConfig,
     check_routes_fit,
     rollout_cache_salt,
@@ -46,17 +48,20 @@ def _tokenizer(hf_checkpoint: str) -> Any:
 
 def generate_rollout(
     args: Namespace, rollout_id: int, data_source: Any, evaluation: bool = False
-) -> RolloutFnTrainOutput | RolloutFnEvalOutput:
-    """slime's ``--rollout-function-path`` entry point."""
+) -> RolloutFnTrainOutput:
+    """slime's ``--rollout-function-path`` entry point. It does not evaluate."""
     if evaluation:
-        return RolloutFnEvalOutput(data={}, metrics={})
-    return run(_generate(args, rollout_id, data_source))
+        raise CWTrainError(NO_EVALUATION)
+    # first, so that trainer flags it refuses stop the rollout before it takes any prompts
+    config = RolloutConfig.for_trainer(args)
+    return run(_generate(args, rollout_id, data_source, config))
 
 
-async def _generate(args: Namespace, rollout_id: int, data_source: Any) -> RolloutFnTrainOutput:
+async def _generate(
+    args: Namespace, rollout_id: int, data_source: Any, config: RolloutConfig
+) -> RolloutFnTrainOutput:
     tokenizer = _tokenizer(args.hf_checkpoint)
     groups = data_source.get_samples(args.rollout_batch_size)
-    config = RolloutConfig.for_trainer(args)
     metrics = await sample_groups(
         shared_sampler(config),
         groups,

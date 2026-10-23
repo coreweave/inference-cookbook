@@ -155,6 +155,18 @@ mode does not work with `--colocate`.
   response tokens, including the token that ended the response. With `--use-tis`, a group where
   they do not align is sampled again, up to twice, before the rollout fails. Without it, they stay
   unset, and the trainer recomputes log-probs either way.
+- replaces slime's whole rollout loop, so the loop's own steps would go unused:
+  - a per-sample generate function (`--custom-generate-function-path`, slime's hook for
+    multi-turn and agent loops);
+  - dynamic sampling (`--dynamic-sampling-filter-path`, `--over-sampling-batch-size`);
+  - the `--rollout-sample-filter-path` and `--rollout-all-samples-process-path` hooks.
+
+  `launch.py` refuses these in `EXTRA_TRAIN_ARGS` before it stages anything. Set another way, such
+  as in a `--custom-config-path` file, they stop the run at the first rollout, after the baseline
+  hot-load. For multi-turn rollouts, use the [NeMo-RL recipe](../nemo-rl/README.md) with NeMo Gym,
+  as the [web-search-agent case study](../../case-studies/web-search-agent/README.md) does.
+- does not evaluate. With `--eval-interval` set and no `--eval-function-path` of your own, the run
+  stops at its first evaluation.
 
 It is a thin slime adapter over `cwtrain.integrations.rollout`. Configure it with
 `CWTRAIN_ROLLOUT_BASE_URL`, `CWTRAIN_ROLLOUT_MODEL` and, optionally,

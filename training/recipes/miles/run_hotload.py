@@ -48,6 +48,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from types import ModuleType
 
+from cwtrain.errors import CWTrainError
 from cwtrain.integrations.launch import (
     LaunchError,
     default_prompt_cache_policy,
@@ -55,6 +56,7 @@ from cwtrain.integrations.launch import (
     forwarded_env,
     stage_from_s3,
 )
+from cwtrain.integrations.rollout import refuse_rollout_loop_flags
 
 DAPO = "zhuzilin/dapo-math-17k"
 PINNED_IMAGE = "radixark/miles:v0.1.1"
@@ -146,6 +148,16 @@ def async_correction(raw: str) -> str:
     return raw
 
 
+def extra_args(raw: str) -> str:
+    """``--extra-args``, without the flags of miles' own rollout loop, which the rollout function
+    replaces, and without ``--use-session-server``, which needs SGLang engines."""
+    try:
+        refuse_rollout_loop_flags(shlex.split(raw))
+    except CWTrainError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+    return raw
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--model-name", default="Qwen3-4B",
@@ -177,7 +189,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--skip-download", action="store_true", help="the model is already under --model-dir")
     p.add_argument("--base-s3-uri", default="",
                    help="s3:// prefix of the staged base model, fetched instead of Hugging Face")
-    p.add_argument("--extra-args", default="", help="appended to train.py's arguments, shell-quoted as given")
+    p.add_argument("--extra-args", default="", type=extra_args,
+                   help="appended to train.py's arguments, shell-quoted as given")
     return p.parse_args()
 
 

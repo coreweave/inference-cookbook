@@ -111,6 +111,19 @@ over `cwtrain.integrations.rollout`:
   that ended the response, it attaches them as `rollout_log_probs`. With `--use-tis`, a group where
   they do not align is sampled again, up to twice, before the rollout fails. Without it, they stay
   unset, and the trainer recomputes log-probs either way.
+- The function replaces miles' whole rollout loop, so the loop's own steps would go unused:
+  - a per-sample generate function (`--custom-generate-function-path`, miles' hook for multi-turn
+    and agent loops);
+  - dynamic sampling (`--dynamic-sampling-filter-path`, `--over-sampling-batch-size`);
+  - the `--rollout-sample-filter-path` and `--rollout-all-samples-process-path` hooks.
+
+  `run_hotload.py` refuses these in `--extra-args` before it downloads anything. Set another way,
+  such as in a `--custom-config-path` file, they stop miles at startup. It also refuses
+  `--use-session-server`, because miles' session server needs SGLang engines. For multi-turn
+  rollouts, use the [NeMo-RL recipe](../nemo-rl/README.md) with NeMo Gym, as the
+  [web-search-agent case study](../../case-studies/web-search-agent/README.md) does.
+- It does not evaluate. With `--eval-interval` set and no `--eval-function-path` of your own, the
+  run stops at its first evaluation.
 
 Configure it with `CWTRAIN_ROLLOUT_BASE_URL`, `CWTRAIN_ROLLOUT_MODEL` and, optionally,
 `CWTRAIN_ROLLOUT_API_KEY_FILE`. The hook blocks until every replica serves the new version, so the

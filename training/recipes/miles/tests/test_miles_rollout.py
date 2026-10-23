@@ -92,7 +92,7 @@ class Data:
         return [[Sample()]]
 
 
-def run(module, replay: bool, **flags):
+def run(module, replay: bool, evaluation: bool = False, **flags):
     defaults = {
         "hf_checkpoint": "ckpt",
         "rollout_batch_size": 1,
@@ -105,7 +105,9 @@ def run(module, replay: bool, **flags):
     }
     args = Namespace(**{**defaults, **flags})
     fn = module.CoreWeaveRolloutFn(Output(args=args, data_source=Data()))
-    return asyncio.run(fn(TrainInput(rollout_id=3)))
+    input = TrainInput(rollout_id=3)
+    input.evaluation = evaluation
+    return asyncio.run(fn(input))
 
 
 def test_routes_follow_the_replay_flag(rollout) -> None:
@@ -132,6 +134,19 @@ def test_tis_requires_logprobs_and_temperature_one(rollout) -> None:
     assert seen["configs"][-1].require_logprobs is False
     with pytest.raises(CWTrainError, match="--use-tis compares log-probs"):
         run(module, replay=False, use_tis=True, rollout_temperature=0.7)
+
+
+def test_a_generate_function_is_refused_rather_than_skipped(rollout) -> None:
+    module, _ = rollout
+    agent = "miles.rollout.generate_hub.agentic_tool_call.generate"
+    with pytest.raises(CWTrainError, match="--custom-generate-function-path is not supported"):
+        run(module, replay=False, custom_generate_function_path=agent)
+
+
+def test_evaluation_is_refused_rather_than_left_empty(rollout) -> None:
+    module, _ = rollout
+    with pytest.raises(CWTrainError, match="evaluation is not supported"):
+        run(module, replay=False, evaluation=True)
 
 
 def test_each_rollout_is_salted_with_the_run_and_the_rollout(rollout, monkeypatch) -> None:

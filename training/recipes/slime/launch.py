@@ -45,6 +45,7 @@ from cwtrain.integrations.launch import (
     split_args,
     stage_from_s3,
 )
+from cwtrain.integrations.rollout import refuse_rollout_loop_flags
 
 #: The slime commit this recipe and its patches were validated against (README, "Tested versions").
 TESTED_SLIME_COMMIT = "8ee9c1e1c8871ccd6dc8ec812edfaefa3dd1156b"
@@ -88,6 +89,8 @@ class SlimeJob:
         def text(name: str, default: str) -> str:
             return env_text(env, name, default)
 
+        extra = split_args(env.get("EXTRA_TRAIN_ARGS"), name="EXTRA_TRAIN_ARGS")
+        refuse_rollout_loop_flags(extra)  # before anything is staged
         return cls(
             hf_model=require(env, "HF_MODEL"),
             hf_revision=text("HF_REVISION", ""),
@@ -113,9 +116,7 @@ class SlimeJob:
             global_batch_size=env_int(env, "GLOBAL_BATCH_SIZE", 32),
             max_tokens_per_gpu=env_int(env, "MAX_TOKENS_PER_GPU", 9216),
             use_tis=env_flag(env, "USE_TIS", True),
-            extra_train_args=tuple(
-                split_args(env.get("EXTRA_TRAIN_ARGS"), name="EXTRA_TRAIN_ARGS")
-            ),
+            extra_train_args=tuple(extra),
         )
 
     @property

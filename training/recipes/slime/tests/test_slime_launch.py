@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from cwtrain.errors import CWTrainError
 from cwtrain.integrations.launch import LaunchError
 
 spec = importlib.util.spec_from_file_location(
@@ -76,6 +77,12 @@ def test_train_args_wire_the_hot_load_hook_and_keep_extras_intact() -> None:
     assert args[-4:] == ["--rollout-stop", '["</answer>"]', "--save-interval", "50"]
     with pytest.raises(LaunchError, match="EXTRA_TRAIN_ARGS"):
         launch.SlimeJob.from_env({**BASE, "EXTRA_TRAIN_ARGS": "--x 'unterminated"})
+
+
+def test_a_generate_function_stops_the_launcher_before_anything_is_staged() -> None:
+    retool = "--custom-generate-function-path examples.retool.generate_with_retool.generate"
+    with pytest.raises(CWTrainError, match="--custom-generate-function-path is not supported"):
+        launch.SlimeJob.from_env({**BASE, "EXTRA_TRAIN_ARGS": f"--save-interval 50 {retool}"})
 
 
 @pytest.mark.parametrize(("given", "on"), [(None, True), ("", True), ("1", True), ("off", False)])
