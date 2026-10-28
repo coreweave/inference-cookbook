@@ -139,16 +139,23 @@ model is the base model.
 
 ## SFT, then RL
 
-The snapshot is a plain Hugging Face checkpoint, so an RL recipe can start from it. Set it as
-`BASE_S3_URI` in the `run.env` of an RL example, such as
-[`miles-grpo-qwen3-4b`](../../examples/miles-grpo-qwen3-4b/README.md):
+The snapshot is a plain Hugging Face checkpoint, so an RL recipe can start from it, on the
+deployment that already serves it. In the `run.env` of an RL example, such as
+[`miles-grpo-qwen3-4b`](../../examples/miles-grpo-qwen3-4b/README.md), set the snapshot as
+`BASE_S3_URI`, and point the run at the SFT deployment:
 
 ```bash
 BASE_S3_URI=s3://<bucket>/hotload/<RUN_ID>-v000030
+DEPLOYMENT_ID=<the SFT deployment's id>
+ROLLOUT_BASE_URL=<the SFT deployment's rollout_base_url>
+ROLLOUT_MODEL=qwen3-4b-sft-hotload
 ```
 
-The RL trainer then starts from exactly the fine-tuned weights. To continue on this deployment,
-which already serves them, set its `DEPLOYMENT_ID` there too. The RL hook publishes the weights
+`ROLLOUT_MODEL` is the SFT deployment's `model_name`; the RL example's default names a different
+deployment. Skip the RL example's bucket, model-staging and deployment-creation steps: the SFT
+run's bucket and deployment carry over.
+
+The RL trainer then starts from exactly the fine-tuned weights. The RL hook publishes the weights
 again as its run's chain root, `<rl-run>-v000000`, before the first delta. The RL example's
 cleanup block then removes both runs' snapshots.
 

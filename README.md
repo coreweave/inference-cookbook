@@ -196,8 +196,9 @@ cwtrain deployment delete <deployment-uuid> --wait
   matters because a replica that starts with no peer to copy from replays the whole chain from
   object storage.
 
-The [library README](libs/cwtrain/README.md) covers the snapshot layout, the API layers, the chain
-limits, and the configuration.
+The [library README](libs/cwtrain/README.md) covers the install, the prerequisites and a quick
+start. The chain limits, and how to recover from a failed hot-load, are in the miles recipe's
+[Failure handling](training/recipes/miles/README.md#failure-handling).
 
 ## Repository layout
 
