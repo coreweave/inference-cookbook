@@ -26,7 +26,8 @@ How the calls map onto hot-load snapshots
    ``<run>-v000000``. This is the chain root that the API requires. The deployment's own base
    weights cannot be the root.
 2. Each sync then calls the hook with ``weight_vNNNNNN``. The hook publishes it as an
-   **incremental** snapshot ``<run>-vNNNNNN`` whose predecessor is ``<run>-v(NNNNNN-1)``.
+   **incremental** snapshot ``<run>-vNNNNNN`` chained onto the last published version (a
+   skipped empty sync publishes nothing).
 3. Every ``CWTRAIN_HOTLOAD_FULL_EVERY``-th version (default 20) is published as a **full**
    snapshot instead. The hook builds it from a byte-exact local mirror of the served weights
    (:class:`~cwtrain.hotload.WeightMirror`). This cuts the delta chain, so a chain never holds

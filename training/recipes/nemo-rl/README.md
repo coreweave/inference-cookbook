@@ -84,10 +84,12 @@ half-patched.
 
 [`grpo_coreweave.yaml`](grpo_coreweave.yaml) inherits NeMo-RL's `grpo_math_1B.yaml` and overrides
 what this topology needs. The model is `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16`. The
-trainer uses eight GPUs and eight-way expert parallelism, with sequence packing off. The example's
-hot-load deployment runs four replicas of two H100s each, for the BF16 model and memory headroom
-during refits. The
-trainer and the deployment must load the same prepared BF16 checkpoint.
+trainer uses eight GPUs and eight-way expert parallelism, with sequence packing off. The hot-load
+deployment uses two H100s per replica, for the BF16 weights and memory headroom during refits. The
+replica count is set per run, in the `deployment.example.json` of the
+[example](../../examples/nemo-rl-grpo-nemotron-3.5-lightning-30b-a3b/deployment.example.json) and
+of the [web-search-agent case study](../../case-studies/web-search-agent/deployment.example.json).
+The trainer and the deployment must load the same prepared BF16 checkpoint.
 
 The pinned NeMo-RL AutoModel ignores the optional `mtp.*` speculative-decoding heads.
 [`prepare_model.py`](prepare_model.py) makes a separate checkpoint without those heads:
@@ -354,8 +356,9 @@ trajectories each. It used eight trainer H100s and a two-H100 inference replica.
 checkpoint and the trained delta between steps both hot-loaded. The serving replica's identity was
 verified before sampling. The Job exited successfully, and generation still worked after the
 trained delta was applied. This is a smoke test of training and weight propagation, not a
-model-quality benchmark. The example's search agent also completed GRPO steps of 32 trajectories,
-on one eight-H100 node against four two-H100 inference replicas.
+model-quality benchmark. The
+[web-search-agent case study](../../case-studies/web-search-agent/README.md) also completed GRPO
+steps of 32 trajectories, on one eight-H100 node against four two-H100 inference replicas.
 
 For a short validation run, add `++data.train.max_samples=32` and `grpo.max_num_steps=2` to
 `EXTRA_OVERRIDES`. The sample limit is optional. Without it, the launcher converts the complete

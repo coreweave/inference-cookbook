@@ -235,7 +235,7 @@ keeps in flight. Each request asks for `--n-samples-per-prompt` completions.
 | baseline | slime rank 0 | Captures `--hf-checkpoint` bytes as the delta baseline and calls the hook with the delta root |
 | baseline | hook | Publishes `--hf-checkpoint` as full snapshot `<run>-v000000`, unless a completed hot-load with that identity already exists; creates the weight mirror |
 | sync N | slime ranks | Diff against the previous sync, write `weight_v00000N/` (shards + index with `base_version`) |
-| sync N | hook (rank 0) | Apply the delta to the mirror and check every changed tensor's Adler-32; upload to `<prefix>/<run>-v00000N/`, create an incremental hot-load with predecessor `<run>-v00000(N-1)`, and wait until the hot-load completes (every replica READY on `<run>-v00000N`) |
+| sync N | hook (rank 0) | Apply the delta to the mirror and check every changed tensor's Adler-32; upload to `<prefix>/<run>-v00000N/`, create an incremental hot-load chained onto the last published version (a skipped empty sync publishes nothing), and wait until the hot-load completes (every replica READY on `<run>-v00000N`) |
 | sync N, N % FULL_EVERY == 0 | hook (rank 0) | Same, but publish a **full** snapshot rebuilt from the mirror (with per-tensor checksums) so the chain restarts |
 | sync N | slime | Barrier, then continues with the next rollout batch |
 

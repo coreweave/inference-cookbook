@@ -255,8 +255,10 @@ Then it starts the recipe's [`launch.py`](../../recipes/nemo-rl/launch.py), whic
 1. applies the patch,
 2. installs the wheel into the prebuilt worker venvs (without dependencies),
 3. fetches the base model,
-4. runs `python examples/run_grpo.py --config grpo_coreweave.yaml` with the venv's interpreter.
-   The config is the recipe's [`grpo_coreweave.yaml`](../../recipes/nemo-rl/grpo_coreweave.yaml).
+4. runs `python examples/run_grpo.py --config grpo_search_agent.yaml` with the venv's interpreter.
+   The config is this study's [`grpo_search_agent.yaml`](grpo_search_agent.yaml), which inherits
+   the recipe's [`grpo_coreweave.yaml`](../../recipes/nemo-rl/grpo_coreweave.yaml) and adds the
+   [search environment](#training-environment).
 
 Neither script uses `uv run`, because it re-syncs the venv and removes the wheel.
 
@@ -507,7 +509,7 @@ reaches the gateway, GitHub and the judge and search APIs.
 
 ```bash
 [ -e eval.env ] || cp eval.env.example eval.env   # once; copy NAMESPACE, ROLLOUT_BASE_URL and the Secrets from run.env
-set -a; . ./eval.env; set +a
+unset EVAL_NAME; set -a; . ./eval.env; set +a     # a new Job name for each paste; render.sh reuses it
 (cd ../../../../libs/cwtrain && uv build --wheel) && ./make-eval-kit.sh "$CTX" "$NAMESPACE" "$EVAL_KIT_NAME"
 "$K/render.sh" eval.env eval-job.yaml | kubectl apply -f -
 kubectl -n "$NAMESPACE" logs -f --pod-running-timeout=10m "job/cwtrain-gym-$EVAL_NAME"
@@ -524,8 +526,8 @@ The Job runs [`k8s/run-eval.sh`](k8s/run-eval.sh) on a node without GPUs. The sc
    flight,
 5. prints each task's reward and tool calls, and the mean reward.
 
-The trajectories and Gym's metrics stay in the pod's `/work/results` until the Job is deleted. Use a
-new `EVAL_NAME` for each evaluation. On a cluster that admits Jobs through Kueue, add the label
+The trajectories and Gym's metrics stay in the pod's `/work/results` until the Job is deleted. Each
+run of the block picks a new `EVAL_NAME`. On a cluster that admits Jobs through Kueue, add the label
 `kueue.x-k8s.io/queue-name: <local queue>` to the Job's metadata, as for the trainer Job. When you
 are done, delete the Job and its kit:
 `kubectl -n "$NAMESPACE" delete job "cwtrain-gym-$EVAL_NAME"` and

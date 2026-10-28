@@ -255,7 +255,7 @@ sequences wait for a free slot.
 | baseline | miles rank 0 | Captures `--hf-checkpoint` bytes as the delta baseline and calls the hook with the delta root |
 | baseline | hook | Publishes `--hf-checkpoint` as full snapshot `<run>-v000000`, unless a completed hot-load with that identity already exists; creates the weight mirror |
 | sync N | miles ranks | Diff against the previous sync, write `weight_v00000N/` (shards + index with `base_version`) |
-| sync N | hook (rank 0) | Apply the delta to the mirror and check every changed tensor's Adler-32; upload to `<prefix>/<run>-v00000N/`, create an incremental hot-load with predecessor `<run>-v00000(N-1)`, and wait until the hot-load completes (every replica READY on `<run>-v00000N`) |
+| sync N | hook (rank 0) | Apply the delta to the mirror and check every changed tensor's Adler-32; upload to `<prefix>/<run>-v00000N/`, create an incremental hot-load chained onto the last published version (a skipped empty sync publishes nothing), and wait until the hot-load completes (every replica READY on `<run>-v00000N`) |
 | sync N, N % FULL_EVERY == 0 | hook (rank 0) | Same, but publish a **full** snapshot rebuilt from the mirror (with per-tensor checksums) so the chain restarts |
 | sync N | miles | Barrier, then continues with the next rollout batch |
 
@@ -355,8 +355,11 @@ resumed run with a new `CWTRAIN_HOTLOAD_RUN_ID`.
 - A hot-load that ends `FAILED` raises `HotLoadFailedError` with per-replica reasons. Nothing
   retries automatically: the run stops so that it does not continue off-policy. The snapshot is
   already in the bucket. When you have fixed the cause, create its hot-load again. For a delta (the
-  default):
-  `cwtrain hotload trigger --deployment <id> --identity <run>-vNNNNNN --previous-identity <run>-v(NNNNNN-1)`.
+  default), reuse the failed hot-load's predecessor: after a sync that changed nothing, it is not
+  the previous version (see [Pitfalls](#pitfalls)). `cwtrain hotload status <hot-load id>` prints
+  it as `previous_snapshot_identity`; the error names the hot-load id, and
+  `cwtrain hotload list --deployment <id>` lists them. Then run
+  `cwtrain hotload trigger --deployment <id> --identity <run>-vNNNNNN --previous-identity <predecessor>`.
   For a full snapshot, leave out `--previous-identity`.
 - Delta chains have limits. The API rejects a chain longer than 128 deltas (`resolved snapshot
   chain is too long`). A replica that starts with no peer to copy from can replay only 63. The
