@@ -48,7 +48,7 @@ the deployment, and the launcher checks this before it uploads anything:
    transformers, in a layout that older readers misread.
 4. **A new identity for every run.** The snapshot is `<RUN_ID>-v<MAX_STEPS, six digits>`,
    `<RUN_ID>-v000030` with the defaults. Every recipe names its snapshots `<run>-vNNNNNN`, so any
-   example's cleanup block finds this one.
+   example's cleanup finds this one.
 5. **No prompt cache from the base weights.** Unless you set `HOTLOAD_PROMPT_CACHE_POLICY`, the
    launcher asks the platform to drop the KV cache computed under the previous weights
    (`reset_all`), so that a request right after the swap does not reuse cached prompt prefixes.
@@ -157,7 +157,7 @@ run's bucket and deployment carry over.
 
 The RL trainer then starts from exactly the fine-tuned weights. The RL hook publishes the weights
 again as its run's chain root, `<rl-run>-v000000`, before the first delta. The RL example's
-cleanup block then removes both runs' snapshots.
+cleanup script then removes both runs' snapshots.
 
 To evaluate the fine-tuned model, send requests to the deployment's endpoint for its
 `model_name`. The [web-search-agent case study's evaluation](../../case-studies/web-search-agent/README.md#evaluation)
