@@ -496,6 +496,9 @@ def run_cleanup(
     records each command's argv separately so whitespace and wildcard quoting can be checked."""
     k8s = tmp_path / "training" / example.kind / example.name / "k8s"
     k8s.mkdir(parents=True)
+    shared = tmp_path / "k8s"  # the block calls the shared script by its repository path
+    shared.mkdir()
+    shutil.copy(SHARED / "cleanup-run.sh", shared / "cleanup-run.sh")
     if git_repo:
         subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     defaults = {
@@ -628,7 +631,8 @@ def test_the_cleanup_block_deletes_the_deployment_recipe_objects_and_exact_snaps
         "cwtrain deployment delete dep-1 --ignore-not-found",
     ]
     delete = "kubectl -n ns delete"
-    secrets = "store admin ikey token" if example.recipe.inference_key else "store admin token"
+    # the core Secrets, then one per extra argument of the example's cleanup call
+    secrets = "store admin token" + (" ikey" if example.recipe.inference_key else "")
     secrets = " ".join([secrets, *example.extra_secrets])
     assert [line for line in lines if line.startswith("kubectl")] == [
         f"{delete} job cwtrain-job cwtrain-stage-job cwtrain-make-bucket --ignore-not-found",
