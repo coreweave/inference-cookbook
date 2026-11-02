@@ -145,8 +145,8 @@ build metadata.
 The workflow runs lint, tests, and builds on every Python version in the CI matrix. When they pass
 and the `pypi` environment's reviewers approve, it publishes the Python 3.12 wheel and source
 distribution to public PyPI. It then creates a GitHub release with the same files. The release
-notes are a link to `libs/cwtrain` at the tag. Pull requests and branch pushes run the checks but
-do not publish or create releases.
+notes are the version's section of [`libs/cwtrain/CHANGELOG.md`](libs/cwtrain/CHANGELOG.md). Pull
+requests and branch pushes run the checks but do not publish or create releases.
 
 One-time setup for a repository and PyPI maintainer:
 
@@ -162,8 +162,10 @@ One-time setup for a repository and PyPI maintainer:
 
 For each release:
 
-1. Set `project.version` in `libs/cwtrain/pyproject.toml` to the release version, and merge that
-   commit into `main`.
+1. Set `project.version` in `libs/cwtrain/pyproject.toml` to the release version. At the top of
+   `libs/cwtrain/CHANGELOG.md`, add a section headed `## X.Y.Z - YYYY-MM-DD` that lists the major
+   changes since the last release. CI fails when the version has no section. Merge that commit
+   into `main`.
 2. Tag that commit and push the tag (replace `0.1.0` with the new version):
 
    ```bash
