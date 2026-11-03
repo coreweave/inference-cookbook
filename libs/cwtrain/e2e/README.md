@@ -26,7 +26,7 @@ Create the `hotload-e2e` GitHub environment and configure:
 | Secret | `CWTRAIN_E2E_DEPLOYMENT_JSON` | Deployment runtime and resources configuration, described below |
 | Secret | `CWTRAIN_E2E_HF_TOKEN` | Optional, for a gated or private Hugging Face model |
 | Variable | `CWTRAIN_E2E_BUCKET` | Required: an existing bucket that grants the inference service read access under `cookbook/*` |
-| Variable | `CWTRAIN_E2E_RUNTIME_VERSION` | `dynamo-vllm` version, `0.30.0+crwv.5` by default; overrides `runtime.version` in the deployment configuration |
+| Variable | `CWTRAIN_E2E_RUNTIME_VERSION` | `dynamo-vllm` version, `0.32.0+crwv.1` by default; overrides `runtime.version` in the deployment configuration |
 | Variable | `CWTRAIN_E2E_ZONE` | `us-west-04a` by default; not a credential |
 | Variable | `CWTRAIN_E2E_HF_MODEL` | `Qwen/Qwen3-0.6B` by default; choose a model your runtime supports |
 | Variable | `CWTRAIN_E2E_HF_REVISION` | Model revision, `main` by default; pin a commit for reproducibility |
