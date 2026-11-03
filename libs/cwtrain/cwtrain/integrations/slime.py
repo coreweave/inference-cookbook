@@ -123,6 +123,7 @@ from cwtrain.hotload import (
 from cwtrain.hotload.delta import checkpoint_checksums
 from cwtrain.hotload.snapshot import validate_identity
 from cwtrain.infra.client import DEFAULT_BASE_URL, InferenceClient
+from cwtrain.integrations import tracking
 from cwtrain.integrations._env import flag as _flag
 from cwtrain.integrations._env import json_headers as _json_headers
 from cwtrain.integrations._env import optional_flag as _optional_flag
@@ -357,7 +358,7 @@ class SlimePublisher:
         existing = None if asserted else self.loader.completed_hot_load(identity)
 
         if self.config.mirror_enabled:
-            started = time.monotonic()
+            started, wall = time.monotonic(), time.time()
             checksums = None
             if asserted or existing is not None:  # a baseline this process does not publish
                 checksums = self._check_recorded_baseline(identity, hf_checkpoint, asserted)
@@ -368,6 +369,7 @@ class SlimePublisher:
                 checksums=checksums,
             )
             metrics["hotload/mirror_seconds"] = round(time.monotonic() - started, 3)
+            metrics.update(tracking.span("mirror", wall, time.time()))
 
         if asserted:
             # The chain root exists. Later deltas must still resolve their base to it.
@@ -405,7 +407,7 @@ class SlimePublisher:
 
         if self._mirror is not None:
             if not info.empty_delta:
-                started = time.monotonic()
+                started, wall = time.monotonic(), time.time()
                 report = self._mirror.apply_delta(version_dir)
                 metrics.update(
                     {
@@ -413,6 +415,7 @@ class SlimePublisher:
                         "hotload/tensors_changed": float(report.tensors_changed),
                         "hotload/tensors_verified": float(report.tensors_changed),
                         "hotload/bytes_changed": float(report.bytes_changed),
+                        **tracking.span("mirror", wall, time.time()),
                     }
                 )
             else:
@@ -450,11 +453,12 @@ class SlimePublisher:
         """Cut the delta chain: publish the mirror's current weights as a full snapshot."""
         assert self._mirror is not None
         staged = self.state_dir() / "staging" / identity
-        started = time.monotonic()
+        started, wall = time.monotonic(), time.time()
         self._mirror.write_full_snapshot(staged)
         metrics = {
             "hotload/chain_cut": 1.0,
             "hotload/stage_seconds": round(time.monotonic() - started, 3),
+            **tracking.span("export", wall, time.time()),
         }
         try:
             info = inspect_snapshot(staged)
@@ -580,11 +584,12 @@ class SlimePublisher:
             "hotload/snapshot_bytes": float(info.total_bytes),
             "hotload/incremental": 1.0 if info.is_incremental else 0.0,
         }
-        started = time.monotonic()
+        started, wall = time.monotonic(), time.time()
         self.loader.upload(info, identity, workers=self.config.upload_workers)
         metrics["hotload/upload_seconds"] = round(time.monotonic() - started, 3)
+        metrics.update(tracking.span("upload", wall, time.time()))
 
-        started = time.monotonic()
+        started, wall = time.monotonic(), time.time()
         # CWTRAIN_HOTLOAD_TIMEOUT bounds the whole activation. Waiting for the deployment, for
         # an active hot-load, and for this hot-load share one budget.
         deadline = started + self.config.timeout
@@ -604,10 +609,13 @@ class SlimePublisher:
             if last:
                 metrics["hotload/replicas_ready"] = float(last[-1].ready)
                 metrics["hotload/replicas_total"] = float(last[-1].total)
+                metrics.update(last[-1].timings())
+                metrics.update(last[-1].timeline())
             if self.config.verify:
                 replicas = self.loader.verify_served(hot_load.id, identity)
                 metrics["hotload/replicas_verified"] = float(len(replicas))
         metrics["hotload/hot_load_seconds"] = round(time.monotonic() - started, 3)
+        metrics.update(tracking.span("hotload", wall, time.time()))
         metrics["hotload/completed"] = 1.0 if hot_load.completed else 0.0
         log.info("hot-load %s for %s: %s", hot_load.id, identity, hot_load.state.name)
         version = _version_of(identity, self.config.run_id)
@@ -655,6 +663,7 @@ def _publisher(args: Any) -> SlimePublisher:
     if publisher is None:
         publisher = SlimePublisher(config)
         _publishers[config.deployment_id] = publisher
+        record_settings(config, publisher.loader)
     return publisher
 
 
@@ -689,12 +698,126 @@ def hook(
     del rollout_engines  # The deployment is the rollout engine; slime's engines are not used.
     if not is_rank_zero(args):
         return None
-    return _publisher(args).handle(args, version_dir)
+    # The training that produced these weights ends here; log its spans as its own step's.
+    trainer = _trainer_spans(time.time())
+    if trainer:
+        tracking.log_metrics(
+            trainer,
+            step_metric="rollout/step",
+            step=rollout_step(args, int(trainer[tracking.TIMELINE_STEP])),
+            prefixes=("timeline/",),
+        )
+    metrics = _publisher(args).handle(args, version_dir)
+    if metrics:
+        # slime and miles drop what the hook returns, so log it into their W&B run, if any.
+        match = _VERSION_DIR.match(Path(version_dir).name)
+        version = int(match.group(1)) if match else 0
+        tracking.log_metrics(
+            {**metrics, "hotload/version": float(version), tracking.TIMELINE_STEP: float(version)},
+            step_metric="rollout/step",
+            step=rollout_step(args, version),
+            prefixes=("hotload/", "timeline/"),
+        )
+    return metrics
+
+
+#: When the training between two weight syncs started its phases, from the trainer-phase hooks.
+_trainer_marks: dict[str, float] = {}
+
+#: The trainer-phase hooks, as slime and miles take them: they mark the timeline's ``logprobs``
+#: and ``update`` spans of each training.
+TRAINER_TIMELINE_ARGS = (
+    "--custom-megatron-before-log-prob-hook-path",
+    "cwtrain.integrations.slime.before_log_prob",
+    "--custom-megatron-before-train-step-hook-path",
+    "cwtrain.integrations.slime.before_train_step",
+)
+
+
+def before_log_prob(args: Any, model: Any = None, store_prefix: str = "") -> None:
+    """``--custom-megatron-before-log-prob-hook-path``: the trainer starts its log-prob pass.
+
+    slime and miles call it before each log-prob pass (the reference model's, then the actor's);
+    the first one after a weight sync starts the timeline's ``logprobs`` span.
+    """
+    del model, store_prefix
+    if is_rank_zero(args):
+        _trainer_marks.setdefault("logprobs", time.time())
+
+
+def before_train_step(
+    args: Any,
+    rollout_id: int,
+    step_id: int = 0,
+    model: Any = None,
+    optimizer: Any = None,
+    opt_param_scheduler: Any = None,
+) -> None:
+    """``--custom-megatron-before-train-step-hook-path``: the trainer starts an optimizer step.
+
+    The first one after a weight sync ends ``logprobs`` and starts ``update``, which the weight
+    sync ends. ``rollout_id`` names the step.
+    """
+    del step_id, model, optimizer, opt_param_scheduler
+    if is_rank_zero(args) and "update" not in _trainer_marks:
+        _trainer_marks["update"] = time.time()
+        _trainer_marks["rollout_id"] = float(rollout_id)
+
+
+def _trainer_spans(ended: float) -> dict[str, float]:
+    """The ``logprobs`` and ``update`` spans of the training that ``ended``, then forget them."""
+    marks = dict(_trainer_marks)
+    _trainer_marks.clear()
+    if "update" not in marks:
+        return {}
+    out = {tracking.TIMELINE_STEP: marks["rollout_id"]}
+    if "logprobs" in marks:
+        out.update(tracking.span("logprobs", marks["logprobs"], marks["update"]))
+    out.update(tracking.span("update", marks["update"], ended))
+    return out
+
+
+def rollout_step(args: Any, version: int) -> int:
+    """The ``rollout/step`` of weight version ``version``, the version rollout ``version`` samples.
+
+    slime and miles count ``rollout/step`` in rollouts, or in train steps with
+    ``--wandb-always-use-train-step``.
+    """
+    if getattr(args, "wandb_always_use_train_step", False):
+        samples = int(args.rollout_batch_size) * int(args.n_samples_per_prompt)
+        return version * samples // int(args.global_batch_size)
+    return version
+
+
+def record_settings(config: HookConfig, loader: HotLoader) -> None:
+    """Record the hot-load settings and the deployment in the trainer's W&B run, if any."""
+    if tracking.active_run() is None:
+        return
+    try:
+        deployment = tracking.deployment_config(loader.deployment)
+    except Exception as exc:  # noqa: BLE001 - the record must not stop the run
+        log.warning("could not read the deployment for the W&B config: %s", exc)
+        deployment = {"id": config.deployment_id}
+    tracking.update_config(
+        {
+            "version": tracking.version(),
+            "run_id": config.run_id,
+            "deployment": deployment,
+            "hotload": {
+                "wait": config.wait,
+                "full_every": config.full_every,
+                "mirror": config.mirror_enabled,
+                "prompt_cache_policy": config.prompt_cache_policy.name.lower(),
+                "verify": config.verify,
+            },
+        }
+    )
 
 
 def reset() -> None:
     """Drop cached publishers and run IDs (tests, or a new run in the same process)."""
     global _default_run_id
+    _trainer_marks.clear()
     for publisher in _publishers.values():
         publisher.close()
     _publishers.clear()
@@ -702,11 +825,16 @@ def reset() -> None:
 
 
 __all__ = [
+    "TRAINER_TIMELINE_ARGS",
     "HookConfig",
     "HotLoad",
     "SlimePublisher",
+    "before_log_prob",
+    "before_train_step",
     "default_run_id",
     "hook",
     "is_rank_zero",
+    "record_settings",
     "reset",
+    "rollout_step",
 ]

@@ -9,6 +9,8 @@
 * :mod:`cwtrain.integrations.rollout`: the shared rollout sampler for OpenAI-compatible endpoints.
 * :mod:`cwtrain.integrations.nemo_rl`: the NeMo-RL generation backend, weight synchronizer and
   policy-worker extension.
+* :mod:`cwtrain.integrations.tracking`: writes cwtrain's metrics and settings into the trainer's
+  W&B run, when it has one.
 
 Names are resolved lazily so that importing one integration does not import the others' deps.
 """

@@ -41,9 +41,10 @@ from cwtrain.hotload import HotLoader, ProgressEvent, inspect_snapshot
 from cwtrain.hotload.delta import checkpoint_checksums, write_delta, write_full_snapshot
 from cwtrain.hotload.mirror import tensor_locations
 from cwtrain.infra.client import InferenceClient
+from cwtrain.integrations import tracking
 from cwtrain.integrations.nemo_rl import _missing_dependency
 from cwtrain.integrations.nvext import SERVED_IDENTITY_FILE, write_served_identity
-from cwtrain.integrations.slime import ENV_PREFIX, HookConfig
+from cwtrain.integrations.slime import ENV_PREFIX, HookConfig, record_settings
 
 try:
     from nemo_rl.weight_sync.interfaces import WeightSynchronizer
@@ -132,6 +133,9 @@ class HotLoadWeightSynchronizer(WeightSynchronizer):
         self._version = 0
         self._stale = True
         self._last_published: tuple[int, Path] | None = None
+        #: The last sync's ``hotload/*`` metrics, until :meth:`pop_metrics` takes them.
+        self._metrics: dict[str, float] = {}
+        self._settings_recorded = False
         log.info(
             "hot-load weight synchronizer: deployment=%s run=%s full_every=%d state_dir=%s",
             self.config.deployment_id,
@@ -162,19 +166,46 @@ class HotLoadWeightSynchronizer(WeightSynchronizer):
     def shutdown(self) -> None:
         return None
 
+    def pop_metrics(self, timer: Any = None, step: int | None = None) -> dict[str, float]:
+        """The last sync's ``hotload/*`` and ``timeline/*`` metrics, then forget them.
+
+        NeMo-RL logs every row with an explicit step, so a row from here would make W&B drop the
+        trainer's. The recipe's patch logs these with the step instead: ``hotload/*`` merged into
+        its ``train/`` metrics, ``timeline/*`` unprefixed. With ``timer``, a
+        :class:`~cwtrain.integrations.nemo_rl.timeline.SpanTimer`, the timeline also gets the
+        step's GRPO phases, and with ``step`` its ``timeline/step``.
+        """
+        out, self._metrics = self._metrics, {}
+        pop_spans = getattr(timer, "pop_spans", None)  # a SpanTimer; NeMo-RL's own has none
+        if callable(pop_spans):
+            out.update(pop_spans())
+        if step is not None and any(k.startswith("timeline/") for k in out):
+            out[tracking.TIMELINE_STEP] = float(step)
+        return tracking.timeline_row(out)
+
     def sync_weights(
         self, *, timer: Any = None, kv_scales: dict[str, float] | None = None
     ) -> dict[str, float]:
+        if not self._settings_recorded:
+            self._settings_recorded = True
+            # A config update leaves the run's step alone, unlike a logged row.
+            record_settings(self.config, self.loader)
+        metrics = self._sync_weights(kv_scales)
+        self._metrics = metrics
+        return metrics
+
+    def _sync_weights(self, kv_scales: dict[str, float] | None) -> dict[str, float]:
         if kv_scales:
             raise NotImplementedError("FP8 kv scales are not part of a hot-load snapshot")
         version = self._version
         identity = self.config.identity(version)
         metrics: dict[str, float] = {"hotload/version": float(version)}
 
-        started = time.monotonic()
+        started, wall = time.monotonic(), time.time()
         export_dir = self.state_dir / "exports" / f"v{version:06d}"
         self._export(export_dir)
         metrics["hotload/export_seconds"] = round(time.monotonic() - started, 3)
+        metrics.update(tracking.span("export", wall, time.time()))
 
         checksums = checkpoint_checksums(export_dir)
 
@@ -321,9 +352,10 @@ class HotLoadWeightSynchronizer(WeightSynchronizer):
 
     def _publish(self, info: Any, identity: str) -> dict[str, float]:
         metrics: dict[str, float] = {"hotload/snapshot_bytes": float(info.total_bytes)}
-        started = time.monotonic()
+        started, wall = time.monotonic(), time.time()
         self.loader.upload(info, identity, workers=self.config.upload_workers)
         metrics["hotload/upload_seconds"] = round(time.monotonic() - started, 3)
+        metrics.update(tracking.span("upload", wall, time.time()))
         metrics.update(
             self._activate(
                 identity,
@@ -348,7 +380,7 @@ class HotLoadWeightSynchronizer(WeightSynchronizer):
         active hot-load (``start`` receives the remaining budget), and for this hot-load.
         """
         metrics: dict[str, float] = {}
-        started = time.monotonic()
+        started, wall = time.monotonic(), time.time()
         deadline = started + self.config.timeout
 
         def remaining() -> float:
@@ -362,10 +394,13 @@ class HotLoadWeightSynchronizer(WeightSynchronizer):
             if last:
                 metrics["hotload/replicas_ready"] = float(last[-1].ready)
                 metrics["hotload/replicas_total"] = float(last[-1].total)
+                metrics.update(last[-1].timings())
+                metrics.update(last[-1].timeline())
             if self.config.verify:
                 replicas = self.loader.verify_served(hot_load.id, identity)
                 metrics["hotload/replicas_verified"] = float(len(replicas))
         metrics["hotload/hot_load_seconds"] = round(time.monotonic() - started, 3)
+        metrics.update(tracking.span("hotload", wall, time.time()))
         metrics["hotload/completed"] = 1.0 if hot_load.completed else 0.0
         log.info("hot-load %s for %s: %s", hot_load.id, identity, hot_load.state.name)
         return metrics

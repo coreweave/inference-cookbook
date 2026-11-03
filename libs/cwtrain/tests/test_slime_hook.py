@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,7 +18,8 @@ from cwtrain.hotload import HotLoadState, PromptCachePolicy, SnapshotInfo, Snaps
 from cwtrain.hotload.delta import checkpoint_checksums
 from cwtrain.hotload.errors import HotLoadVerificationError, SnapshotError
 from cwtrain.hotload.mirror import MirrorError, tensor_locations
-from cwtrain.integrations import slime
+from cwtrain.infra.models import Deployment
+from cwtrain.integrations import slime, tracking
 from cwtrain.integrations.slime import HookConfig, SlimePublisher, default_run_id, is_rank_zero
 from tests.conftest import (
     DEPLOYMENT_ID,
@@ -30,6 +32,9 @@ from tests.conftest import (
 )
 
 RUN = "qwen3-grpo-20260922"
+
+#: What the stub loaders' progress events report as the platform's timings.
+PLATFORM = {"hotload/platform_seconds": 3.5, "hotload/replica_seconds_first": 3.0}
 
 
 class StubHotLoad:
@@ -76,7 +81,9 @@ class StubLoader:
         self.waits.append(hot_load_id)
         identity = hot_load_id.removeprefix("hl-")
         if on_progress:
-            on_progress(SimpleNamespace(ready=2, total=2))
+            on_progress(
+                SimpleNamespace(ready=2, total=2, timings=lambda: dict(PLATFORM), timeline=dict)
+            )
         self.completed_identities.add(identity)
         return StubHotLoad(identity)
 
@@ -896,3 +903,103 @@ def test_null_metadata_baseline_can_be_mirrored_and_published(env, real_args, mo
     slime.hook(real_args, real_args.update_weight_disk_dir, [])
     assert mirror_built(real_args)
     assert len(stub.uploads) == 1
+
+
+# ------------------------------------------------------------------------------ W&B run
+
+
+def test_the_hook_logs_its_metrics_into_the_trainers_wandb_run(
+    env, args, monkeypatch, wandb_run
+) -> None:
+    from tests.conftest import deployment_json
+
+    stub = StubLoader(completed={f"{RUN}-v000000"})
+    stub.deployment = Deployment.from_json(deployment_json()["deployment"])
+    install_stub(monkeypatch, stub)
+    v1 = write_delta_checkpoint(Path(args.update_weight_disk_dir) / "weight_v000001", version=1)
+
+    metrics = slime.hook(args, str(v1), [])
+
+    # slime and miles drop the hook's return value; the row carries it to W&B
+    assert metrics["hotload/platform_seconds"] == 3.5
+    (row,) = wandb_run.rows
+    logged = {k: v for k, v in row.items() if not (isinstance(v, float) and math.isnan(v))}
+    assert logged == {**metrics, "hotload/version": 1.0, "timeline/step": 1.0, "rollout/step": 1}
+    # every timeline key, NaN for the lanes this row has no span for (tracking.timeline_row)
+    assert set(tracking.timeline_keys()) <= set(row) and math.isnan(row["timeline/rollout/start"])
+    assert ("hotload/*", "rollout/step") in wandb_run.defined
+    assert ("timeline/*", "rollout/step") in wandb_run.defined
+    # the hook's own phases, on the timeline's wall-clock axis
+    assert row["timeline/upload/start"] <= row["timeline/upload/end"]
+    assert (
+        row["timeline/upload/end"] <= row["timeline/hotload/start"] <= row["timeline/hotload/end"]
+    )
+    settings = wandb_run.config["cwtrain"]
+    assert settings["run_id"] == RUN and settings["deployment"]["model"] == "Qwen/Qwen3-8B"
+    assert settings["hotload"] == {
+        "wait": True,
+        "full_every": 0,
+        "mirror": False,
+        "prompt_cache_policy": "unspecified",
+        "verify": False,
+    }
+
+
+def test_the_hook_does_not_log_on_other_ranks_or_without_a_run(env, args, monkeypatch) -> None:
+    stub = StubLoader()
+    install_stub(monkeypatch, stub)
+    assert slime.hook(args, args.update_weight_disk_dir, [])  # no wandb.run: nothing to log into
+    args.rank = 1
+    assert slime.hook(args, args.update_weight_disk_dir, []) is None
+
+
+def test_rollout_step_follows_the_trainers_step_axis() -> None:
+    assert slime.rollout_step(SimpleNamespace(), 3) == 3
+    per_train_step = SimpleNamespace(
+        wandb_always_use_train_step=True,
+        rollout_batch_size=8,
+        n_samples_per_prompt=4,
+        global_batch_size=16,
+    )
+    assert slime.rollout_step(per_train_step, 3) == 6  # two train steps per rollout
+
+
+def test_the_trainer_hooks_put_the_training_on_its_own_steps_timeline(
+    env, args, monkeypatch, wandb_run
+) -> None:
+    clock = iter([100.0, 101.0, 105.0, 107.0])
+    monkeypatch.setattr(slime.time, "time", lambda: next(clock, 200.0))
+    stub = StubLoader(completed={f"{RUN}-v000000"})
+    install_stub(monkeypatch, stub)
+    v1 = write_delta_checkpoint(Path(args.update_weight_disk_dir) / "weight_v000001", version=1)
+
+    slime.before_log_prob(args, None, "ref_")  # 100: the reference model's pass starts it
+    slime.before_log_prob(args, None, "")  # 101: the actor's pass changes nothing
+    slime.before_train_step(args, 0, 0, None, None, None)  # 105: the optimizer steps start
+    slime.before_train_step(args, 0, 1, None, None, None)  # later steps of the same rollout
+    slime.hook(args, str(v1), [])  # 107: the weights of that training are written
+
+    trainer, publish = wandb_run.rows
+    trainer = {k: v for k, v in trainer.items() if not math.isnan(v)}
+    assert trainer == {
+        "timeline/step": 0.0,
+        "timeline/logprobs/start": 100.0,
+        "timeline/logprobs/end": 105.0,
+        "timeline/update/start": 105.0,
+        "timeline/update/end": 107.0,
+        "rollout/step": 0,
+    }
+    assert publish["timeline/step"] == 1.0 and publish["rollout/step"] == 1
+    # the marks start over for the next training; other ranks never mark
+    args.rank = 1
+    slime.before_train_step(args, 1, 0, None, None, None)
+    assert slime._trainer_spans(300.0) == {}
+
+
+def test_the_trainer_timeline_args_name_the_hooks() -> None:
+    flags = dict(
+        zip(slime.TRAINER_TIMELINE_ARGS[::2], slime.TRAINER_TIMELINE_ARGS[1::2], strict=True)
+    )
+    for value in flags.values():
+        module, _, name = value.rpartition(".")
+        assert module == "cwtrain.integrations.slime" and callable(getattr(slime, name))

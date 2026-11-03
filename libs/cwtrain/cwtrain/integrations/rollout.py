@@ -125,6 +125,17 @@ that does not match its tokens, is an error: a trainer that replays routes canno
 slime and miles replay routes with ``--use-rollout-routing-replay``. With that flag,
 :meth:`RolloutConfig.for_trainer` turns routes on, and :func:`fill_group` stores them as
 ``rollout_routed_experts``: int32, in the shape that both expect.
+
+Metrics
+-------
+
+:func:`sample_groups` returns ``coreweave/*`` metrics for the rollout: its wall time, response
+tokens per second, the requests, their retries and their latency (p50, p95, max), truncation,
+and how many samples carry aligned log-probs. slime and miles log what the rollout function
+returns, and the rollout functions plot it on ``rollout/step``
+(:mod:`cwtrain.integrations.tracking`).
+:func:`fill_group` also records the prompt tokens the deployment served from its prefix cache, for
+the trainers' own ``rollout/prefix_cache_hit_rate``.
 """
 
 from __future__ import annotations
@@ -147,6 +158,7 @@ import httpx
 import numpy as np
 
 from cwtrain.errors import CWTrainError
+from cwtrain.integrations import tracking
 from cwtrain.integrations._env import flag, positive_float, positive_int
 from cwtrain.integrations.nvext import (
     MAX_CACHE_SALT,
@@ -291,6 +303,14 @@ class RolloutConfig:
         if self.require_logprobs and not self.logprobs:
             raise CWTrainError("RolloutConfig.require_logprobs needs logprobs on")
 
+    def settings(self) -> dict[str, Any]:
+        """The settings to record with a run: everything but the endpoint and its key."""
+        return {
+            f.name: getattr(self, f.name)
+            for f in dataclasses.fields(self)
+            if f.name not in ("base_url", "api_key")
+        }
+
     def without_routed_experts(self, trainer: str) -> RolloutConfig:
         """This config with routed experts off, for a trainer that cannot replay them.
 
@@ -426,6 +446,43 @@ class Completion:
     cached_tokens: int | None = None
 
 
+@dataclass
+class RequestStats:
+    """The completions requests of one rollout: how many, how many retries, how long each took.
+
+    A request's seconds are those of its successful attempt, from sending it to the whole
+    response, so they include the time it queued at the deployment.
+    """
+
+    requests: int = 0
+    retries: int = 0
+    seconds: list[float] = field(default_factory=list)
+
+    def record(self, seconds: float) -> None:
+        self.requests += 1
+        self.seconds.append(seconds)
+
+    def metrics(self) -> dict[str, float]:
+        out = {
+            "coreweave/requests": float(self.requests),
+            "coreweave/request_retries": float(self.retries),
+        }
+        if self.seconds:
+            ordered = sorted(self.seconds)
+            out["coreweave/request_seconds_p50"] = round(_quantile(ordered, 0.5), 3)
+            out["coreweave/request_seconds_p95"] = round(_quantile(ordered, 0.95), 3)
+            out["coreweave/request_seconds_max"] = round(ordered[-1], 3)
+        return out
+
+
+def _quantile(ordered: Sequence[float], q: float) -> float:
+    """Linear-interpolated quantile ``q`` of the sorted ``ordered``."""
+    position = (len(ordered) - 1) * q
+    low = int(position)
+    high = min(low + 1, len(ordered) - 1)
+    return ordered[low] + (ordered[high] - ordered[low]) * (position - low)
+
+
 class CompletionSampler:
     """One ``/v1/completions`` request per GRPO group, ``n`` choices per request.
 
@@ -439,6 +496,8 @@ class CompletionSampler:
             base_url=config.base_url, headers=headers, timeout=config.timeout, transport=transport
         )
         self._semaphore = asyncio.Semaphore(config.concurrency)
+        #: Requests since :func:`sample_groups` last started a rollout.
+        self.stats = RequestStats()
         #: Set to False for the rest of the run when the endpoint refuses token-id prompts.
         self.token_id_prompts = config.token_id_prompts
         self._loop: asyncio.AbstractEventLoop | None = None  # set by shared_sampler
@@ -581,6 +640,9 @@ class CompletionSampler:
         delay = 1.0
         last = ""
         for attempt in range(1, self.config.max_attempts + 1):
+            if attempt > 1:
+                self.stats.retries += 1
+            started = time.monotonic()
             try:
                 response = await self._client.post("/completions", json=payload)
             except httpx.HTTPError as exc:
@@ -588,10 +650,13 @@ class CompletionSampler:
             else:
                 if response.status_code == 200:
                     try:
-                        return response.json()
+                        body = response.json()
                     except ValueError:
                         # A gateway or portal page served with 200: retry like a 503.
                         last = f"HTTP 200 with a non-JSON body: {response.text[:200]!r}"
+                    else:
+                        self.stats.record(time.monotonic() - started)
+                        return body
                 else:
                     last = f"HTTP {response.status_code}: {response.text[:200]}"
                     if response.status_code not in RETRY_STATUS:
@@ -668,6 +733,7 @@ def shared_sampler(config: RolloutConfig) -> CompletionSampler:
         sampler = CompletionSampler(config)
         sampler._loop = loop
         _shared_samplers[key] = sampler
+        tracking.update_config({"rollout": config.settings()})
     return sampler
 
 
@@ -925,6 +991,12 @@ def fill_group(
             status.TRUNCATED if completion.finish_reason == "length" else status.COMPLETED
         )
         sample.rollout_log_probs = align_logprobs(completion, response_ids, tokenizer)
+        cache = getattr(sample, "prefix_cache_info", None)
+        if cache is not None and completion.cached_tokens is not None:
+            # What slime's and miles' rollout/prefix_cache_hit_rate reads. Assigned, not added:
+            # a group sampled again is filled again.
+            cache.cached_tokens = int(completion.cached_tokens)
+            cache.total_prompt_tokens = len(prompt_ids)
         if completion.routed_experts is not None:
             if completion.routed_experts.shape[0] != len(sample.tokens) - 1:
                 raise RolloutError(
@@ -973,8 +1045,9 @@ async def sample_groups(
     Raises:
         RolloutError: The config requires log-probs, and a group's still do not align.
     """
-    started = time.monotonic()
+    started, wall = time.monotonic(), time.time()
     resampled = 0
+    sampler.stats = stats = RequestStats()
 
     async def one(group: Sequence[Any]) -> None:
         nonlocal resampled
@@ -1034,14 +1107,19 @@ async def sample_groups(
                 len(flat) - aligned,
                 len(flat),
             )
+    seconds = time.monotonic() - started
+    response_tokens = sum(s.response_length for s in flat)
     return {
-        "coreweave/generation_seconds": round(time.monotonic() - started, 3),
+        "coreweave/generation_seconds": round(seconds, 3),
         "coreweave/samples": float(len(flat)),
-        "coreweave/mean_response_length": sum(s.response_length for s in flat) / max(1, len(flat)),
+        "coreweave/mean_response_length": response_tokens / max(1, len(flat)),
+        "coreweave/response_tokens_per_second": round(response_tokens / max(seconds, 1e-9), 1),
         "coreweave/truncated_fraction": truncated / max(1, len(flat)),
         "coreweave/logprobs_aligned_fraction": aligned / max(1, len(flat)),
         "coreweave/logprobs_kept": 1.0 if kept else 0.0,
         "coreweave/resampled_groups": float(resampled),
+        **stats.metrics(),
+        **tracking.span("rollout", wall, time.time()),
     }
 
 
@@ -1052,6 +1130,7 @@ __all__ = [
     "LOGPROB_RESAMPLES",
     "NO_EVALUATION",
     "ROLLOUT_LOOP_FLAGS",
+    "RequestStats",
     "RolloutConfig",
     "RolloutError",
     "align_logprobs",
