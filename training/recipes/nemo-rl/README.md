@@ -212,6 +212,55 @@ Two settings control how many sequences are sampled at once:
 When requests × completions is more than replicas × `autoscaling.concurrency`, the extra sequences
 wait for a free slot. Gym sends one completion per request.
 
+## Watching in W&B
+
+W&B is off by default: the recipe's config sets `logger.wandb_enabled: false`. To log a run, set
+`WANDB_PROJECT` in the example's `run.env`, and `WANDB_ENTITY` when the project is not under your
+key's default entity. The Job reads the key from the Secret that `WANDB_API_KEY_SECRET` names
+(default `wandb-api-key`), under `api_key`:
+
+```bash
+kubectl -n "$NAMESPACE" create secret generic "$WANDB_API_KEY_SECRET" --from-file=api_key=<(printf %s "$WANDB_API_KEY")
+```
+
+The pod starts without that Secret, but with `WANDB_PROJECT` set and no key, the launcher stops
+before it stages anything. The launcher adds `logger.wandb_enabled=true`, the project, the entity,
+`logger.wandb.name` and `logger.wandb.group` set to `RUN_ID`, and `logger.monitor_gpus=true`.
+`EXTRA_OVERRIDES` come after them and win.
+
+NeMo-RL logs every row at an explicit step, so the synchronizer logs nothing itself. The recipe's
+patch adds its metrics to the step's own: `train/hotload/*` is the hot-load before that step's
+generation.
+
+| Question | Panels |
+| --- | --- |
+| Is the policy learning? | `train/reward`, `train/loss`, `train/grad_norm` |
+| Do the responses fit the token budget? | `train/mean_gen_tokens_per_sample`, `train/truncation_rate` |
+| How far apart are the deployment's and the trainer's log-probs? | `train/token_mult_prob_error`, `train/gen_kl_error`, `train/sampling_importance_ratio` |
+| Where does a step's time go? | The `timeline/*` spans of each phase; `timing/train/generation`, `timing/train/policy_training`, `timing/train/prepare_for_generation/total` (the hot-load) |
+| How long does each hot-load take? | `train/hotload/export_seconds`, `train/hotload/upload_seconds`, `train/hotload/hot_load_seconds`, `train/hotload/replica_seconds_first`, `train/hotload/replica_seconds_rest_max` |
+| What does a delta cost? | `train/hotload/incremental` (1 for a delta, 0 for a full snapshot), `train/hotload/bytes_changed`, `train/hotload/wire_bytes` |
+
+The patch also times the training loop with cwtrain's `SpanTimer`, a NeMo-RL timer that records
+when each phase ran. At each step, the patch logs `timeline/<phase>/start` and `/end` (Unix
+seconds) with `timeline/step`, without the `train/` prefix: `rollout` (NeMo-RL's `generation`),
+`reward`, `logprobs` and `update` (`policy_training`), and the synchronizer's `export`, `upload`,
+`hotload` and each replica's install from the platform's timestamps (`hotload_first_replica`,
+`hotload_peers`). Step `i` is the hot-load before generation `i`, the generation, and the training
+on it.
+
+`train/hotload/replica_seconds_first` is the replica that installs the snapshot from object
+storage, and `train/hotload/replica_seconds_rest_max` the slowest of the others, which copy it from
+a peer. They appear when the platform reports the replicas' timestamps.
+
+The run's config holds NeMo-RL's whole config, `coreweave_cfg.base_url` (the deployment's endpoint)
+included, and a `cwtrain` section: the cwtrain version, `RUN_ID`, the deployment (model, engine,
+instance type, replicas, `autoscaling.concurrency`) and the hot-load settings. Neither holds a key.
+
+The launcher tags each run with its framework and algorithm (`nemo-rl,grpo`) and gives it the job type
+`train`, so that a project's runs can be told apart, unless `WANDB_TAGS` or `WANDB_JOB_TYPE` is
+already set in the trainer's environment.
+
 ## Pitfalls
 
 - **`snapshot access check failed` at the start of the trainer Job means that the trainer may not

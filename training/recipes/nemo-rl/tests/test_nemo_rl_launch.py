@@ -58,6 +58,56 @@ def test_grpo_command_applies_settings_and_overrides(tmp_path: Path) -> None:
         launch.NemoJob.from_env({})
 
 
+WANDB = {
+    "MODEL_SLUG": "Qwen3-4B",
+    "WANDB_PROJECT": "cookbook",
+    "WANDB_API_KEY": "key",
+    "CWTRAIN_HOTLOAD_RUN_ID": "run-1",
+}
+PATCH = Path(__file__).resolve().parents[1] / "patches" / "0001-coreweave-generation-backend.patch"
+
+
+def test_wandb_overrides_only_with_a_project_and_before_the_extra_ones() -> None:
+    off = launch.NemoJob.from_env(WANDB | {"WANDB_PROJECT": ""})
+    assert not any("wandb" in arg for arg in launch.grpo_command(off))
+    extra = {"WANDB_ENTITY": "team", "EXTRA_OVERRIDES": "logger.monitor_gpus=false"}
+    job = launch.NemoJob.from_env(WANDB | extra)
+    assert launch.grpo_command(job)[-7:] == [
+        "logger.wandb_enabled=true",
+        "logger.wandb.project='cookbook'",
+        "logger.wandb.name='run-1'",
+        "++logger.wandb.group='run-1'",
+        "++logger.wandb.entity='team'",
+        "logger.monitor_gpus=true",
+        "logger.monitor_gpus=false",  # EXTRA_OVERRIDES come last and win
+    ]
+    assert not any("key" in arg for arg in launch.grpo_command(job))
+
+
+@pytest.mark.parametrize(
+    ("settings", "error"),
+    [
+        ({"WANDB_API_KEY": ""}, "WANDB_API_KEY_SECRET"),
+        ({"CWTRAIN_HOTLOAD_RUN_ID": ""}, "CWTRAIN_HOTLOAD_RUN_ID is required"),
+        ({"WANDB_PROJECT": "it's"}, "must not hold a quote"),
+    ],
+)
+def test_bad_wandb_settings_stop_the_launcher(settings, error) -> None:
+    with pytest.raises(LaunchError, match=error):
+        launch.NemoJob.from_env(WANDB | settings)
+
+
+def test_the_patch_logs_the_hot_load_and_the_timeline_with_each_training_step() -> None:
+    added = "\n".join(line[1:] for line in PATCH.read_text().splitlines() if line.startswith("+"))
+    assert 'synchronizer = getattr(policy_generation, "weight_synchronizer", None)' in added
+    assert "_cw = synchronizer.pop_metrics(timer=timer, step=total_steps + 1)" in added
+    # hot-load metrics join the step's train/ metrics; the timeline keeps its own, unprefixed keys
+    assert "metrics.update({k: v for k, v in _cw.items() if k not in timeline})" in added
+    assert "logger.log_metrics(timeline, total_steps + 1)" in added
+    # only the coreweave backend swaps the training loop's timer
+    assert '== "coreweave":' in added and "timer = SpanTimer()" in added
+
+
 def test_install_into_workers_covers_every_prebuilt_venv(tmp_path: Path, monkeypatch) -> None:
     kit = make_kit(tmp_path)
     venvs = tmp_path / "ray_venvs"
@@ -108,6 +158,28 @@ def test_main_patches_installs_stages_then_hands_over(
     assert execs[0][:2] == ["/venv/bin/python", "examples/run_grpo.py"]
     # GRPO here is synchronous, so the trainer asks for a clean prompt cache unless told otherwise
     assert launch.os.environ["CWTRAIN_HOTLOAD_PROMPT_CACHE_POLICY"] == expected
+
+
+@pytest.mark.parametrize("project", ["", "cookbook"])
+def test_main_tags_the_wandb_run_only_with_a_project(tmp_path: Path, monkeypatch, project) -> None:
+    kit = make_kit(tmp_path)
+    for name in ("WANDB_TAGS", "WANDB_JOB_TYPE"):
+        monkeypatch.setenv(name, "x")  # so that monkeypatch restores the variable's absence
+        monkeypatch.delenv(name)
+    monkeypatch.setattr(launch, "apply_patches", lambda *a, **k: None)
+    monkeypatch.setattr(launch, "install_into_workers", lambda job, whl: None)
+    monkeypatch.setattr(launch.os, "execvp", lambda path, args: None)
+    monkeypatch.setattr(launch.os, "chdir", lambda path: None)
+    model = tmp_path / "w" / "models" / "Qwen3-4B"
+    model.mkdir(parents=True)
+    (model / "config.json").write_text("{}")
+    env = WANDB | {"MODEL_SLUG": "Qwen3-4B", "WORK": str(tmp_path / "w"),
+                   "CWTRAIN_KIT_DIR": str(kit), "WANDB_PROJECT": project}  # fmt: skip
+    launch.main(env)
+    tags = launch.os.environ.get("WANDB_TAGS")
+    assert (tags, launch.os.environ.get("WANDB_JOB_TYPE")) == (
+        ("nemo-rl,grpo", "train") if project else (None, None)
+    )
 
 
 def test_main_prepares_data_then_trains_with_the_example_config(tmp_path: Path, monkeypatch) -> None:

@@ -12,6 +12,12 @@ set -euo pipefail
 # a number. Unset it, so that the hook uses its default.
 hotload_timeout=${CWTRAIN_HOTLOAD_TIMEOUT:-}
 [[ -n "${hotload_timeout//[[:space:]]/}" ]] || unset CWTRAIN_HOTLOAD_TIMEOUT
+# An empty W&B setting from run.env reaches the Job as an empty value. Unset it, so that W&B's own
+# default applies (WANDB_PROJECT empty: no W&B at all).
+for var in WANDB_PROJECT WANDB_ENTITY; do
+  value=${!var:-}
+  [[ -n "${value//[[:space:]]/}" ]] || unset "$var"
+done
 
 : "${HF_MODEL:?}" "${NUM_ROLLOUT:=6}" "${ACTOR_GPUS:=2}" "${TP_SIZE:=2}"
 WORK=${WORK:-/work}

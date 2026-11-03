@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import shlex
 import shutil
 import subprocess
@@ -32,11 +33,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from cwtrain.errors import CWTrainError
-from cwtrain.hotload import HotLoad, HotLoader, PromptCachePolicy
+from cwtrain.hotload import HotLoad, HotLoader, ProgressEvent, PromptCachePolicy
 from cwtrain.hotload.delta import write_full_snapshot
 from cwtrain.hotload.mirror import TensorLocation, tensor_locations
 from cwtrain.hotload.snapshot import INDEX_FILE, validate_identity
 from cwtrain.infra import DEFAULT_BASE_URL, TOKEN_ENV_VARS, InferenceClient, token_from_env
+from cwtrain.integrations import tracking
 from cwtrain.integrations.launch import (
     LaunchError,
     env_int,
@@ -46,6 +48,7 @@ from cwtrain.integrations.launch import (
     say,
     split_args,
     stage_from_s3,
+    wandb_run_env,
 )
 
 TIED_HEAD, EMBEDDING = "lm_head.weight", "model.embed_tokens.weight"
@@ -53,6 +56,11 @@ TIED_HEAD, EMBEDDING = "lm_head.weight", "model.embed_tokens.weight"
 API_CREDENTIALS = (*TOKEN_ENV_VARS, "CWTRAIN_API_HEADERS")
 _TRUE, _FALSE = {"1", "true", "yes", "on"}, {"0", "false", "no", "off"}
 _COMPARE_CHUNK = 64 * 2**20
+NO_WANDB_KEY = (
+    "WANDB_PROJECT is set, but the trainer has no WANDB_API_KEY: create the Secret that "
+    "WANDB_API_KEY_SECRET names (default wandb-api-key) with the key under api_key, or leave "
+    "WANDB_PROJECT empty to train without W&B"
+)
 
 
 def env_flag(environ: Mapping[str, str], name: str, default: bool) -> bool:
@@ -81,6 +89,10 @@ class SftJob:
     timeout: float = 1800.0
     verify: bool = False
     policy: PromptCachePolicy = PromptCachePolicy.RESET_ALL
+    #: W&B project; empty trains without W&B. Axolotl's run, which the publish step reopens.
+    wandb_project: str = ""
+    wandb_entity: str = ""
+    wandb_run_id: str = ""
     extra_train_args: tuple[str, ...] = ()
 
     @classmethod
@@ -113,12 +125,16 @@ class SftJob:
         if not 0 < timeout < float("inf"):
             raise LaunchError(f"CWTRAIN_HOTLOAD_TIMEOUT must be seconds, got {timeout_raw!r}")
         kit = Path(text("CWTRAIN_KIT_DIR", "/opt/cwtrain"))
+        run_id = require(env, "CWTRAIN_HOTLOAD_RUN_ID")
+        wandb_project = text("WANDB_PROJECT", "")
+        if wandb_project and not env.get("WANDB_API_KEY", "").strip():
+            raise LaunchError(NO_WANDB_KEY)
         job = cls(
             hf_model=require(env, "HF_MODEL"),
             hf_revision=text("HF_REVISION", ""),
             model_slug=require(env, "MODEL_SLUG"),
             deployment_id=require(env, "CWTRAIN_HOTLOAD_DEPLOYMENT_ID"),
-            run_id=require(env, "CWTRAIN_HOTLOAD_RUN_ID"),
+            run_id=run_id,
             work=Path(text("WORK", "/work")),
             config=Path(text("AXOLOTL_CONFIG", str(kit / "sft_coreweave.yaml"))),
             gpus=env_int(env, "TRAINER_GPUS", 2),
@@ -128,6 +144,10 @@ class SftJob:
             timeout=timeout,
             verify=env_flag(env, "CWTRAIN_HOTLOAD_VERIFY", False),
             policy=policy,
+            wandb_project=wandb_project,
+            wandb_entity=text("WANDB_ENTITY", ""),
+            # a new W&B run per launch, named after the run ID; WANDB_RUN_ID picks one
+            wandb_run_id=text("WANDB_RUN_ID", "") or wandb_run_id(run_id) if wandb_project else "",
             extra_train_args=extra,
         )
         if job.gpus < 1 or job.max_steps < 1:
@@ -147,6 +167,11 @@ class SftJob:
     def identity(self) -> str:
         """The snapshot identity, ``<run>-vNNNNNN`` as in every recipe, so cleanup finds it."""
         return f"{self.run_id}-v{self.max_steps:06d}"
+
+
+def wandb_run_id(run_id: str) -> str:
+    """A W&B run ID for ``run_id``: its letters, digits, dashes and underscores, and a suffix."""
+    return f"{re.sub(r'[^A-Za-z0-9_-]', '-', run_id)[:55]}-{secrets.token_hex(4)}"
 
 
 def api_client(environ: Mapping[str, str]) -> InferenceClient:
@@ -175,9 +200,25 @@ def train_command(job: SftJob) -> list[str]:
         "axolotl", "train", str(job.config),
         "--base-model", str(job.model_dir), "--output-dir", str(job.output_dir),
         "--max-steps", str(job.max_steps),
+        *wandb_options(job),
         *job.extra_train_args,
         # torchrun starts one process per GPU, and FSDP2 shards the model across them
         "--launcher", "torchrun", "--", "--nproc_per_node", str(job.gpus),
+    ]  # fmt: skip
+
+
+def wandb_options(job: SftJob) -> list[str]:
+    """Axolotl's W&B options when ``WANDB_PROJECT`` is set: a run named after the run ID.
+
+    The ID is fixed here, so that the publish step can reopen the run. Axolotl's config holds no
+    W&B key, so a run without ``WANDB_PROJECT`` sends nothing to W&B.
+    """
+    if not job.wandb_project:
+        return []
+    return [
+        "--wandb-project", job.wandb_project,
+        *(["--wandb-entity", job.wandb_entity] if job.wandb_entity else []),
+        "--wandb-name", job.run_id, "--wandb-run-id", job.wandb_run_id,
     ]  # fmt: skip
 
 
@@ -191,9 +232,10 @@ def merge_command(job: SftJob) -> list[str]:
     ]  # fmt: skip
 
 
-def axolotl(args: Sequence[str], *, cwd: Path) -> None:
+def axolotl(args: Sequence[str], *, cwd: Path, extra_env: Mapping[str, str] | None = None) -> None:
     """Run an ``axolotl`` command, echoed like :func:`run`, without the API credentials."""
     env = {k: v for k, v in os.environ.items() if k not in API_CREDENTIALS}
+    env.update(extra_env or {})
     say(f"$ {shlex.join(args)}")
     # relative paths, such as the prepared dataset, land in cwd
     code = subprocess.run(list(args), cwd=cwd, env=env).returncode
@@ -328,13 +370,26 @@ def recovery_command(job: SftJob) -> str:
     return shlex.join(cmd)
 
 
-def publish(loader: HotLoader, snapshot: Path, job: SftJob) -> HotLoad:
-    """Upload ``snapshot`` as ``job.identity``, then hot-load it once the deployment is READY."""
+def publish(
+    loader: HotLoader, snapshot: Path, job: SftJob, metrics: dict[str, float] | None = None
+) -> HotLoad:
+    """Upload ``snapshot`` as ``job.identity``, then hot-load it once the deployment is READY.
+
+    ``metrics``, when given, receives the publish's ``hotload/*`` metrics, as the RL recipes'
+    hooks report them.
+    """
+    metrics = {} if metrics is None else metrics
+    started, wall = time.monotonic(), time.time()
     # the weights sit on the pod's disk until this returns, so upload before any wait
     info = loader.upload(snapshot, job.identity)
+    metrics["hotload/upload_seconds"] = round(time.monotonic() - started, 3)
+    metrics.update(tracking.span("upload", wall, time.time()))
+    metrics["hotload/snapshot_bytes"] = float(info.total_bytes)
+    metrics["hotload/incremental"] = 0.0
     # HOTLOAD_TIMEOUT bounds what follows the upload, as in the other recipes' hooks: waiting for
     # the deployment, for a hot-load already running, and for this one share one budget
-    deadline = time.monotonic() + job.timeout
+    started, wall = time.monotonic(), time.time()
+    deadline = started + job.timeout
 
     def remaining() -> float:
         return max(0.0, deadline - time.monotonic())
@@ -345,17 +400,76 @@ def publish(loader: HotLoader, snapshot: Path, job: SftJob) -> HotLoad:
             job.identity, info, prompt_cache_policy=job.policy, timeout=remaining()
         )
         if job.wait:
-            hot_load = loader.wait(hot_load.id, timeout=remaining())
+            last: list[ProgressEvent] = []
+            hot_load = loader.wait(hot_load.id, timeout=remaining(), on_progress=last.append)
+            if last:
+                metrics["hotload/replicas_ready"] = float(last[-1].ready)
+                metrics["hotload/replicas_total"] = float(last[-1].total)
+                metrics.update(last[-1].timings())
+                metrics.update(last[-1].timeline())
             if job.verify:
-                loader.verify_served(hot_load.id, job.identity)
+                replicas = loader.verify_served(hot_load.id, job.identity)
+                metrics["hotload/replicas_verified"] = float(len(replicas))
     except CWTrainError:
         say(
             f"{job.identity} is in the bucket, but not hot-loaded. Once `cwtrain deployment get "
             f"{job.deployment_id}` shows READY, hot-load it with: {recovery_command(job)}"
         )
         raise
+    metrics["hotload/hot_load_seconds"] = round(time.monotonic() - started, 3)
+    metrics.update(tracking.span("hotload", wall, time.time()))
+    metrics["hotload/completed"] = 1.0 if hot_load.completed else 0.0
     say(f"hot-load {hot_load.id} of {job.identity}: {hot_load.state.name}")
     return hot_load
+
+
+def log_publish(job: SftJob, loader: HotLoader, metrics: Mapping[str, float]) -> None:
+    """Reopen Axolotl's W&B run, record the publish in it, and close it again.
+
+    The run ended with ``axolotl train``. The publish's ``hotload/*`` metrics go on its
+    ``train/global_step`` axis, at the last step, with the run's ``timeline/*`` spans (training,
+    the LoRA merge, the upload and the hot-load). A failure here is reported, not raised: the
+    model is already published.
+    """
+    if not job.wandb_project:
+        return
+    try:
+        import wandb  # run-trainer.sh installs it into this venv when WANDB_PROJECT is set
+
+        run = wandb.init(
+            project=job.wandb_project,
+            entity=job.wandb_entity or None,
+            id=job.wandb_run_id,
+            resume="allow",
+        )
+        try:
+            tracking.update_config(
+                {
+                    "version": tracking.version(),
+                    "run_id": job.run_id,
+                    "identity": job.identity,
+                    "deployment": tracking.deployment_config(loader.deployment),
+                    "hotload": {
+                        "wait": job.wait,
+                        "prompt_cache_policy": job.policy.name.lower(),
+                        "verify": job.verify,
+                    },
+                }
+            )
+            tracking.log_metrics(
+                {
+                    **metrics,
+                    "hotload/version": float(job.max_steps),
+                    tracking.TIMELINE_STEP: float(job.max_steps),
+                },
+                step_metric="train/global_step",
+                step=job.max_steps,
+                prefixes=("hotload/", "timeline/"),
+            )
+        finally:
+            run.finish()
+    except Exception as exc:  # noqa: BLE001 - the model is published; only the record is missing
+        say(f"could not record the publish in the W&B run {job.wandb_run_id}: {exc}")
 
 
 def main(environ: Mapping[str, str] | None = None) -> None:
@@ -373,11 +487,23 @@ def main(environ: Mapping[str, str] | None = None) -> None:
     job.work.mkdir(parents=True, exist_ok=True)
 
     say("== train")
-    axolotl(train_command(job), cwd=job.work)
+    # grouped by the run ID like the RL recipes' runs, with the job type and tags, unless set
+    run_env = (
+        {"WANDB_RUN_GROUP": job.run_id, **wandb_run_env("axolotl", "sft", env)}
+        if job.wandb_project
+        else {}
+    )
+    # when training, the merge and the publish ran: the run's timeline
+    metrics: dict[str, float] = {}
+    wall = time.time()
+    axolotl(train_command(job), cwd=job.work, extra_env=run_env)
+    metrics.update(tracking.span("train", wall, time.time()))
     result = job.output_dir
     if (result / "adapter_config.json").is_file():  # hot-load serves full weights only
         say("== merge the LoRA adapter")
+        wall = time.time()
         axolotl(merge_command(job), cwd=job.work)
+        metrics.update(tracking.span("merge", wall, time.time()))
         result = result / "merged"
         if same_weights(result, job.model_dir):
             raise LaunchError(
@@ -392,7 +518,8 @@ def main(environ: Mapping[str, str] | None = None) -> None:
     snapshot = write_full_snapshot(staged, job.work / job.identity, names=names)
 
     say("== publish")
-    publish(loader, snapshot, job)
+    publish(loader, snapshot, job, metrics)
+    log_publish(job, loader, metrics)
 
 
 if __name__ == "__main__":

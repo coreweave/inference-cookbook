@@ -163,6 +163,40 @@ To evaluate the fine-tuned model, send requests to the deployment's endpoint for
 `model_name`. The [web-search-agent case study's evaluation](../../case-studies/web-search-agent/README.md#evaluation)
 shows how to evaluate an existing deployment with NeMo Gym.
 
+## Watching in W&B
+
+W&B is off by default, and the recipe's Axolotl config names no W&B project. To log a run, set
+`WANDB_PROJECT` in the example's `run.env`, and `WANDB_ENTITY` when the project is not under your
+key's default entity. The Job reads the key from the Secret that `WANDB_API_KEY_SECRET` names
+(default `wandb-api-key`), under `api_key`:
+
+```bash
+kubectl -n "$NAMESPACE" create secret generic "$WANDB_API_KEY_SECRET" --from-file=api_key=<(printf %s "$WANDB_API_KEY")
+```
+
+The pod starts without that Secret, but with `WANDB_PROJECT` set and no key, the launcher stops
+before it trains. The launcher passes `--wandb-project`, `--wandb-entity`, and `--wandb-name` set
+to `RUN_ID`, and puts the run in the group `RUN_ID`. Axolotl logs the training, such as
+`train/loss`, `train/learning_rate` and `train/grad_norm`, against `train/global_step`.
+
+The publish runs after `axolotl train` has closed its run. The launcher then reopens the run and
+logs the publish at the last step: `hotload/upload_seconds`, `hotload/hot_load_seconds`,
+`hotload/snapshot_bytes`, and `hotload/replica_seconds_first` and `hotload/replica_seconds_rest_max`
+when the platform reports the replicas' timestamps. The first is the replica that installs the
+snapshot from object storage, the second the slowest of the others, which copy it from a peer. The
+run's config gets a `cwtrain` section: the cwtrain version, `RUN_ID`, the published identity, the
+deployment (model, engine, instance type, replicas) and the hot-load settings. A failure to record
+the publish is reported in the log, after the model is published.
+
+The publish row also holds the run's timeline: `timeline/<phase>/start` and `/end` (Unix seconds)
+for `train` (the `axolotl train` process), `merge` (`axolotl merge-lora`, after a LoRA run),
+`upload`, `hotload`, and each replica's install from the platform's timestamps
+(`hotload_first_replica`, `hotload_peers`), with `timeline/step` set to `MAX_STEPS`.
+
+The launcher tags each run with its framework and algorithm (`axolotl,sft`) and gives it the job type
+`train`, so that a project's runs can be told apart, unless `WANDB_TAGS` or `WANDB_JOB_TYPE` is
+already set in the trainer's environment.
+
 ## Pitfalls
 
 - **`snapshot access check failed` at the start of the trainer Job means that the trainer may not

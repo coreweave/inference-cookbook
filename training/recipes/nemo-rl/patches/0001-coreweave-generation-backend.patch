@@ -2,13 +2,15 @@ CoreWeave Inference Cookbook patch for NeMo-RL (https://github.com/NVIDIA-NeMo/R
 Base: tag v0.7.0
 Purpose: add the `coreweave` generation backend to grpo.setup() (policy cluster only, the cwtrain
   worker extension, the hot-load weight synchronizer), let refit_policy_generation hand
-  over to that synchronizer, and keep print_performance_metrics working when generation
-  owns no GPUs in the training cluster.
+  over to that synchronizer, log the synchronizer's hot-load metrics with each training step,
+  time the training loop with cwtrain's SpanTimer and log when each phase ran (the W&B
+  timeline), and keep print_performance_metrics working when generation owns no GPUs in the
+  training cluster.
 License: Apache-2.0. Upstream code by NVIDIA CORPORATION; changes by CoreWeave, Inc. (see REUSE.toml).
 Applied by training/recipes/nemo-rl/launch.py with `git apply`, which skips this header.
 
 diff --git a/nemo_rl/algorithms/grpo.py b/nemo_rl/algorithms/grpo.py
-index 76d75c8..bea06a5 100644
+index 76d75c8..02be08a 100644
 --- a/nemo_rl/algorithms/grpo.py
 +++ b/nemo_rl/algorithms/grpo.py
 @@ -13,6 +13,7 @@
@@ -153,6 +155,34 @@ index 76d75c8..bea06a5 100644
      # Megatron generation backend needs explicit suspend/resume around refits.
      if isinstance(policy_generation, MegatronGeneration):
          policy_generation.suspend_for_refit()
+@@ -2144,6 +2249,11 @@ def grpo_train(
+ ) -> None:
+     """Run GRPO training algorithm."""
+     timer = Timer()
++    if (master_config.policy.get("generation") or {}).get("backend") == "coreweave":
++        # The same timer, which also records when each phase ran, for the run's W&B timeline.
++        from cwtrain.integrations.nemo_rl import SpanTimer
++
++        timer = SpanTimer()
+     timeout = TimeoutChecker(
+         timeout=master_config.checkpointing["checkpoint_must_save_by"],
+         fit_last_save_time=True,
+@@ -2860,6 +2970,15 @@ def grpo_train(
+                         print(f"Skipping aggregation for {k} ({type(v)})")
+ 
+                 metrics.update(rollout_metrics)
++                # The hot-load of this step's refit, logged as train/hotload/* at this step, and
++                # when each phase of the step ran, logged unprefixed as timeline/* (cwtrain).
++                synchronizer = getattr(policy_generation, "weight_synchronizer", None)
++                if hasattr(synchronizer, "pop_metrics"):
++                    _cw = synchronizer.pop_metrics(timer=timer, step=total_steps + 1)
++                    timeline = {k: v for k, v in _cw.items() if k.startswith("timeline/")}
++                    metrics.update({k: v for k, v in _cw.items() if k not in timeline})
++                    if timeline:
++                        logger.log_metrics(timeline, total_steps + 1)
+                 metrics["generation_logger_metrics"] = generation_logger_metrics
+                 total_valid_tokens += metrics["global_valid_toks"]
+ 
 diff --git a/nemo_rl/algorithms/utils.py b/nemo_rl/algorithms/utils.py
 index 1aaaa45..17e3593 100644
 --- a/nemo_rl/algorithms/utils.py

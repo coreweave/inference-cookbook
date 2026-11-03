@@ -16,6 +16,7 @@ Configuration is read from ``CWTRAIN_ROLLOUT_*`` environment variables; see
 from __future__ import annotations
 
 import logging
+import time
 
 from miles.rollout.base_types import (
     BaseRolloutFn,
@@ -28,6 +29,7 @@ from miles.rollout.rm_hub import batched_async_rm
 from miles.utils.processing_utils import load_tokenizer
 
 from cwtrain.errors import CWTrainError
+from cwtrain.integrations import tracking
 from cwtrain.integrations.rollout import (
     NO_EVALUATION,
     RolloutConfig,
@@ -71,11 +73,18 @@ class CoreWeaveRolloutFn(BaseRolloutFn):
         if self.config.routed_experts:
             check_routes_fit(groups, int(args.num_layers), int(args.moe_router_topk))
         flat = [s for g in groups for s in g]
+        scored = time.time()
         rewards = await batched_async_rm(args, flat)
         for sample, reward in zip(flat, rewards, strict=True):
             sample.reward = float(reward)
+        metrics.update(tracking.span("reward", scored, time.time()))
+        metrics[tracking.TIMELINE_STEP] = float(input.rollout_id)
+        metrics["coreweave/rollout_id"] = float(input.rollout_id)
         metrics["coreweave/weight_version"] = (
             float(input.weight_version) if input.weight_version is not None else -1.0
         )
+        # miles binds rollout/* and perf/* to rollout/step; these join them in its W&B run, if any
+        tracking.bind(("coreweave/", "timeline/"), step_metric="rollout/step")
         log.info("rollout %d: %s", input.rollout_id, metrics)
-        return RolloutFnTrainOutput(samples=groups, metrics=metrics)
+        # every timeline key, so that a query for all of them gets this row (tracking.timeline_row)
+        return RolloutFnTrainOutput(samples=groups, metrics=tracking.timeline_row(metrics))

@@ -328,6 +328,11 @@ kubectl -n "$NAMESPACE" logs -f "job/cwtrain-$JOB_NAME"   # the trainer, includi
 cwtrain hotload list --deployment "$DEPLOYMENT_ID"         # one hot-load per published version
 ```
 
+To follow the run in W&B too, set `WANDB_PROJECT` in `run.env` and create the key Secret before
+you render the trainer Job. The W&B run is named and grouped after `RUN_ID`. The recipe's
+[Watching in W&B](../../recipes/nemo-rl/README.md#watching-in-wb) has the command and the panels
+to watch.
+
 You cannot change a Job while it exists. Before the next run, delete the finished Job with
 `kubectl -n "$NAMESPACE" delete job "cwtrain-$JOB_NAME"`. Then render and apply step 10 again.
 
@@ -472,7 +477,8 @@ The Job runs [`k8s/run-eval.sh`](k8s/run-eval.sh) on a node without GPUs. The sc
    `browsecomp_benchmark_resources_server` and `browsecomp_benchmark_agent`,
 4. collects `LIMIT` tasks (five by default) with `launch.py collect`, at `EVAL_CONCURRENCY` tasks in
    flight,
-5. prints each task's reward and tool calls, and the mean reward.
+5. prints each task's reward and tool calls, and the mean reward, with `launch.py report`. With
+   `WANDB_PROJECT` set, it also logs them to W&B ([Logging the evaluation to W&B](#logging-the-evaluation-to-wb)).
 
 The trajectories and Gym's metrics stay in the pod's `/work/results` until the Job is deleted. Each
 run of the block picks a new `EVAL_NAME`. On a cluster that admits Jobs through Kueue, add the label
@@ -481,6 +487,26 @@ are done, delete the Job and its kit:
 `kubectl -n "$NAMESPACE" delete job "cwtrain-gym-$EVAL_NAME"` and
 `kubectl -n "$NAMESPACE" delete configmap "$EVAL_KIT_NAME"`. [Cleaning up](#cleaning-up) removes
 the deployment.
+
+### Logging the evaluation to W&B
+
+W&B is off while `WANDB_PROJECT` in `eval.env` is empty. Set, the eval logs one W&B run with job
+type `eval`, named after `EVAL_NAME`:
+
+- its summary: `eval/mean_reward`, `eval/correct`, `eval/tasks`, `eval/tasks_at_turn_cap` and
+  `eval/mean_tool_calls`;
+- `eval/task_results`, a table with one row per task: its index in the benchmark, the reward, the
+  tool calls, whether it reached `MAX_STEPS`, and the first 500 characters of the final answer;
+- its config: the benchmark, the served model, `LIMIT`, `MAX_STEPS`, `MAX_CONTEXT_TOKENS`, the
+  judge model and `GYM_REF`, plus `EVAL_IDENTITY` when you set it.
+
+`WANDB_GROUP` puts the run in the training run's group. It defaults to the `RUN_ID` that your shell
+loaded from `run.env`, so set it to the trained run's `RUN_ID` in a new shell: `cwtrain hotload
+list` shows it as the prefix of the identities (`<RUN_ID>-vNNNNNN`). Set `EVAL_IDENTITY` to the
+identity the deployment serves, the last one that list shows, to record which version you scored.
+The key comes from the Secret `WANDB_API_KEY_SECRET`, as for the trainer; with `WANDB_PROJECT` set
+and no key, the Job stops before it installs anything. A W&B Inference judge key is a W&B API key,
+so the same key can serve both.
 
 ### Eval time and cost
 

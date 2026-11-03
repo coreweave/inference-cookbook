@@ -44,12 +44,30 @@ from cwtrain.integrations.launch import (
     say,
     split_args,
     stage_from_s3,
+    wandb_run_env,
 )
 from cwtrain.integrations.rollout import refuse_rollout_loop_flags
+from cwtrain.integrations.slime import TRAINER_TIMELINE_ARGS
 
 #: The slime commit this recipe and its patches were validated against (README, "Tested versions").
 TESTED_SLIME_COMMIT = "8ee9c1e1c8871ccd6dc8ec812edfaefa3dd1156b"
 DATASET = "zhuzilin/dapo-math-17k"
+NO_WANDB_KEY = (
+    "WANDB_PROJECT is set, but the trainer has no WANDB_API_KEY: create the Secret that "
+    "WANDB_API_KEY_SECRET names (default wandb-api-key) with the key under api_key, or leave "
+    "WANDB_PROJECT empty to train without W&B"
+)
+NO_WANDB_KEY_FLAG = (
+    "--wandb-key is not supported: the key would be on the Ray job's command line, in the job log "
+    "and in the W&B run's config, which holds every train.py argument. Put it in the Secret that "
+    "WANDB_API_KEY_SECRET names; the trainer reads it as WANDB_API_KEY"
+)
+
+
+def refuse_wandb_key(trainer_args: list[str]) -> None:
+    """Raise if a trainer command line passes the W&B key as an argument."""
+    if any(arg.partition("=")[0] == "--wandb-key" for arg in trainer_args):
+        raise LaunchError(NO_WANDB_KEY_FLAG)
 
 
 @dataclass(frozen=True)
@@ -80,6 +98,10 @@ class SlimeJob:
     global_batch_size: int = 32
     max_tokens_per_gpu: int = 9216
     use_tis: bool = True
+    #: W&B project; empty trains without W&B. The run is named and grouped by ``run_id``.
+    wandb_project: str = ""
+    wandb_entity: str = ""
+    run_id: str = ""
     extra_train_args: tuple[str, ...] = ()
 
     @classmethod
@@ -91,6 +113,10 @@ class SlimeJob:
 
         extra = split_args(env.get("EXTRA_TRAIN_ARGS"), name="EXTRA_TRAIN_ARGS")
         refuse_rollout_loop_flags(extra)  # before anything is staged
+        refuse_wandb_key(extra)
+        wandb_project = text("WANDB_PROJECT", "")
+        if wandb_project and not env.get("WANDB_API_KEY", "").strip():
+            raise LaunchError(NO_WANDB_KEY)
         return cls(
             hf_model=require(env, "HF_MODEL"),
             hf_revision=text("HF_REVISION", ""),
@@ -116,6 +142,10 @@ class SlimeJob:
             global_batch_size=env_int(env, "GLOBAL_BATCH_SIZE", 32),
             max_tokens_per_gpu=env_int(env, "MAX_TOKENS_PER_GPU", 9216),
             use_tis=env_flag(env, "USE_TIS", True),
+            wandb_project=wandb_project,
+            wandb_entity=text("WANDB_ENTITY", ""),
+            # the W&B run's name and group, so the run and its snapshot identities match
+            run_id=require(env, "CWTRAIN_HOTLOAD_RUN_ID") if wandb_project else "",
             extra_train_args=tuple(extra),
         )
 
@@ -170,7 +200,29 @@ def train_args(job: SlimeJob) -> list[str]:
         "--update-weight-delta-encoding", "xor", "--update-weight-delta-checksum", "adler32",
         "--custom-update-weight-post-write-path", "cwtrain.integrations.slime.hook",
         "--save", str(job.work / "ckpt"), "--save-interval", "100000",
+        *wandb_args(job),
         *job.extra_train_args,
+    ]  # fmt: skip
+
+
+def wandb_args(job: SlimeJob) -> list[str]:
+    """slime's W&B flags when ``WANDB_PROJECT`` is set: one run named and grouped by the run ID.
+
+    The key stays in the environment (``WANDB_API_KEY``). Every Ray worker inherits it from
+    ``ray start``, and ``--wandb-key`` would put it in the job's command line.
+
+    The trainer hooks mark when the log-probs and the update of each step start, for the run's
+    timeline. They come before ``EXTRA_TRAIN_ARGS``, so a hook of your own there replaces cwtrain's,
+    and the timeline then has no trainer lanes.
+    """
+    if not job.wandb_project:
+        return []
+    return [
+        "--use-wandb", "--wandb-project", job.wandb_project,
+        *(["--wandb-team", job.wandb_entity] if job.wandb_entity else []),
+        # slime appends a random suffix to the group unless told not to, and names the run after it
+        "--wandb-group", job.run_id, "--disable-wandb-random-suffix",
+        *TRAINER_TIMELINE_ARGS,
     ]  # fmt: skip
 
 
@@ -180,6 +232,9 @@ def runtime_env(pythonpath: str, environ: Mapping[str, str] | None = None) -> di
     # train.py is synchronous: each rollout round starts from the weights just hot-loaded, without
     # prefix-cache entries computed under the previous ones
     default_prompt_cache_policy(env)
+    if env_text(os.environ if environ is None else environ, "WANDB_PROJECT", ""):
+        # the W&B run's job type and tags (framework, algorithm), unless set; not secrets
+        env.update(wandb_run_env("slime", "grpo", environ))
     env.update(
         {
             "PYTHONPATH": pythonpath,

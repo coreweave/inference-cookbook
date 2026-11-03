@@ -5,6 +5,7 @@
 import argparse
 import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -205,3 +206,136 @@ def test_the_eval_job_renders_from_a_filled_in_env(tmp_path):
         capture_output=True, text=True, check=True,
     ).stdout  # fmt: skip
     assert "${" not in out and "image: python:3.13-slim" in out
+
+
+ROWS = [
+    {
+        "_ng_task_index": 7,
+        "reward": 1.0,
+        "response": {
+            "output": [
+                {"type": "function_call", "name": "search"},
+                {"type": "function_call_output"},
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": "Exact Answer: 42"}],
+                },
+            ]
+        },
+    },
+    {
+        "_ng_task_index": 9,
+        "reward": 0.0,
+        "response": {"output": [{"type": "function_call", "name": "search"}] * 3},
+    },
+]
+
+
+def report_args(**overrides):
+    values = dict(
+        benchmark="browsecomp", limit=5, max_steps=3, max_context_tokens=32768,
+        judge_model=launch.DEFAULT_JUDGE_MODEL, model=None,
+    )  # fmt: skip
+    return argparse.Namespace(**(values | overrides))
+
+
+def test_scores_count_tool_calls_and_the_turn_cap():
+    tasks, summary = launch.scores(ROWS, max_steps=3)
+    assert [t["task"] for t in tasks] == [7, 9]
+    assert tasks[0]["answer"] == "Exact Answer: 42" and tasks[1]["answer"] == ""
+    assert [t["reached_turn_cap"] for t in tasks] == [False, True]
+    assert summary == {
+        "tasks": 2, "mean_reward": 0.5, "correct": 1, "tasks_at_turn_cap": 1,
+        "mean_tool_calls": 2.0,
+    }  # fmt: skip
+
+
+class _NoWandb:
+    def __getattr__(self, name):
+        raise AssertionError(f"W&B used without WANDB_PROJECT: wandb.{name}")
+
+
+def test_the_report_prints_the_scores_and_leaves_wandb_alone(monkeypatch, capsys):
+    monkeypatch.setitem(sys.modules, "wandb", _NoWandb())
+    summary = launch.report(ROWS, report_args(), {"WANDB_API_KEY": "k"})
+    assert summary["mean_reward"] == 0.5
+    out = capsys.readouterr().out.splitlines()
+    assert out == [
+        "reward=1.0 tool_calls=1",
+        "reward=0.0 tool_calls=3",
+        "tasks=2 mean_reward=0.500",
+    ]
+
+
+class _FakeRun:
+    def __init__(self, **kwargs):
+        self.init = kwargs
+        self.logged = []
+        self.summary = {}
+        self.finished = False
+
+    def log(self, row):
+        self.logged.append(row)
+
+    def finish(self):
+        self.finished = True
+
+
+class _FakeTable:
+    def __init__(self, columns, data):
+        self.columns, self.data = columns, data
+
+
+def test_the_report_logs_an_eval_run_with_a_task_table(monkeypatch, capsys):
+    runs = []
+
+    def init(**kwargs):
+        runs.append(_FakeRun(**kwargs))
+        return runs[-1]
+
+    fake = argparse.Namespace(init=init, Table=_FakeTable)
+    monkeypatch.setitem(sys.modules, "wandb", fake)
+    monkeypatch.setenv("WANDB_ENTITY", "")  # an unfilled eval.env value must not reach W&B
+    environ = {
+        "WANDB_PROJECT": "cookbook", "WANDB_API_KEY": "sk-test-123", "WANDB_RUN_GROUP": "run-1",
+        "EVAL_NAME": "browsecomp-1", "CWTRAIN_ROLLOUT_MODEL": "nemotron-lightning-hotload",
+        "EVAL_IDENTITY": "run-1-v000003", "WANDB_ENTITY": " ",
+    }  # fmt: skip
+    launch.report(ROWS, report_args(), environ)
+    (run,) = runs
+    assert "WANDB_ENTITY" not in __import__("os").environ
+    assert run.init["job_type"] == "eval"
+    assert {k: run.init[k] for k in ("project", "group", "name")} == {
+        "project": "cookbook", "group": "run-1", "name": "browsecomp-1",
+    }  # fmt: skip
+    assert "entity" not in run.init  # the key's default entity
+    assert run.init["config"]["identity"] == "run-1-v000003"
+    assert run.init["config"]["model"] == "nemotron-lightning-hotload"
+    assert "sk-test-123" not in json.dumps(run.init)
+    (row,) = run.logged
+    table = row["eval/task_results"]
+    assert table.columns[:3] == ["task", "reward", "tool_calls"]
+    assert [r[0] for r in table.data] == [7, 9]
+    assert row["eval/mean_reward"] == run.summary["eval/mean_reward"] == 0.5
+    assert run.summary["eval/tasks_at_turn_cap"] == 1
+    assert run.finished
+
+
+def test_a_wandb_project_without_a_key_stops_before_the_eval():
+    with pytest.raises(ValueError, match="WANDB_API_KEY"):
+        launch.wandb_settings({"WANDB_PROJECT": "cookbook"})
+    assert launch.wandb_settings({}) is None
+    offline = {"WANDB_PROJECT": "p", "WANDB_MODE": "offline"}
+    assert launch.wandb_settings(offline) == {"project": "p"}
+
+
+def test_the_eval_job_takes_the_wandb_key_from_an_optional_secret():
+    job = (K8S / "eval-job.yaml").read_text()
+    assert re.search(
+        r'secretKeyRef: \{name: "\$\{WANDB_API_KEY_SECRET\}", key: api_key, optional: true\}', job
+    )
+    example = (K8S / "eval.env.example").read_text()
+    assert re.search(r"^WANDB_PROJECT=$", example, re.M)  # off by default
+    assert "WANDB_GROUP=${RUN_ID:-}" in example
+    script = (K8S / "run-eval.sh").read_text()
+    assert "launch.py report" in script and "WANDB_API_KEY" in script

@@ -211,6 +211,11 @@ kubectl -n "$NAMESPACE" logs -f "job/cwtrain-$JOB_NAME"   # the trainer, includi
 cwtrain hotload list --deployment "$DEPLOYMENT_ID"         # one hot-load per published version
 ```
 
+To follow the run in W&B too, set `WANDB_PROJECT` in `run.env` and create the key Secret before
+you render the trainer Job. The W&B run is named after `RUN_ID`. The recipe's
+[Watching in W&B](../../recipes/miles/README.md#watching-in-wb) has the command and the panels
+to watch.
+
 You cannot change a Job while it exists. Before the next run, delete the finished Job with
 `kubectl -n "$NAMESPACE" delete job "cwtrain-$JOB_NAME"`, then render and apply step 9 again.
 The `RUN_ID` in `run.env.example` uses the time of each render plus a random number. So the new run

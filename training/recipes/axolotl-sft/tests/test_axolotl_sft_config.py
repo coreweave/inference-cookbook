@@ -35,6 +35,7 @@ def test_the_config_keeps_what_the_snapshot_depends_on(setting: str) -> None:
     assert re.search(rf"^{setting}\s*(#.*)?$", text, re.M), setting
 
 
+# W&B is opt-in: the launcher passes the project only when run.env sets WANDB_PROJECT
 @pytest.mark.parametrize("key", ["plugins", "hub_model_id", "wandb_project"])
 def test_the_config_loads_no_plugin_and_sends_nothing_elsewhere(key: str) -> None:
     text = (RECIPE / "sft_coreweave.yaml").read_text()
@@ -48,3 +49,9 @@ def test_the_trainer_job_runs_the_image_entrypoint_without_an_inference_key() ->
     assert not re.search(r"^\s+command:", job, re.M)
     assert "INFERENCE_KEY_SECRET" not in job and "CWTRAIN_ROLLOUT_" not in job
     assert '{name: AXOLOTL_DO_NOT_TRACK, value: "${AXOLOTL_DO_NOT_TRACK}"}' in job
+
+
+def test_run_trainer_installs_wandb_for_the_publish_only_when_asked() -> None:
+    script = (RECIPE / "k8s" / "run-trainer.sh").read_text()
+    install = script.index('uv pip install --quiet --python "$CW_PY" "wandb')
+    assert script.rindex('if [[ -n "${WANDB_PROJECT:-}" ]]; then', 0, install) < install
