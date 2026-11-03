@@ -97,11 +97,14 @@ Configuration is by environment variable because the frameworks pass nothing els
 from __future__ import annotations
 
 import dataclasses
+import functools
+import importlib
 import json
 import logging
 import os
 import re
 import shutil
+import sys
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -698,15 +701,9 @@ def hook(
     del rollout_engines  # The deployment is the rollout engine; slime's engines are not used.
     if not is_rank_zero(args):
         return None
-    # The training that produced these weights ends here; log its spans as its own step's.
-    trainer = _trainer_spans(time.time())
-    if trainer:
-        tracking.log_metrics(
-            trainer,
-            step_metric="rollout/step",
-            step=rollout_step(args, int(trainer[tracking.TIMELINE_STEP])),
-            prefixes=("timeline/",),
-        )
+    join_run(args)
+    # Spans the optimizer did not log, when the train-step hook had no optimizer to time.
+    _log_trainer_spans(args, time.time())
     metrics = _publisher(args).handle(args, version_dir)
     if metrics:
         # slime and miles drop what the hook returns, so log it into their W&B run, if any.
@@ -721,7 +718,40 @@ def hook(
     return metrics
 
 
-#: When the training between two weight syncs started its phases, from the trainer-phase hooks.
+#: Whether this process has looked for the trainer's W&B run (:func:`join_run`).
+_joined = False
+
+#: The W&B module of each framework's train actor: ``(actor module, W&B module)``.
+_WANDB_MODULES = (
+    ("miles.backends.megatron_utils.actor", "miles.utils.tracking_utils.wandb_utils"),
+    ("slime.backends.megatron_utils.actor", "slime.observability.wandb_utils"),
+)
+
+
+def join_run(args: Any) -> None:
+    """Open a writer into the trainer's W&B run on this rank, when only another rank has one.
+
+    slime and miles open their run on the last pipeline stage, and the hooks work on rank 0. With
+    pipeline parallelism, rank 0 therefore joins the run the way the trainer's other processes do:
+    the framework's ``init_wandb_secondary``, in W&B's shared mode, with the run ID from ``args``.
+    Without ``--use-wandb``, or when the join fails, nothing is logged; training goes on.
+    """
+    global _joined
+    if _joined or tracking.active_run() is not None:
+        return
+    _joined = True
+    if not getattr(args, "use_wandb", False) or getattr(args, "wandb_run_id", None) is None:
+        return
+    for actor, module in _WANDB_MODULES:
+        if actor in sys.modules:
+            try:
+                importlib.import_module(module).init_wandb_secondary(args)
+            except Exception as exc:  # noqa: BLE001 - telemetry must not stop the run
+                log.warning("could not open a writer into the trainer's W&B run: %s", exc)
+            return
+
+
+#: When the training since the last logged span started its phases, from the trainer-phase hooks.
 _trainer_marks: dict[str, float] = {}
 
 #: The trainer-phase hooks, as slime and miles take them: they mark the timeline's ``logprobs``
@@ -755,13 +785,49 @@ def before_train_step(
 ) -> None:
     """``--custom-megatron-before-train-step-hook-path``: the trainer starts an optimizer step.
 
-    The first one after a weight sync ends ``logprobs`` and starts ``update``, which the weight
-    sync ends. ``rollout_id`` names the step.
+    It starts an ``update`` span, and the first one of a training ends ``logprobs``. The span ends
+    when ``optimizer.step()`` returns: slime and miles have no hook after a train step, and the
+    last rollout ends without a weight sync. Each step logs its spans on ``rollout_id``'s step.
     """
-    del step_id, model, optimizer, opt_param_scheduler
-    if is_rank_zero(args) and "update" not in _trainer_marks:
-        _trainer_marks["update"] = time.time()
-        _trainer_marks["rollout_id"] = float(rollout_id)
+    del step_id, model, opt_param_scheduler
+    if not is_rank_zero(args):
+        return
+    _trainer_marks["update"] = time.time()
+    _trainer_marks["rollout_id"] = float(rollout_id)
+    if optimizer is not None:
+        _time_steps(args, optimizer)
+
+
+def _time_steps(args: Any, optimizer: Any) -> None:
+    """Make ``optimizer.step()`` log the trainer's spans when it returns (once per optimizer)."""
+    step = optimizer.step
+    if getattr(step, "_cwtrain_timed", False):
+        return
+
+    @functools.wraps(step)
+    def timed(*a: Any, **kw: Any) -> Any:
+        out = step(*a, **kw)
+        try:
+            join_run(args)
+            _log_trainer_spans(args, time.time())
+        except Exception as exc:  # noqa: BLE001 - telemetry must not stop the run
+            log.warning("could not log the train step's spans: %s", exc)
+        return out
+
+    timed._cwtrain_timed = True  # type: ignore[attr-defined]
+    optimizer.step = timed
+
+
+def _log_trainer_spans(args: Any, ended: float) -> None:
+    """Log the spans of the training that ``ended`` on its own rollout's step, if it marked any."""
+    trainer = _trainer_spans(ended)
+    if trainer:
+        tracking.log_metrics(
+            trainer,
+            step_metric="rollout/step",
+            step=rollout_step(args, int(trainer[tracking.TIMELINE_STEP])),
+            prefixes=("timeline/",),
+        )
 
 
 def _trainer_spans(ended: float) -> dict[str, float]:
@@ -816,7 +882,8 @@ def record_settings(config: HookConfig, loader: HotLoader) -> None:
 
 def reset() -> None:
     """Drop cached publishers and run IDs (tests, or a new run in the same process)."""
-    global _default_run_id
+    global _default_run_id, _joined
+    _joined = False
     _trainer_marks.clear()
     for publisher in _publishers.values():
         publisher.close()
@@ -834,6 +901,7 @@ __all__ = [
     "default_run_id",
     "hook",
     "is_rank_zero",
+    "join_run",
     "record_settings",
     "reset",
     "rollout_step",
