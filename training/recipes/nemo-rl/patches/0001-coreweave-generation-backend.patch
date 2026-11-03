@@ -10,7 +10,7 @@ License: Apache-2.0. Upstream code by NVIDIA CORPORATION; changes by CoreWeave, 
 Applied by training/recipes/nemo-rl/launch.py with `git apply`, which skips this header.
 
 diff --git a/nemo_rl/algorithms/grpo.py b/nemo_rl/algorithms/grpo.py
-index 76d75c8..02be08a 100644
+index 76d75c8..9319416 100644
 --- a/nemo_rl/algorithms/grpo.py
 +++ b/nemo_rl/algorithms/grpo.py
 @@ -13,6 +13,7 @@
@@ -167,19 +167,33 @@ index 76d75c8..02be08a 100644
      timeout = TimeoutChecker(
          timeout=master_config.checkpointing["checkpoint_must_save_by"],
          fit_last_save_time=True,
-@@ -2860,6 +2970,15 @@ def grpo_train(
+@@ -2754,6 +2864,16 @@ def grpo_train(
+                         and (current_step + 1 == len(wrapped_dataloader))
+                     )
+ 
++                # The hot-load of this step's refit and when each phase of the step ran (cwtrain),
++                # taken before validation: its refit would replace them, and its hot-load goes
++                # with the next step, whose rollout samples those weights.
++                synchronizer = getattr(policy_generation, "weight_synchronizer", None)
++                _cw = (
++                    synchronizer.pop_metrics(timer=timer, step=total_steps + 1)
++                    if hasattr(synchronizer, "pop_metrics")
++                    else {}
++                )
++
+                 # Run validation if it's a validation step or last step with val_at_end
+                 if (val_period > 0 and (total_steps + 1) % val_period == 0) or (
+                     val_at_end and is_last_step
+@@ -2860,6 +2980,12 @@ def grpo_train(
                          print(f"Skipping aggregation for {k} ({type(v)})")
  
                  metrics.update(rollout_metrics)
-+                # The hot-load of this step's refit, logged as train/hotload/* at this step, and
-+                # when each phase of the step ran, logged unprefixed as timeline/* (cwtrain).
-+                synchronizer = getattr(policy_generation, "weight_synchronizer", None)
-+                if hasattr(synchronizer, "pop_metrics"):
-+                    _cw = synchronizer.pop_metrics(timer=timer, step=total_steps + 1)
-+                    timeline = {k: v for k, v in _cw.items() if k.startswith("timeline/")}
-+                    metrics.update({k: v for k, v in _cw.items() if k not in timeline})
-+                    if timeline:
-+                        logger.log_metrics(timeline, total_steps + 1)
++                # cwtrain's hot-load metrics, logged as train/hotload/* at this step, and its
++                # timeline, logged unprefixed as timeline/*.
++                timeline = {k: v for k, v in _cw.items() if k.startswith("timeline/")}
++                metrics.update({k: v for k, v in _cw.items() if k not in timeline})
++                if timeline:
++                    logger.log_metrics(timeline, total_steps + 1)
                  metrics["generation_logger_metrics"] = generation_logger_metrics
                  total_valid_tokens += metrics["global_valid_toks"]
  

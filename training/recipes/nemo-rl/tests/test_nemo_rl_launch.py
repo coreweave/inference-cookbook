@@ -98,11 +98,15 @@ def test_bad_wandb_settings_stop_the_launcher(settings, error) -> None:
 
 
 def test_the_patch_logs_the_hot_load_and_the_timeline_with_each_training_step() -> None:
-    added = "\n".join(line[1:] for line in PATCH.read_text().splitlines() if line.startswith("+"))
+    text = PATCH.read_text()
+    added = "\n".join(line[1:] for line in text.splitlines() if line.startswith("+"))
     assert 'synchronizer = getattr(policy_generation, "weight_synchronizer", None)' in added
-    assert "_cw = synchronizer.pop_metrics(timer=timer, step=total_steps + 1)" in added
+    assert "synchronizer.pop_metrics(timer=timer, step=total_steps + 1)" in added
+    # taken before validation, whose refit would replace the step's hot-load, and merged after it
+    pop = text.index("synchronizer.pop_metrics(timer=timer")
+    merge = text.index("metrics.update({k: v for k, v in _cw.items() if k not in timeline})")
+    assert pop < text.index("# Run validation if it's a validation step") < merge
     # hot-load metrics join the step's train/ metrics; the timeline keeps its own, unprefixed keys
-    assert "metrics.update({k: v for k, v in _cw.items() if k not in timeline})" in added
     assert "logger.log_metrics(timeline, total_steps + 1)" in added
     # only the coreweave backend swaps the training loop's timer
     assert '== "coreweave":' in added and "timer = SpanTimer()" in added
