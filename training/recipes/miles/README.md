@@ -286,17 +286,17 @@ appear when the platform reports the replicas' timestamps. `coreweave/request_se
 request from sending it to the whole response, including its wait in the deployment's queue (see
 [Concurrency](#concurrency)).
 
-Each step also records when its phases ran, as `timeline/<phase>/start` and `/end` (Unix
-seconds) with `timeline/step`. The rollout function records `rollout` and `reward`. Two trainer
-hooks, which the launcher adds with `--use-wandb`, mark the start of `logprobs` and `update`; the
-update lane ends when the weight sync calls the hot-load hook, so it includes writing the delta.
-The hook records `mirror`, `upload`, `hotload`, and each replica's install from the platform's
-timestamps (`hotload_first_replica`, `hotload_peers`). Step `i` is the hot-load of version `i`,
-rollout `i` and the training on rollout `i`. With `train_async.py`, rollout `i + 1` runs while
-step `i` trains, and the timeline shows the overlap. The hooks are
-`--custom-megatron-before-log-prob-hook-path` and `--custom-megatron-before-train-step-hook-path`.
-A hook of your own in `EXTRA_TRAIN_ARGS` comes later and replaces cwtrain's; the timeline then has
-no `logprobs` or `update` lane.
+Each step also records when its phases ran, as `timeline/<phase>/start` and `/end` (Unix seconds)
+with `timeline/step`. The rollout function records `rollout` and `reward`. Two trainer hooks, which
+the launcher adds with `--use-wandb`, record `logprobs` and one `update` span per optimizer step,
+which ends when the optimizer's step returns. Writing the delta falls between the last `update` and
+the weight sync. The hook records `mirror`, `upload`, `hotload`, and each replica's install from the
+platform's timestamps (`hotload_first_replica`, `hotload_peers`). Step `i` is the hot-load of
+version `i`, rollout `i` and the training on rollout `i`. With `train_async.py`, rollout `i + 1`
+runs while step `i` trains, and the timeline shows the overlap. The hooks are
+`--custom-megatron-before-log-prob-hook-path` and `--custom-megatron-before-train-step-hook-path`. A
+hook of your own in `EXTRA_TRAIN_ARGS` comes later and replaces cwtrain's; the timeline then has no
+`logprobs` or `update` lane.
 
 The run's config has a `cwtrain` section: the cwtrain version, `RUN_ID`, the deployment (model,
 engine, instance type, replicas, `autoscaling.concurrency`), and the hot-load and rollout settings.
