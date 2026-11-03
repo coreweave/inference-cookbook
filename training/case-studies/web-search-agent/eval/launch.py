@@ -203,22 +203,41 @@ def final_answer(output: Sequence[dict[str, Any]]) -> str:
     return ""
 
 
+def tool_turns(output: Sequence[dict[str, Any]]) -> int:
+    """The model turns in a trajectory that called tools.
+
+    The agent runs all the calls of a model response before it asks the model again, so a turn's
+    calls are the ``function_call`` items before the next ``function_call_output`` items.
+    """
+    turns, calling = 0, False
+    for item in output:
+        kind = item.get("type")
+        if kind == "function_call_output":
+            calling = False
+        elif kind == "function_call" and not calling:
+            turns, calling = turns + 1, True
+    return turns
+
+
 def scores(rows: Sequence[dict[str, Any]], max_steps: int) -> tuple[list[dict[str, Any]], dict]:
     """One record per task, and the summary of all of them.
 
-    A task reached the turn cap when it made ``max_steps`` tool calls or more; it is graded on
-    the answer it gave then.
+    A task reached the turn cap when it called tools in ``max_steps`` model turns; it is graded on
+    the answer it gave then. The agent's cap also counts turns without a tool call, so a task that
+    had such turns can reach it uncounted.
     """
     tasks = []
     for position, row in enumerate(rows):
         output = (row.get("response") or {}).get("output") or []
         calls = sum(item.get("type") == "function_call" for item in output)
+        turns = tool_turns(output)
         tasks.append(
             {
                 "task": row.get(TASK_INDEX, position),
                 "reward": float(row.get("reward") or 0.0),
                 "tool_calls": calls,
-                "reached_turn_cap": calls >= max_steps,
+                "turns": turns,
+                "reached_turn_cap": turns >= max_steps,
                 "answer": final_answer(output)[:ANSWER_CHARS],
             }
         )
@@ -270,7 +289,7 @@ def report(
         **settings,
     )
     try:
-        columns = ["task", "reward", "tool_calls", "reached_turn_cap", "answer"]
+        columns = ["task", "reward", "tool_calls", "turns", "reached_turn_cap", "answer"]
         table = wandb.Table(columns=columns, data=[[t[c] for c in columns] for t in tasks])
         run.log({**{f"eval/{k}": v for k, v in summary.items()}, "eval/task_results": table})
         run.summary.update({f"eval/{k}": v for k, v in summary.items()})

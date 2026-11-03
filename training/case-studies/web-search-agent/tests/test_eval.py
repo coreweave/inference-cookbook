@@ -226,7 +226,10 @@ ROWS = [
     {
         "_ng_task_index": 9,
         "reward": 0.0,
-        "response": {"output": [{"type": "function_call", "name": "search"}] * 3},
+        "response": {
+            "output": [{"type": "function_call", "name": "search"}, {"type": "function_call_output"}]
+            * 3
+        },
     },
 ]
 
@@ -243,11 +246,21 @@ def test_scores_count_tool_calls_and_the_turn_cap():
     tasks, summary = launch.scores(ROWS, max_steps=3)
     assert [t["task"] for t in tasks] == [7, 9]
     assert tasks[0]["answer"] == "Exact Answer: 42" and tasks[1]["answer"] == ""
+    assert [t["turns"] for t in tasks] == [1, 3]
     assert [t["reached_turn_cap"] for t in tasks] == [False, True]
     assert summary == {
         "tasks": 2, "mean_reward": 0.5, "correct": 1, "tasks_at_turn_cap": 1,
         "mean_tool_calls": 2.0,
     }  # fmt: skip
+
+
+def test_the_turn_cap_counts_model_turns_not_tool_calls():
+    # two calls in one model turn, as the agent runs them, then a third turn that answers
+    call, result = {"type": "function_call", "name": "search"}, {"type": "function_call_output"}
+    answer = {"type": "message", "content": [{"type": "output_text", "text": "Exact Answer: 1"}]}
+    output = [{"type": "reasoning"}, call, call, result, result, call, call, result, result, answer]
+    (task,), _ = launch.scores([{"reward": 1.0, "response": {"output": output}}], max_steps=3)
+    assert task["tool_calls"] == 4 and task["turns"] == 2 and not task["reached_turn_cap"]
 
 
 class _NoWandb:
