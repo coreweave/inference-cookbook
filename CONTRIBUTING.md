@@ -129,6 +129,8 @@ configuration, trigger rules, cleanup, and how to run it from a workstation.
 - Keep one logical change per pull request. Include tests with code changes. CI runs the checks
   above on pull requests that touch `libs/cwtrain`, `training/`, `k8s/`, `docs/` or
   `.gitignore`.
+- A pull request with a major change to `cwtrain` adds a bullet under `## Unreleased` at the top
+  of [`libs/cwtrain/CHANGELOG.md`](libs/cwtrain/CHANGELOG.md).
 - Commit messages and pull request titles follow
   [Conventional Commits](https://www.conventionalcommits.org/): `feat:`, `fix(launch):`, `ci:`,
   `docs:`, `chore:`.
@@ -163,9 +165,9 @@ One-time setup for a repository and PyPI maintainer:
 For each release:
 
 1. Set `project.version` in `libs/cwtrain/pyproject.toml` to the release version. At the top of
-   `libs/cwtrain/CHANGELOG.md`, add a section headed `## X.Y.Z - YYYY-MM-DD` that lists the major
-   changes since the last release. CI fails when the version has no section. Merge that commit
-   into `main`.
+   `libs/cwtrain/CHANGELOG.md`, rename the `## Unreleased` section to `## X.Y.Z - YYYY-MM-DD`, or
+   add a section with that heading, listing the major changes since the last release. CI fails
+   when the version has no section. Merge that commit into `main`.
 2. Tag that commit and push the tag (replace `0.1.0` with the new version):
 
    ```bash
