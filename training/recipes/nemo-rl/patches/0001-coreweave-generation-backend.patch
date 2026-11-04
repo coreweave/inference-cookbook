@@ -10,7 +10,7 @@ License: Apache-2.0. Upstream code by NVIDIA CORPORATION; changes by CoreWeave, 
 Applied by training/recipes/nemo-rl/launch.py with `git apply`, which skips this header.
 
 diff --git a/nemo_rl/algorithms/grpo.py b/nemo_rl/algorithms/grpo.py
-index 76d75c8..9319416 100644
+index 76d75c8..0d14cb7 100644
 --- a/nemo_rl/algorithms/grpo.py
 +++ b/nemo_rl/algorithms/grpo.py
 @@ -13,6 +13,7 @@
@@ -197,6 +197,28 @@ index 76d75c8..9319416 100644
                  metrics["generation_logger_metrics"] = generation_logger_metrics
                  total_valid_tokens += metrics["global_valid_toks"]
  
+@@ -3100,6 +3226,21 @@ def grpo_train(
+                 prefix="timing/train",
+                 step_finished=True,
+             )
++            # A validation after the last step refit the weights, and no step follows to log
++            # that hot-load with (cwtrain): log it at the step after this one, as the others.
++            if is_last_step or should_save_by_timeout:
++                synchronizer = getattr(policy_generation, "weight_synchronizer", None)
++                _cw = (
++                    synchronizer.pop_metrics(step=total_steps + 2)
++                    if hasattr(synchronizer, "pop_metrics")
++                    else {}
++                )
++                timeline = {k: v for k, v in _cw.items() if k.startswith("timeline/")}
++                hotload = {k: v for k, v in _cw.items() if k not in timeline}
++                if hotload:
++                    logger.log_metrics(hotload, total_steps + 2, prefix="train")
++                if timeline:
++                    logger.log_metrics(timeline, total_steps + 2, step_finished=True)
+ 
+             # Reset the batch and set dynamic_sampling_num_gen_batches to 0
+             batch_cache = None
 diff --git a/nemo_rl/algorithms/utils.py b/nemo_rl/algorithms/utils.py
 index 1aaaa45..17e3593 100644
 --- a/nemo_rl/algorithms/utils.py

@@ -230,7 +230,8 @@ before it stages anything. The launcher adds `logger.wandb_enabled=true`, the pr
 
 NeMo-RL logs every row at an explicit step, so the synchronizer logs nothing itself. The recipe's
 patch adds its metrics to the step's own: `train/hotload/*` is the hot-load before that step's
-generation, even when validation after the previous step did it.
+generation, even when validation after the previous step did it. A validation after the last step
+logs its hot-load at the step after it.
 
 | Question | Panels |
 | --- | --- |

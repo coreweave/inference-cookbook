@@ -108,6 +108,11 @@ def test_the_patch_logs_the_hot_load_and_the_timeline_with_each_training_step() 
     assert pop < text.index("# Run validation if it's a validation step") < merge
     # hot-load metrics join the step's train/ metrics; the timeline keeps its own, unprefixed keys
     assert "logger.log_metrics(timeline, total_steps + 1)" in added
+    # a validation after the last step has no next step: its hot-load goes at the one after it
+    final = text.index("if is_last_step or should_save_by_timeout:")
+    assert text.index('prefix="timing/train",') < final
+    assert "synchronizer.pop_metrics(step=total_steps + 2)" in added
+    assert 'logger.log_metrics(hotload, total_steps + 2, prefix="train")' in added
     # only the coreweave backend swaps the training loop's timer
     assert '== "coreweave":' in added and "timer = SpanTimer()" in added
 
