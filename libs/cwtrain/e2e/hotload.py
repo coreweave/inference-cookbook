@@ -28,7 +28,21 @@ log = logging.getLogger(__name__)
 
 #: Default dynamo-vllm runtime. The ModelExpress (MX) client that performs hot-loads ships inside
 #: the engine build, so the ``+crwv.N`` suffix also selects the MX client version.
-DEFAULT_RUNTIME_VERSION = "0.32.0+crwv.1"
+DEFAULT_RUNTIME_VERSION = "0.32.0+crwv.5"
+
+#: ModelExpress refit options the run turns on. ``runtime.engineEnv`` in the deployment
+#: configuration overrides each one.
+MX_REFIT_ENGINE_ENV = dict.fromkeys(
+    (
+        "MX_REFIT_DELTA_SURGICAL",
+        "MX_REFIT_FULL_STREAMING",
+        "MX_REFIT_INPLACE",
+        "MX_REFIT_PREFER_PREPARED",
+        "MX_REFIT_PREFETCH",
+        "MX_REFIT_PREFETCH_S3_WATCH",
+    ),
+    "true",
+)
 
 
 def required(name: str) -> str:
@@ -135,6 +149,7 @@ def main() -> None:
     spec["runtime"]["version"] = (
         os.environ.get("CWTRAIN_E2E_RUNTIME_VERSION", "").strip() or DEFAULT_RUNTIME_VERSION
     )
+    spec["runtime"]["engineEnv"] = {**MX_REFIT_ENGINE_ENV, **spec["runtime"].get("engineEnv", {})}
     if spec.get("disabled"):
         raise ValueError("E2E deployment must be enabled")
     if spec["autoscaling"].get("min", 0) < 1:

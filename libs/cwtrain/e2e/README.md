@@ -26,7 +26,7 @@ Create the `hotload-e2e` GitHub environment and configure:
 | Secret | `CWTRAIN_E2E_DEPLOYMENT_JSON` | Deployment runtime and resources configuration, described below |
 | Secret | `CWTRAIN_E2E_HF_TOKEN` | Optional, for a gated or private Hugging Face model |
 | Variable | `CWTRAIN_E2E_BUCKET` | Required: an existing bucket that grants the inference service read access under `cookbook/*` |
-| Variable | `CWTRAIN_E2E_RUNTIME_VERSION` | `dynamo-vllm` version, `0.32.0+crwv.1` by default; overrides `runtime.version` in the deployment configuration |
+| Variable | `CWTRAIN_E2E_RUNTIME_VERSION` | `dynamo-vllm` version, `0.32.0+crwv.5` by default; overrides `runtime.version` in the deployment configuration |
 | Variable | `CWTRAIN_E2E_ZONE` | `us-west-04a` by default; not a credential |
 | Variable | `CWTRAIN_E2E_HF_MODEL` | `Qwen/Qwen3-0.6B` by default; choose a model your runtime supports |
 | Variable | `CWTRAIN_E2E_HF_REVISION` | Model revision, `main` by default; pin a commit for reproducibility |
@@ -56,7 +56,9 @@ sections of `training/examples/miles-grpo-qwen3-4b/deployment.example.json`. Use
 instance type that is available in the zone. The runner sets `runtime.version` from
 `CWTRAIN_E2E_RUNTIME_VERSION`. The ModelExpress (MX) client that performs hot-loads is built into
 the engine, so the `+crwv.N` suffix of the runtime version also selects the MX client version;
-there is no separate client version to set. At least one replica is required. Where supported, set `min` and `max` to 1
+there is no separate client version to set. The runner also turns on the six ModelExpress refit options in
+`runtime.engineEnv` (`MX_REFIT_*`, set to `"true"`); a value in the deployment configuration overrides
+each one. At least one replica is required. Where supported, set `min` and `max` to 1
 for a smaller smoke test. The runner supplies `id`, `name`, `gatewayIds`, `model` and `hotLoad`,
 with fresh resource IDs and the run's paths in the bucket. It keeps the other settings. It creates
 no capacity claim, so GPU capacity and a compatible runtime must be available.
