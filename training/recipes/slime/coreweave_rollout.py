@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import functools
 import logging
+import time
 from argparse import Namespace
 from typing import Any
 
@@ -28,6 +29,7 @@ from slime.utils.async_utils import run
 from slime.utils.processing_utils import load_tokenizer
 
 from cwtrain.errors import CWTrainError
+from cwtrain.integrations import tracking
 from cwtrain.integrations.rollout import (
     NO_EVALUATION,
     RolloutConfig,
@@ -78,9 +80,15 @@ async def _generate(
     # --rollout-sample-hook-path, such as slime's spill_routed_experts, as slime's own rollout runs
     groups = await apply_rollout_sample_hooks(args, groups)
     flat = [s for g in groups for s in g]
+    scored = time.time()
     rewards = await batched_async_rm(args, flat)
     for sample, reward in zip(flat, rewards, strict=True):
         sample.reward = float(reward)
+    metrics.update(tracking.span("reward", scored, time.time()))
+    metrics[tracking.TIMELINE_STEP] = float(rollout_id)
     metrics["coreweave/rollout_id"] = float(rollout_id)
+    # slime binds rollout/* and perf/* to rollout/step; these join them in its W&B run, if any
+    tracking.bind(("coreweave/", "timeline/"), step_metric="rollout/step")
     log.info("rollout %d: %s", rollout_id, metrics)
-    return RolloutFnTrainOutput(samples=groups, metrics=metrics)
+    # every timeline key, so that a query for all of them gets this row (tracking.timeline_row)
+    return RolloutFnTrainOutput(samples=groups, metrics=tracking.timeline_row(metrics))

@@ -41,8 +41,8 @@ CONFIG_SECTION = "cwtrain"
 #: The phases of a training step, in the order the timeline chart shows them:
 #:
 #: * ``rollout``: sampling on the deployment; ``reward``: scoring the samples.
-#: * ``logprobs``: the trainer's log-prob pass; ``update``: its optimizer steps (one span per step
-#:   with slime and miles); ``train`` and ``merge``: Axolotl's whole run and its LoRA merge.
+#: * ``logprobs``: the trainer's log-prob pass; ``update``: its train steps (one span per step with
+#:   slime and miles); ``train`` and ``merge``: Axolotl's whole run and its LoRA merge.
 #: * ``export``, ``mirror``, ``upload``: getting the new weights to object storage.
 #: * ``hotload``: from requesting the hot-load until every replica serves it.
 #:   ``hotload_first_replica`` and ``hotload_peers``: the platform's own timestamps for the

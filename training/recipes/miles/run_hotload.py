@@ -55,8 +55,10 @@ from cwtrain.integrations.launch import (
     env_flag,
     forwarded_env,
     stage_from_s3,
+    wandb_run_env,
 )
 from cwtrain.integrations.rollout import refuse_rollout_loop_flags
+from cwtrain.integrations.slime import TRAINER_TIMELINE_ARGS
 
 DAPO = "zhuzilin/dapo-math-17k"
 PINNED_IMAGE = "radixark/miles:v0.1.1"
@@ -148,14 +150,61 @@ def async_correction(raw: str) -> str:
     return raw
 
 
+NO_WANDB_KEY = (
+    "WANDB_PROJECT is set, but the trainer has no WANDB_API_KEY: create the Secret that "
+    "WANDB_API_KEY_SECRET names (default wandb-api-key) with the key under api_key, or leave "
+    "WANDB_PROJECT empty to train without W&B"
+)
+NO_WANDB_KEY_FLAG = (
+    "--wandb-key is not supported: the key would be on the Ray job's command line, in the job log "
+    "and in the W&B run's config, which holds every train.py argument. Put it in the Secret that "
+    "WANDB_API_KEY_SECRET names; the trainer reads it as WANDB_API_KEY"
+)
+
+
 def extra_args(raw: str) -> str:
     """``--extra-args``, without the flags of miles' own rollout loop, which the rollout function
-    replaces, and without ``--use-session-server``, which needs SGLang engines."""
+    replaces, without ``--use-session-server``, which needs SGLang engines, and without
+    ``--wandb-key``."""
     try:
-        refuse_rollout_loop_flags(shlex.split(raw))
+        args = shlex.split(raw)
+        refuse_rollout_loop_flags(args)
     except CWTrainError as exc:
         raise argparse.ArgumentTypeError(str(exc)) from exc
+    if any(arg.partition("=")[0] == "--wandb-key" for arg in args):
+        raise argparse.ArgumentTypeError(NO_WANDB_KEY_FLAG)
     return raw
+
+
+def wandb_args(environ: Mapping[str, str] | None = None, extra: str = "") -> str:
+    """miles' W&B flags when ``WANDB_PROJECT`` is set: one run named and grouped by the run ID.
+
+    The key stays in the environment (``WANDB_API_KEY``). Every Ray worker inherits it from
+    ``ray start``, and ``--wandb-key`` would put it in the job's command line.
+
+    The trainer hooks mark when the log-probs and the update of each step start, for the run's
+    timeline. They come before ``extra``, the ``--extra-args``, so a hook of your own there
+    replaces cwtrain's, and the timeline then has no trainer lanes. miles refuses both hooks with
+    ``--skip-actor-forward-only``, so with that flag in ``extra`` they are left out.
+    """
+    env = os.environ if environ is None else environ
+    project = env.get("WANDB_PROJECT", "").strip()
+    if not project:
+        return ""
+    if not env.get("WANDB_API_KEY", "").strip():
+        raise SystemExit(NO_WANDB_KEY)
+    run_id = env.get("CWTRAIN_HOTLOAD_RUN_ID", "").strip()
+    if not run_id:
+        raise SystemExit("W&B names and groups the run by CWTRAIN_HOTLOAD_RUN_ID, which is unset")
+    entity = env.get("WANDB_ENTITY", "").strip()
+    flags = ["--use-wandb", "--wandb-project", project]
+    if entity:
+        flags += ["--wandb-team", entity]
+    # miles appends a random suffix to the group unless told not to, and names the run after it
+    flags += ["--wandb-group", run_id, "--disable-wandb-random-suffix"]
+    if "--skip-actor-forward-only" not in shlex.split(extra):
+        flags += TRAINER_TIMELINE_ARGS
+    return shlex.join(flags) + " "
 
 
 def parse_args() -> argparse.Namespace:
@@ -201,12 +250,17 @@ def worker_env(train_script: str, environ: Mapping[str, str] | None = None) -> d
         # The synchronous loop starts every rollout round from the weights just hot-loaded;
         # train_async.py generates one step ahead anyway and keeps the platform default.
         default_prompt_cache_policy(env)
+    if (os.environ if environ is None else environ).get("WANDB_PROJECT", "").strip():
+        # the W&B run's job type and tags (framework, algorithm), unless set; not secrets
+        env.update(wandb_run_env("miles", "grpo", environ))
     return env
 
 
 def main() -> None:
     args = parse_args()
     check_helpers(U, U_PROBLEM)
+    # before any download: a missing key stops the run here
+    wandb = wandb_args(extra=args.extra_args)
     hf_repo, model_name, hf_checkpoint = checkpoint_paths(args.model_name, args.model_dir)
     model_type = args.megatron_model_type or megatron_model_type(model_name)
     prompt_data = args.prompt_data or f"{args.data_dir}/dapo-math-17k/dapo-math-17k.jsonl"
@@ -289,7 +343,7 @@ def main() -> None:
 
     train_args = (
         ckpt_args + rollout_args + optimizer_args + grpo_args + tis_args + perf_args
-        + train_backend_args + misc_args + coreweave_args + async_args + extra
+        + train_backend_args + misc_args + coreweave_args + async_args + wandb + extra
     )
 
     # ---- environment: the hook and the rollout function read these inside the Ray workers

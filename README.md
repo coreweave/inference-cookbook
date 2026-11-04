@@ -181,6 +181,9 @@ cwtrain deployment delete <deployment-uuid> --wait
   byte-exact copy of the served weights. The NeMo-RL synchronizer keeps the last published export
   next to the new one. Plan disk space for one or two extra copies of the checkpoint, plus one more
   while a full checkpoint is written.
+- With W&B turned on, the recipes log each hot-load's upload and install times, the rollout
+  requests' latency, and when each phase of a step ran, next to the trainer's own metrics. Each
+  recipe's README says how, under "Watching in W&B".
 
 ## How it works
 

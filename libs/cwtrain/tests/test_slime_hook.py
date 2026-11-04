@@ -972,9 +972,9 @@ class FakeOptimizer:
     def __init__(self) -> None:
         self.calls = 0
 
-    def step(self) -> tuple[bool, float, None]:
+    def zero_grad(self, set_to_none: bool = True) -> None:
+        del set_to_none
         self.calls += 1
-        return True, 1.0, None
 
 
 def _logged(row: dict[str, float]) -> dict[str, float]:
@@ -982,7 +982,7 @@ def _logged(row: dict[str, float]) -> dict[str, float]:
     return {k: v for k, v in row.items() if not (isinstance(v, float) and math.isnan(v))}
 
 
-def test_the_trainer_hooks_log_each_train_step_when_the_optimizer_returns(
+def test_the_trainer_hooks_log_each_train_step_when_it_releases_its_gradients(
     env, args, monkeypatch, wandb_run
 ) -> None:
     clock = iter([100.0, 101.0, 105.0, 107.0, 108.0, 110.0])
@@ -995,9 +995,10 @@ def test_the_trainer_hooks_log_each_train_step_when_the_optimizer_returns(
     slime.before_log_prob(args, None, "ref_")  # 100: the reference model's pass starts it
     slime.before_log_prob(args, None, "")  # 101: the actor's pass changes nothing
     slime.before_train_step(args, 0, 0, None, optimizer, None)  # 105: the first step starts
-    assert optimizer.step() == (True, 1.0, None)  # 107: and ends
+    optimizer.zero_grad()  # 107: and ends, whether or not the optimizer stepped
+    optimizer.zero_grad()  # the next step's start: no step to end
     slime.before_train_step(args, 0, 1, None, optimizer, None)  # 108: wrapped once, not twice
-    optimizer.step()  # 110
+    optimizer.zero_grad()  # 110
 
     # a rollout's spans need no weight sync after it, so the last rollout logs them too
     first, second = (_logged(row) for row in wandb_run.rows)
@@ -1015,10 +1016,23 @@ def test_the_trainer_hooks_log_each_train_step_when_the_optimizer_returns(
         "timeline/update/end": 110.0,
         "rollout/step": 0,
     }
-    assert optimizer.calls == 2
+    assert optimizer.calls == 3
     slime.hook(args, str(v1), [])  # the weight sync logs only its own row
     (publish,) = wandb_run.rows[2:]
     assert publish["timeline/step"] == 1.0 and math.isnan(publish["timeline/update/start"])
+
+
+def test_the_next_steps_start_keeps_the_log_prob_mark(env, args, monkeypatch, wandb_run) -> None:
+    clock = iter([100.0, 105.0, 107.0])
+    monkeypatch.setattr(slime.time, "time", lambda: next(clock, 200.0))
+    optimizer = FakeOptimizer()
+    slime.before_train_step(args, 0, 0, None, optimizer, None)  # 100
+    optimizer.zero_grad()  # 105: rollout 0's training ends
+
+    slime.before_log_prob(args, None, "")  # 107: rollout 1's log-prob pass
+    optimizer.zero_grad()  # its first step starts, before the hook marks it
+    assert len(wandb_run.rows) == 1
+    assert slime._trainer_marks == {"logprobs": 107.0}
 
 
 def test_the_weight_sync_logs_the_spans_of_steps_it_could_not_time(

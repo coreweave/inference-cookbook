@@ -11,6 +11,11 @@ KIT=${KIT_DIR:-/opt/cwtrain-gym}
 GYM_DIR=/work/Gym
 OUT=/work/results
 BENCHMARK=${BENCHMARK:-browsecomp}
+# With WANDB_PROJECT set, the scores go to W&B as well; stop now, not after the eval, without a key.
+if [[ -n "${WANDB_PROJECT//[[:space:]]/}" && -z "${WANDB_API_KEY:-}" ]]; then
+  echo "WANDB_PROJECT is set but the Secret WANDB_API_KEY_SECRET names has no api_key" >&2
+  exit 1
+fi
 apt-get update -qq && apt-get install -y -qq --no-install-recommends git ca-certificates >/dev/null
 pip install --quiet --no-cache-dir uv
 git clone --quiet --branch "${GYM_REF:-v0.6.0}" --depth 1 https://github.com/NVIDIA-NeMo/Gym.git "$GYM_DIR"
@@ -69,12 +74,7 @@ PY
 "$PY" /work/recipe/launch.py collect "${args[@]}" --limit "${LIMIT:-5}" \
   --output "$OUT/coreweave_$BENCHMARK.jsonl"
 echo "== scores"
-"$PY" - "$OUT/coreweave_$BENCHMARK.jsonl" <<'PY'
-import json, sys
-rows = [json.loads(line) for line in open(sys.argv[1])]
-for row in rows:
-    calls = sum(item.get("type") == "function_call" for item in row["response"]["output"])
-    print(f"reward={row.get('reward')} tool_calls={calls}")
-rewards = [row.get("reward") or 0 for row in rows]
-print(f"tasks={len(rows)} mean_reward={sum(rewards) / max(len(rows), 1):.3f}")
-PY
+# Prints each task's reward and tool calls; with WANDB_PROJECT set, also logs them to W&B.
+"$PY" /work/recipe/launch.py report --benchmark "$BENCHMARK" --limit "${LIMIT:-5}" \
+  --max-steps "${MAX_STEPS:-50}" --max-context-tokens "${MAX_CONTEXT_TOKENS:-32768}" \
+  --judge-model "${JUDGE_MODEL:-zai-org/GLM-5.2}" --output "$OUT/coreweave_$BENCHMARK.jsonl"

@@ -6,12 +6,15 @@
 
 from __future__ import annotations
 
+import math
 import dataclasses
 import importlib.util
 import json
+import re
 import shutil
 import struct
 import sys
+import types
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -189,6 +192,19 @@ def test_served_names_refuse_a_missing_tensor_and_missing_weights(tmp_path) -> N
         launch.served_names(out, base, tokenizer_dir=out)
 
 
+INFO = SimpleNamespace(total_bytes=8 * 2**30)  # what the upload returns
+#: The last poll of a wait: both replicas READY, with the platform's timings and their spans.
+REPLICAS = {"timeline/hotload_first_replica/start": 1.0, "timeline/hotload_first_replica/end": 9.0}
+EVENT = SimpleNamespace(
+    ready=2,
+    total=2,
+    timings=lambda: {"hotload/platform_seconds": 21.5},
+    timeline=lambda: dict(REPLICAS),
+)
+#: Wall-clock time when the test's clock reads 0.
+EPOCH = 1_800_000_000.0
+
+
 class FakeLoader:
     """The HotLoader calls the launcher makes, recorded; time passes as each call says."""
 
@@ -196,6 +212,7 @@ class FakeLoader:
         self.clock, self.hot_loaded, self.fail = clock, set(hot_loaded), fail
         self.takes = takes or {}
         self.calls: list[tuple] = []
+        self.deployment = SimpleNamespace(id="dep-1", name="qwen3-4b", model_name="m", raw={})
 
     def _call(self, *call) -> None:
         self.calls.append(call)
@@ -209,27 +226,31 @@ class FakeLoader:
 
     def upload(self, snapshot, identity):
         self._call("upload", Path(snapshot), identity)
-        return "info"
+        return INFO
 
     def wait_for_deployment_ready(self, *, timeout):
         self._call("ready", timeout)
 
     def trigger(self, identity, info, *, prompt_cache_policy, timeout):
         self._call("trigger", identity, info, prompt_cache_policy, timeout)
-        return SimpleNamespace(id="hl-1", state=HotLoadState.PENDING)
+        return SimpleNamespace(id="hl-1", state=HotLoadState.PENDING, completed=False)
 
-    def wait(self, hot_load_id, *, timeout):
+    def wait(self, hot_load_id, *, timeout, on_progress=None):
         self._call("wait", hot_load_id, timeout)
-        return SimpleNamespace(id=hot_load_id, state=HotLoadState.COMPLETED)
+        if on_progress is not None:
+            on_progress(EVENT)
+        return SimpleNamespace(id=hot_load_id, state=HotLoadState.COMPLETED, completed=True)
 
     def verify_served(self, hot_load_id, identity):
         self._call("verify", hot_load_id, identity)
+        return ["replica-0", "replica-1"]
 
 
 @pytest.fixture
 def clock(monkeypatch) -> list[float]:
     now = [0.0]
     monkeypatch.setattr(launch.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(launch.time, "time", lambda: EPOCH + now[0])
     return now
 
 
@@ -240,10 +261,146 @@ def test_publish_starts_the_budget_after_the_upload(tmp_path, clock) -> None:
     assert loader.calls == [
         ("upload", tmp_path, "sft-run-v000030"),
         ("ready", 1800),  # the upload took longer than the budget, which starts after it
-        ("trigger", "sft-run-v000030", "info", PromptCachePolicy.RESET_ALL, 1700),
+        ("trigger", "sft-run-v000030", INFO, PromptCachePolicy.RESET_ALL, 1700),
         ("wait", "hl-1", 1600),
         ("verify", "hl-1", "sft-run-v000030"),
     ]
+
+
+def test_publish_reports_the_hot_load_metrics(tmp_path, clock) -> None:
+    job = launch.SftJob.from_env({**BASE, "CWTRAIN_HOTLOAD_VERIFY": "1"})
+    loader = FakeLoader(clock, takes={"upload": 19, "ready": 1, "trigger": 1, "wait": 21})
+    metrics: dict[str, float] = {}
+    launch.publish(loader, tmp_path, job, metrics)
+    assert metrics == {
+        "hotload/upload_seconds": 19.0,
+        "hotload/snapshot_bytes": float(INFO.total_bytes),
+        "hotload/incremental": 0.0,
+        "hotload/replicas_ready": 2.0,
+        "hotload/replicas_total": 2.0,
+        "hotload/platform_seconds": 21.5,
+        "hotload/replicas_verified": 2.0,
+        "hotload/hot_load_seconds": 23.0,
+        "hotload/completed": 1.0,
+        # the run's timeline: the upload, then the hot-load from READY wait to completion
+        "timeline/upload/start": EPOCH,
+        "timeline/upload/end": EPOCH + 19,
+        "timeline/hotload/start": EPOCH + 19,
+        "timeline/hotload/end": EPOCH + 42,
+        **REPLICAS,
+    }
+
+
+WANDB = {"WANDB_PROJECT": "cookbook", "WANDB_API_KEY": "key", "WANDB_RUN_ID": "sft-run-abc"}
+
+
+def test_wandb_options_only_with_a_project(tmp_path) -> None:
+    assert not any("wandb" in arg for arg in launch.train_command(launch.SftJob.from_env(BASE)))
+    job = launch.SftJob.from_env({**BASE, **WANDB, "WANDB_ENTITY": "team"})
+    command = launch.train_command(job)
+    i = command.index("--wandb-project")
+    assert command[i : i + 8] == [
+        "--wandb-project", "cookbook", "--wandb-entity", "team",
+        "--wandb-name", "sft-run", "--wandb-run-id", "sft-run-abc",
+    ]  # fmt: skip
+    assert "key" not in command and not any("wandb" in arg for arg in launch.merge_command(job))
+    fresh = launch.SftJob.from_env({**BASE, **WANDB, "WANDB_RUN_ID": ""}).wandb_run_id
+    assert re.fullmatch(r"sft-run-[0-9a-f]{8}", fresh)  # a new run each launch
+    with pytest.raises(LaunchError, match="WANDB_API_KEY_SECRET"):
+        launch.SftJob.from_env({**BASE, **WANDB, "WANDB_API_KEY": ""})
+
+
+class FakeRun:
+    def __init__(self, **kwargs) -> None:
+        self.kwargs, self.id, self.config = kwargs, kwargs["id"], FakeConfig()
+        self.defined: list[tuple[str, str]] = []
+        self.rows: list[dict] = []
+        self.finished = False
+
+    def define_metric(self, name, *, step_metric):
+        self.defined.append((name, step_metric))
+
+    def log(self, row):
+        self.rows.append(row)
+
+    def finish(self):
+        self.finished = True
+
+
+class FakeConfig(dict):
+    def update(self, values, allow_val_change=False):  # noqa: ARG002 - wandb's signature
+        super().update(values)
+
+
+@pytest.fixture
+def fake_wandb(monkeypatch) -> types.ModuleType:
+    module = types.ModuleType("wandb")
+    module.run = None
+
+    def init(**kwargs):
+        module.run = FakeRun(**kwargs)
+        return module.run
+
+    module.init = init
+    monkeypatch.setitem(sys.modules, "wandb", module)
+    return module
+
+
+def test_main_logs_to_axolotls_wandb_run_and_records_the_publish_in_it(
+    tmp_path, monkeypatch, clock, stub_axolotl, fake_wandb
+) -> None:
+    monkeypatch.setenv("STUB_TRAIN_OUTPUT", str(make_result(tmp_path / "result")))
+    run_main(tmp_path, monkeypatch, clock, env=WANDB)
+
+    (train,) = [json.loads(line) for line in stub_axolotl.read_text().splitlines()]
+    assert train["args"][train["args"].index("--wandb-run-id") + 1] == "sft-run-abc"
+    assert "WANDB_RUN_GROUP" in train["env"]
+    # the job type and tags that tell a project's runs apart
+    assert {"WANDB_JOB_TYPE", "WANDB_TAGS"} <= set(train["env"])
+    run = fake_wandb.run
+    assert run.kwargs == {
+        "project": "cookbook", "entity": None, "id": "sft-run-abc", "resume": "allow",
+    }  # fmt: skip
+    assert run.finished and ("hotload/*", "train/global_step") in run.defined
+    (row,) = run.rows
+    assert row["train/global_step"] == 30 and row["hotload/version"] == 30.0
+    assert row["hotload/completed"] == 1.0 and row["hotload/replicas_ready"] == 2.0
+    # the timeline: training, then the upload and the hot-load, at the last step
+    assert row["timeline/step"] == 30.0 and ("timeline/*", "train/global_step") in run.defined
+    assert row["timeline/train/start"] <= row["timeline/train/end"]
+    upload, hotload = row["timeline/upload/start"], row["timeline/hotload/start"]
+    assert row["timeline/train/end"] <= upload <= hotload
+    # a full fine-tune merges nothing; the row still carries the key, for the charts' query
+    assert math.isnan(row["timeline/merge/start"])
+    recorded = run.config["cwtrain"]
+    assert recorded["identity"] == "sft-run-v000030" and recorded["deployment"]["id"] == "dep-1"
+    assert recorded["hotload"]["prompt_cache_policy"] == "reset_all"
+
+
+def test_main_records_a_failed_publish_in_the_wandb_run(
+    tmp_path, monkeypatch, clock, stub_axolotl, fake_wandb
+) -> None:
+    monkeypatch.setenv("STUB_TRAIN_OUTPUT", str(make_result(tmp_path / "result")))
+    with pytest.raises(CWTrainError, match="not READY"):
+        run_main(tmp_path, monkeypatch, clock, env=WANDB, fail="ready")
+
+    run = fake_wandb.run
+    (row,) = run.rows
+    assert row["hotload/completed"] == 0.0 and row["hotload/snapshot_bytes"] > 0
+    assert row["timeline/upload/start"] <= row["timeline/upload/end"]
+    assert math.isnan(row["timeline/hotload/start"]) and run.finished
+
+
+def test_a_wandb_failure_after_the_publish_is_reported_not_raised(
+    tmp_path, monkeypatch, clock, capsys, fake_wandb
+) -> None:
+    def refuse(**kwargs):
+        raise RuntimeError("api.wandb.ai is unreachable")
+
+    fake_wandb.init = refuse
+    job = launch.SftJob.from_env({**BASE, **WANDB})
+    launch.log_publish(job, FakeLoader(clock), {"hotload/completed": 1.0})
+    assert "could not record the publish in the W&B run sft-run-abc" in capsys.readouterr().out
 
 
 def test_publish_says_how_to_hot_load_the_uploaded_snapshot(tmp_path, clock, capsys) -> None:
@@ -288,13 +445,14 @@ def stub_axolotl(tmp_path, monkeypatch) -> Path:
     return calls
 
 
-def run_main(tmp_path, monkeypatch, clock, **loader_args) -> FakeLoader:
+def run_main(tmp_path, monkeypatch, clock, env=None, **loader_args) -> FakeLoader:
     base = make_base(tmp_path / "base")
     loader = FakeLoader(clock, **loader_args)
     monkeypatch.setattr(launch, "api_client", lambda env: "client")
     monkeypatch.setattr(launch, "HotLoader", lambda client, deployment_id: loader)
     monkeypatch.setattr(launch, "stage_from_s3", lambda uri, dest: shutil.copytree(base, dest))
-    launch.main({**BASE, "WORK": str(tmp_path / "work"), "BASE_S3_URI": "s3://b/models/Qwen3-4B"})
+    work = {"WORK": str(tmp_path / "work"), "BASE_S3_URI": "s3://b/models/Qwen3-4B"}
+    launch.main({**BASE, **work, **(env or {})})
     return loader
 
 

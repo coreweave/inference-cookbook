@@ -257,6 +257,28 @@ def test_the_hot_load_settings_come_from_run_env(tmp_path: Path, example: Exampl
         assert f'{{name: CWTRAIN_HOTLOAD_{key}, value: "{value}"}}' in rendered
 
 
+@needs_envsubst
+@per_example
+def test_wandb_is_off_by_default_and_its_key_stays_in_an_optional_secret(
+    tmp_path: Path, example: Example
+) -> None:
+    job = example.recipe.k8s / "trainer-job.yaml"
+    rendered = render(filled_run_env(example, tmp_path), job).stdout
+    assert '{name: WANDB_PROJECT, value: ""}' in rendered  # nothing goes to W&B unless asked
+    key = rendered[rendered.index("- name: WANDB_API_KEY") :].splitlines()[1]
+    assert 'secretKeyRef: {name: "wandb-api-key", key: api_key, optional: true}' in key
+    env = filled_run_env(example, tmp_path, WANDB_PROJECT="cookbook", WANDB_ENTITY="team")
+    rendered = render(env, job).stdout
+    assert '{name: WANDB_PROJECT, value: "cookbook"}' in rendered
+    assert '{name: WANDB_ENTITY, value: "team"}' in rendered
+
+
+@per_recipe
+def test_run_trainer_unsets_empty_wandb_settings(recipe: Recipe) -> None:
+    script = (recipe.k8s / "run-trainer.sh").read_text()
+    assert "for var in WANDB_PROJECT WANDB_ENTITY; do" in script
+
+
 @per_recipe
 def test_the_trainer_does_not_start_without_the_api_token(recipe: Recipe) -> None:
     job = (recipe.k8s / "trainer-job.yaml").read_text()

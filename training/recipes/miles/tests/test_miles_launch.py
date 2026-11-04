@@ -177,7 +177,7 @@ def test_the_launcher_stages_the_model_where_every_later_step_reads_it(
     assert f"--hf-checkpoint {checkpoint} " in train_args
 
 
-def launched_train_args(tmp_path, monkeypatch, *options: str) -> str:
+def launched_train_args(tmp_path, monkeypatch, *options: str, environ=None) -> str:
     """train.py's arguments from a launcher run with ``options``, against stand-in helpers."""
     module = helpers_module(UTILS)
     calls: list[str] = []
@@ -193,7 +193,7 @@ def launched_train_args(tmp_path, monkeypatch, *options: str) -> str:
         "--model-dir", str(tmp_path / "models"), "--data-dir", str(tmp_path / "data"),
         "--prompt-data", str(tmp_path / "prompts.jsonl"), "--work-dir", str(tmp_path), *options,
     ])  # fmt: skip
-    monkeypatch.setattr(variant.os, "environ", {})
+    monkeypatch.setattr(variant.os, "environ", dict(environ or {}))
     variant.main()
     return calls[0]
 
@@ -230,6 +230,57 @@ def test_extra_args_that_turn_on_miles_own_rollout_loop_stop_the_launcher() -> N
     with pytest.raises(launch.argparse.ArgumentTypeError, match="needs SGLang engines"):
         launch.extra_args("--save-interval 50 --use-session-server")
     assert launch.extra_args("--save-interval 50") == "--save-interval 50"
+
+
+WANDB = {"WANDB_PROJECT": "cookbook", "WANDB_API_KEY": "key", "CWTRAIN_HOTLOAD_RUN_ID": "run-1"}
+
+
+def test_wandb_flags_only_with_a_project_and_never_the_key(tmp_path, monkeypatch) -> None:
+    assert "--use-wandb" not in launched_train_args(tmp_path, monkeypatch)
+    args = launched_train_args(
+        tmp_path, monkeypatch, "--extra-args=--save-interval 50", environ=WANDB
+    )
+    from cwtrain.integrations.slime import TRAINER_TIMELINE_ARGS
+
+    flags = "--use-wandb --wandb-project cookbook --wandb-group run-1 --disable-wandb-random-suffix"
+    hooks = launch.shlex.join(TRAINER_TIMELINE_ARGS)
+    # the trainer timeline's hooks, then the extras: they come last, and win
+    assert f"{flags} {hooks} --save-interval 50 " in args
+    assert "--wandb-key" not in args and "key" not in args.split()
+    assert "--wandb-team team " in launch.wandb_args({**WANDB, "WANDB_ENTITY": "team"})
+
+
+def test_the_trainer_hooks_stay_out_when_miles_skips_the_forward_pass(
+    tmp_path, monkeypatch
+) -> None:
+    args = launched_train_args(
+        tmp_path, monkeypatch, "--extra-args=--skip-actor-forward-only", environ=WANDB
+    )
+    # miles refuses both hooks with this flag
+    assert "--use-wandb" in args and "--custom-megatron-before" not in args
+    assert "--skip-actor-forward-only" in args
+
+
+def test_worker_env_tags_the_wandb_run_only_with_a_project() -> None:
+    assert "WANDB_TAGS" not in launch.worker_env("train.py", {})
+    env = launch.worker_env("train_async.py", WANDB)
+    assert env["WANDB_TAGS"] == "miles,grpo" and env["WANDB_JOB_TYPE"] == "train"
+    assert "WANDB_API_KEY" not in env  # a secret never travels in the runtime env
+
+
+def test_a_wandb_project_without_a_key_stops_the_launcher_before_any_download() -> None:
+    with pytest.raises(SystemExit, match="WANDB_API_KEY_SECRET"):
+        launch.wandb_args({**WANDB, "WANDB_API_KEY": ""})
+    with pytest.raises(SystemExit, match="CWTRAIN_HOTLOAD_RUN_ID"):
+        launch.wandb_args({**WANDB, "CWTRAIN_HOTLOAD_RUN_ID": " "})
+    source = LAUNCHER.read_text()
+    assert source.index("wandb = wandb_args(") < source.index("U.exec_command_cpu(")
+
+
+@pytest.mark.parametrize("flag", ["--wandb-key k", "--wandb-key=k"])
+def test_the_wandb_key_as_an_argument_stops_the_launcher(flag) -> None:
+    with pytest.raises(launch.argparse.ArgumentTypeError, match="--wandb-key is not supported"):
+        launch.extra_args(f"--save-interval 50 {flag}")
 
 
 def test_run_trainer_passes_extra_args_that_are_one_flag(tmp_path, monkeypatch) -> None:

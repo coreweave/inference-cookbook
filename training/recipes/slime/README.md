@@ -228,6 +228,64 @@ Same as the miles recipe: see [Concurrency](../miles/README.md#concurrency). The
 `--max-num-seqs`). `ROLLOUT_CONCURRENCY` in `run.env` sets how many group requests the trainer
 keeps in flight. Each request asks for `--n-samples-per-prompt` completions.
 
+## Watching in W&B
+
+W&B is off by default. To log a run, set `WANDB_PROJECT` in the example's `run.env`, and
+`WANDB_ENTITY` when the project is not under your key's default entity. The Job reads the key from
+the Secret that `WANDB_API_KEY_SECRET` names (default `wandb-api-key`), under `api_key`:
+
+```bash
+kubectl -n "$NAMESPACE" create secret generic "$WANDB_API_KEY_SECRET" --from-file=api_key=<(printf %s "$WANDB_API_KEY")
+```
+
+The pod starts without that Secret, but with `WANDB_PROJECT` set and no key, the launcher stops
+before it stages anything. The launcher passes `--use-wandb`, `--wandb-project`, `--wandb-team`
+and `--wandb-group "$RUN_ID"` with `--disable-wandb-random-suffix`, so the run's name is the prefix
+of its snapshot identities. It refuses `--wandb-key` in `EXTRA_TRAIN_ARGS`: slime would put the
+key on the Ray job's command line and in the run's config.
+
+slime drops the metrics that the hot-load hook returns, so the hook logs them into slime's
+run itself, as `hotload/*`. They share the `rollout/step` axis with slime's rollout metrics:
+step `v` is weight version `v`. `train.py` samples version `v` in rollout `v`. The rollout function adds `coreweave/*` on the same
+axis.
+
+| Question | Panels |
+| --- | --- |
+| Is the policy learning? | `rollout/raw_reward`, `train/loss`, `train/grad_norm` |
+| Where does each step's time go? | The `timeline/*` spans of each phase; `perf/train_wait_time`, `perf/train_time`, `perf/update_weights_time` |
+| Do the responses fit the token budget? | `rollout/response_len/mean`, `rollout/truncated_ratio` |
+| How far apart are the deployment's and the trainer's log-probs? | `train/train_rollout_logprob_abs_diff`, `train/tis_clipfrac` |
+| Is the deployment the bottleneck? | `coreweave/generation_seconds`, `coreweave/response_tokens_per_second`, `coreweave/request_seconds_p95`, `coreweave/request_retries` |
+| How long does each hot-load take? | `hotload/upload_seconds`, `hotload/hot_load_seconds`, `hotload/replica_seconds_first`, `hotload/replica_seconds_rest_max`; `perf/update_weights_time` is the whole weight update, hot-load included |
+| What does a delta cost? | `hotload/incremental` (1 for a delta, 0 for a full snapshot), `hotload/bytes_changed`, `hotload/snapshot_bytes` |
+| Does the prompt cache outlive a hot-load? | `rollout/prefix_cache_hit_rate` |
+
+`hotload/replica_seconds_first` is the replica that installs the snapshot from object storage, and
+`hotload/replica_seconds_rest_max` the slowest of the others, which copy it from a peer. They
+appear when the platform reports the replicas' timestamps. `coreweave/request_seconds_*` time each
+request from sending it to the whole response, including its wait in the deployment's queue (see
+[Concurrency](#concurrency)).
+
+Each step also records when its phases ran, as `timeline/<phase>/start` and `/end` (Unix seconds)
+with `timeline/step`. The rollout function records `rollout` and `reward`. Two trainer hooks, which
+the launcher adds with `--use-wandb`, record `logprobs` and one `update` span per train step, which
+ends when the step releases its gradients, also for a step skipped on a NaN or infinite gradient.
+Writing the delta falls between the last `update` and the weight sync. The hook records `mirror`,
+`upload`, `hotload`, and each replica's install from the platform's timestamps
+(`hotload_first_replica`, `hotload_peers`). Step `i` is the hot-load of version `i`, rollout `i`
+and the training on rollout `i`. The hooks are
+`--custom-megatron-before-log-prob-hook-path` and `--custom-megatron-before-train-step-hook-path`. A
+hook of your own in `EXTRA_TRAIN_ARGS` comes later and replaces cwtrain's; the timeline then has no
+`logprobs` or `update` lane.
+
+The run's config has a `cwtrain` section: the cwtrain version, `RUN_ID`, the deployment (model,
+engine, instance type, replicas, `autoscaling.concurrency`), and the hot-load and rollout settings.
+It holds no endpoint and no key.
+
+The launcher tags each run with its framework and algorithm (`slime,grpo`) and gives it the job type
+`train`, so that a project's runs can be told apart, unless `WANDB_TAGS` or `WANDB_JOB_TYPE` is
+already set in the trainer's environment.
+
 ## Sequence of one training step (delta mode)
 
 | Step | Who | What |

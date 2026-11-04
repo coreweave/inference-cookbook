@@ -71,6 +71,12 @@ spec:
           valueFrom: {secretKeyRef: {name: "${API_TOKEN_SECRET}", key: token}}
         - {name: CWTRAIN_API_HEADERS, value: '${CWTRAIN_API_HEADERS}'}
         - {name: CWTRAIN_API_INSECURE, value: "${CWTRAIN_API_INSECURE}"}
+        # W&B, off while WANDB_PROJECT is empty. The key stays in a Secret, never in the Job spec;
+        # optional, so that a run without W&B needs no Secret
+        - {name: WANDB_PROJECT, value: "${WANDB_PROJECT}"}
+        - {name: WANDB_ENTITY, value: "${WANDB_ENTITY}"}
+        - name: WANDB_API_KEY
+          valueFrom: {secretKeyRef: {name: "${WANDB_API_KEY_SECRET}", key: api_key, optional: true}}
         # object storage for snapshots
         - {name: CW_S3_ENDPOINT, value: "${CW_S3_ENDPOINT}"}
         - {name: AWS_CONFIG_FILE, value: /aws/config}

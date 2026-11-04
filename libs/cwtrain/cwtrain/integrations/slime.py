@@ -786,8 +786,10 @@ def before_train_step(
     """``--custom-megatron-before-train-step-hook-path``: the trainer starts an optimizer step.
 
     It starts an ``update`` span, and the first one of a training ends ``logprobs``. The span ends
-    when ``optimizer.step()`` returns: slime and miles have no hook after a train step, and the
-    last rollout ends without a weight sync. Each step logs its spans on ``rollout_id``'s step.
+    when the step releases its gradients with ``optimizer.zero_grad()``, which slime and miles do
+    after every step, also one they skip on a NaN or infinite gradient: they have no hook after a
+    train step, and the last rollout ends without a weight sync. Each step logs its spans on
+    ``rollout_id``'s step.
     """
     del step_id, model, opt_param_scheduler
     if not is_rank_zero(args):
@@ -799,23 +801,26 @@ def before_train_step(
 
 
 def _time_steps(args: Any, optimizer: Any) -> None:
-    """Make ``optimizer.step()`` log the trainer's spans when it returns (once per optimizer)."""
-    step = optimizer.step
-    if getattr(step, "_cwtrain_timed", False):
+    """Make ``optimizer.zero_grad()`` log the step's spans first (once per optimizer).
+
+    slime and miles also call it at the start of each step, before the hook marks the step.
+    """
+    zero_grad = optimizer.zero_grad
+    if getattr(zero_grad, "_cwtrain_timed", False):
         return
 
-    @functools.wraps(step)
+    @functools.wraps(zero_grad)
     def timed(*a: Any, **kw: Any) -> Any:
-        out = step(*a, **kw)
-        try:
-            join_run(args)
-            _log_trainer_spans(args, time.time())
-        except Exception as exc:  # noqa: BLE001 - telemetry must not stop the run
-            log.warning("could not log the train step's spans: %s", exc)
-        return out
+        if "update" in _trainer_marks:  # the end of a step, not the start of the next
+            try:
+                join_run(args)
+                _log_trainer_spans(args, time.time())
+            except Exception as exc:  # noqa: BLE001 - telemetry must not stop the run
+                log.warning("could not log the train step's spans: %s", exc)
+        return zero_grad(*a, **kw)
 
     timed._cwtrain_timed = True  # type: ignore[attr-defined]
-    optimizer.step = timed
+    optimizer.zero_grad = timed
 
 
 def _log_trainer_spans(args: Any, ended: float) -> None:
