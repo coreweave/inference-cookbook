@@ -6,8 +6,13 @@
 
 Gym's ``browsecomp_advanced_harness`` resources server calls a Tavily client's ``search`` and
 ``extract``. ``YouSearchClient`` has the same two methods and returns Tavily-shaped results from
-the You.com Search and Contents APIs. So the harness's tools, page workspace and judge run
+the You.com Search and Contents APIs. So the harness's tools, page workspace and judge prompt run
 unchanged, in Gym v0.4.0 (bundled with NeMo-RL v0.7.0) and v0.6.0.
+
+Neither of those Gym versions guards against reward hacking, so this module adds two guards in
+front of the harness. Search and page results that quote a benchmark are dropped (``contaminated``),
+as Gym's own filter does from v0.7.0. The judge sees only the final ``Exact Answer:`` line
+(``judged_answer``), not the explanation or earlier turns.
 
 ``install`` copies this file into the harness directory. A server whose ``entrypoint`` is
 ``you_search.py`` swaps its Tavily clients for You.com clients, one per key in its
@@ -20,8 +25,10 @@ the standard library and httpx, which the harness already uses.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
-from collections.abc import Iterable, Sequence
+import re
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -34,12 +41,98 @@ ENTRYPOINT = "you_search.py"
 MAX_CHARS_ENV = "YOU_SEARCH_MAX_CHARS"
 # Retry rate limits and server errors; a 4xx other than 429 is the request's fault.
 RETRY_STATUS = frozenset({429, 500, 502, 503, 504})
+# A request You.com rejects for its content, such as a query it finds too long (422). The agent
+# wrote it, so the harness shows the agent "Search failed" instead of failing the rollout. Any other
+# error, such as a bad key (401), still fails the rollout: it is not the agent's fault.
+REJECTED_STATUS = frozenset({400, 422})
+# Characters of You.com's error that the agent sees.
+REJECTION_CHARS = 300
+
+try:
+    # The error the harness catches from its Tavily client and shows the agent.
+    from tavily.errors import BadRequestError
+except ImportError:  # outside the harness venv, such as in the case study's tests
+
+    class BadRequestError(Exception):
+        """Stands in for ``tavily.errors.BadRequestError``."""
+
+# A result that quotes a benchmark (a dataset mirror, a leaderboard, the simple-evals repo or its
+# CSVs) hands the agent the answer key. These are Gym v0.7.0's CONTAMINATION_PATTERNS, plus
+# ASearcher's names for the training data and SimpleQA's for legacy answer keys.
+# Case-insensitive, matched anywhere in the result, its URL included.
+CONTAMINATION_PATTERNS = (
+    "browsecomp",
+    "browse_comp",
+    "browse-comp",
+    "simple-eval",
+    "bcplus",
+    "bc-plus",
+    "bc_plus",
+    "asearcher",
+    "a_searcher",
+    "a-searcher",
+    "simpleqa",
+    "simple_qa",
+    "simple-qa",
+)
+# Matched against the result's URL only. Dataset viewers serve mirrors whose names match no
+# pattern; a page that only links to one is kept.
+CONTAMINATED_URL_SUBSTRINGS = ("huggingface.co/datasets", "datasets-server.huggingface.co")
+# Characters of the final answer that the judge sees.
+JUDGE_ANSWER_CHARS = 200
+_THINK = re.compile(r"<think>.*?</think>", re.DOTALL)
+_EXACT_ANSWER = re.compile(r"exact answer\W*:\s*(.*)", re.IGNORECASE)
+_CONFIDENCE = re.compile(r"\bconfidence\s*:", re.IGNORECASE)
+# The judge prompt's own fields. In Gym v0.4.0 and v0.6.0 [correct_answer] follows the
+# response, so a response could otherwise supply one.
+_JUDGE_FIELDS = re.compile(
+    r"\[(?:question|response|correct_answer)\]\s*:?"
+    r"|\b(?:correct_answer|extracted_final_answer|answer_type)\s*:"
+    r"|\bcorrect\s*:\s*(?:yes|no)\b",
+    re.IGNORECASE,
+)
 
 
 def excluded(url: str, domains: Iterable[str]) -> bool:
     """Whether ``url``'s host is one of ``domains`` or a subdomain of one."""
     host = (urlparse(url).hostname or "").lower()
     return any(host == d.lower() or host.endswith("." + d.lower()) for d in domains)
+
+
+def contaminated(item: Mapping[str, Any]) -> bool:
+    """Whether a provider result quotes a benchmark or comes from a dataset viewer.
+
+    The whole result is checked, not chosen fields, so page text, snippets and title all count.
+    """
+    text = json.dumps(item, default=str).lower()
+    url = str(item.get("url") or "").lower()
+    return any(p in text for p in CONTAMINATION_PATTERNS) or any(
+        s in url for s in CONTAMINATED_URL_SUBSTRINGS
+    )
+
+
+def _report_drops(function: str, dropped: int, kept: int) -> None:
+    # The same line as Gym v0.7.0's filter, so one grep counts drops in either version.
+    if dropped:
+        print(
+            f"[browsecomp][contamination] fn={function} provider=you dropped={dropped} kept={kept}",
+            flush=True,
+        )
+
+
+def judged_answer(response: str) -> str:
+    """The part of a final response that the judge grades: its last ``Exact Answer:``, capped.
+
+    The judge never sees the explanation or earlier turns (Gym v0.4.0 passes the text of every
+    turn), so text that argues for an answer, lists other candidates or imitates the judge's
+    fields does not reach it. A response with no ``Exact Answer:`` is graded as no answer.
+    """
+    matches = _EXACT_ANSWER.findall(_THINK.sub("", response or ""))
+    if not matches:
+        return ""
+    answer = _CONFIDENCE.split(matches[-1])[0]
+    answer = " ".join(_JUDGE_FIELDS.sub(" ", answer).split()).strip("*_` ")
+    return f"Exact Answer: {answer[:JUDGE_ANSWER_CHARS]}" if answer else ""
 
 
 def max_chars() -> int | None:
@@ -57,12 +150,16 @@ def search_results(payload: dict, exclude_domains: Sequence[str] = ()) -> list[d
     """Convert a You.com search response into Tavily's ``results`` list.
 
     ``content`` holds the snippets, ``raw_content`` the live-crawled page (``None`` when You.com
-    did not crawl it). Results on excluded domains are dropped.
+    did not crawl it). Results on excluded domains and ``contaminated`` results are dropped, the
+    latter before the character cap, so a quote past the cap still drops its result.
     """
-    results = []
+    results, dropped = [], 0
     for item in (payload.get("results") or {}).get("web") or []:
         url = item.get("url") or ""
         if not url or excluded(url, exclude_domains):
+            continue
+        if contaminated(item):
+            dropped += 1
             continue
         snippets = item.get("snippets") or []
         results.append(
@@ -73,17 +170,26 @@ def search_results(payload: dict, exclude_domains: Sequence[str] = ()) -> list[d
                 "raw_content": _cap((item.get("contents") or {}).get("markdown") or None),
             }
         )
+    _report_drops("search", dropped, len(results))
     return results
 
 
 def contents_results(payload: Any) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
-    """Convert a You.com contents response into Tavily's ``results`` and ``failed_results``."""
+    """Convert a You.com contents response into Tavily's ``results`` and ``failed_results``.
+
+    ``contaminated`` pages are in neither, so when every page is dropped the harness answers as it
+    does for pages it could not fetch, and the agent is not told that the benchmark is nearby.
+    """
     items = payload if isinstance(payload, list) else (payload or {}).get("results") or []
-    results, failed = [], []
+    results, failed, dropped = [], [], 0
     for item in items:
+        if contaminated(item):
+            dropped += 1
+            continue
         text = item.get("markdown") or ""
         target = results if text else failed
         target.append({"url": item.get("url") or "", "raw_content": _cap(text)})
+    _report_drops("browse", dropped, len(results))
     return results, failed
 
 
@@ -130,6 +236,11 @@ class YouSearchClient:
                 if last:
                     raise
             else:
+                if response.status_code in REJECTED_STATUS:
+                    raise BadRequestError(
+                        f"You.com rejected the request ({response.status_code}): "
+                        f"{response.text[:REJECTION_CHARS]}"
+                    )
                 if response.status_code not in RETRY_STATUS or last:
                     response.raise_for_status()
                     return response.json()
@@ -174,10 +285,12 @@ def install(gym_root: Path) -> Path:
     return target
 
 
-def run_server() -> None:
-    """Start the BrowseComp harness with You.com clients in place of its Tavily clients."""
-    import nemo_gym  # noqa: F401 - adds the Gym install root to sys.path
-    from resources_servers.browsecomp_advanced_harness import app as harness
+def server_class(harness: Any) -> type:
+    """The harness's resources server with You.com clients and a judge that sees only the answer.
+
+    Args:
+        harness: The harness's ``app`` module.
+    """
 
     class YouSearchResourcesServer(harness.TavilySearchResourcesServer):
         def model_post_init(self, context: Any) -> None:
@@ -187,7 +300,23 @@ def run_server() -> None:
             self._async_tavily_clients = [YouSearchClient(key) for key in keys]
             print(f"Search provider: you.com ({len(keys)} key(s))", flush=True)
 
-    YouSearchResourcesServer.run_webserver()
+        async def _verify_answer_with_judge(
+            self, question: str, ground_truth: str, response: str
+        ) -> Any:
+            # Same signature in Gym v0.4.0 to v0.7.0; the return value passes through unchanged.
+            return await super()._verify_answer_with_judge(
+                question, ground_truth, judged_answer(response)
+            )
+
+    return YouSearchResourcesServer
+
+
+def run_server() -> None:
+    """Start the BrowseComp harness as ``server_class`` changes it."""
+    import nemo_gym  # noqa: F401 - adds the Gym install root to sys.path
+    from resources_servers.browsecomp_advanced_harness import app as harness
+
+    server_class(harness).run_webserver()
 
 
 if __name__ == "__main__":

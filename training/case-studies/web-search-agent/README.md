@@ -102,6 +102,9 @@ The run above used:
   questions need more, so BrowseComp is the evaluation, not the training set.
 - ASearcher-Base records no difficulty, so the reward level depends on the sample. Check the first
   steps' rewards before a long run.
+- The search tools drop pages that name the datasets, and the judge grades only the final
+  answer ([Guarding the reward](#guarding-the-reward)). Neither stops a page that quotes a question
+  without naming its dataset.
 - Web search results change over time, so runs are not exactly repeatable.
 
 ## What you need
@@ -396,10 +399,9 @@ The study's settings for the recipe's
   [`you_search.py`](eval/you_search.py), and the config's
   `coreweave_files` copies it into the harness, which runs it as its entrypoint. It serves the
   same `search` and `browse` tools from the You.com Search API (with live-crawled page text) and
-  Contents API. The harness's page handling and judge prompt stay unchanged. The tools never
-  return the sites in
-  [`exclude_domains.json`](eval/exclude_domains.json)
-  (`huggingface.co`, which publishes the questions with their answers).
+  Contents API. The harness's page handling and judge prompt stay unchanged. It also drops
+  results that quote the benchmarks and sends the judge only the final answer
+  ([Guarding the reward](#guarding-the-reward)).
 
 ASearcher-Base is the default because GRPO learns only from a group of trajectories whose rewards
 differ. A BrowseComp question takes tens to hundreds of tool calls, more than a 16,384-token
@@ -413,6 +415,57 @@ turns fit in a trajectory. At 2,000, the 16,384-token context was full by about 
 A trajectory runs in one context: the agent's context resets are off, because a reset drops
 earlier turns and so changes the trajectory's tokens. A trajectory that reaches
 `policy.max_total_sequence_length` ends there.
+
+## Guarding the reward
+
+A search agent can earn the reward without doing the research. It can find a page that publishes
+the question with its answer, or it can write an answer that talks the judge into a yes. ASearcher's
+and BrowseComp's answers are on the open web, in dataset mirrors, in ASearcher's published
+training data, in the simple-evals CSVs and in papers that quote the questions. A policy that reaches them learns to look up the answer key
+instead of learning to search, and its BrowseComp score then measures the leak, not the model.
+
+The Gym versions this study runs have no guard against this. Training uses v0.4.0 (in NeMo-RL
+v0.7.0) and the evaluation uses v0.6.0. Neither filters search results; Gym's filter first ships in
+v0.7.0. Both judge prompts put `[correct_answer]` after the response. In v0.4.0 the judge also
+reads the text of every turn, not only the last one. So [`you_search.py`](eval/you_search.py) adds
+three guards, the same in training and in the evaluation:
+
+- **Results that quote a benchmark are dropped.** A search result or page is dropped when its text
+  or URL names BrowseComp, ASearcher, SimpleQA or OpenAI's simple-evals (Gym v0.7.0's patterns
+  plus ASearcher's and SimpleQA's names), or when its URL is a HuggingFace dataset viewer. The whole page is checked before
+  `YOU_SEARCH_MAX_CHARS` shortens it. When every result of a call is dropped, the call looks like
+  one that found nothing. This is deliberate: a message saying the results were blocked would tell
+  the agent that the answer key is nearby. Each drop logs a `[browsecomp][contamination]` line, the
+  same line that Gym v0.7.0's filter logs.
+- **Answer-key hosts are never fetched.** [`exclude_domains.json`](eval/exclude_domains.json) lists
+  `huggingface.co`, which hosts the ASearcher training data, and
+  `openaipublic.blob.core.windows.net`, which serves the BrowseComp and legacy SimpleQA answer
+  CSVs. `prepare_search_data.py` downloads ASearcher for training and BrowseComp for evaluation;
+  the search agent cannot fetch these hosts through its tools. The harness drops these hosts' search
+  results and does not browse them.
+- **The judge sees only the final answer.** The judge gets the response's last `Exact Answer:`
+  line, at most 200 characters. It never sees the explanation, the earlier turns, or text in its
+  own format (`correct: yes`, `[correct_answer]:`). So the judge never reads text that argues for
+  an answer, or candidates named before the final line. A response without an `Exact Answer:` line scores 0. This is
+  stricter than Gym's own BrowseComp grading, which lets the judge find the answer anywhere in the
+  response. Compare scores only with runs graded the same way.
+
+These guards leave five gaps:
+
+- The filter matches names. It misses a page that quotes a question and its answer without naming
+  the benchmark, and it cannot catch answers the base model memorized. If the training reward
+  rises much faster than the BrowseComp score, read the trajectories.
+- A final line that names several candidates (`Exact Answer: A or B`) still reaches the judge,
+  which has to reject it on its own.
+- The web is live, so new copies of the questions keep appearing. A dated, frozen search index
+  would close this gap and would also make runs repeatable.
+- A failed `browse` call returns its error to the agent as text. A You.com outage during browsing
+  can therefore score 0 instead of failing the rollout. A failed `search` call fails the rollout,
+  except when You.com rejects the query itself (400 or 422, which it returns for some long
+  queries). The agent then sees `Search failed`, as it would from Tavily, and can search again.
+- Neither config turns on the harness's `bash_command` tool (Gym v0.6.0 and later, with
+  `workspace: per_session`), so the agent cannot run code. Without code it cannot, for example,
+  decrypt BrowseComp's published CSV.
 
 ## Evaluation
 
@@ -548,7 +601,10 @@ IDs and log-probs.
 A completed run has one trajectory with a reward per task. A reward of 1 means that the judge found
 the final `Exact Answer:` equivalent to the ground truth. A zero reward can mean a wrong answer, or a
 trajectory that ran out of turns or context; it does not mean a connection error. Read the tool
-calls and the judge's response before you interpret the mean.
+calls and the judge's response before you interpret the mean. The judge's input holds only the
+final `Exact Answer:` line ([Guarding the reward](#guarding-the-reward)). Count the dropped
+contaminated results with `grep -c '\[browsecomp\]\[contamination\]'` over the eval pod's log, or the trainer's for training. A count
+that grows from one checkpoint to the next means the policy is learning to look for the answer key.
 
 ## Concurrency
 

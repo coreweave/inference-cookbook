@@ -1,9 +1,15 @@
 {
   "notices": [
     {
-      "description": "Sites that publish BrowseComp questions with their answers",
+      "description": "Sites that publish ASearcher training data and BrowseComp questions with their answers",
       "properties": [
         {"type": "domain", "value": "huggingface.co"}
+      ]
+    },
+    {
+      "description": "OpenAI's simple-evals storage, which serves the SimpleQA and BrowseComp CSVs with their answers",
+      "properties": [
+        {"type": "domain", "value": "openaipublic.blob.core.windows.net"}
       ]
     }
   ]
