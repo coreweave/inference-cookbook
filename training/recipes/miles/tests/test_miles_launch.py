@@ -279,8 +279,15 @@ def test_with_wandb_the_driver_runs_the_train_script_through_coreweave_train(
         tmp_path, monkeypatch, "--train-script", script, "--rollout-module-dir", "/work/py",
         environ=WANDB,
     )  # fmt: skip
-    assert traced["train_script"] == "/work/py/coreweave_train.py"
+    assert traced["train_script"] == str(Path("/work/py").resolve() / "coreweave_train.py")
     assert traced["extra_env_vars"]["CWTRAIN_TRAIN_SCRIPT"] == f"/root/miles/{script}"
+
+
+def test_a_relative_rollout_module_dir_names_the_wrapper_absolutely(tmp_path, monkeypatch) -> None:
+    # miles would resolve a relative train script against its own checkout
+    monkeypatch.chdir(tmp_path)
+    traced = launched_train(tmp_path, monkeypatch, "--rollout-module-dir", "kit", environ=WANDB)
+    assert traced["train_script"] == str((tmp_path / "kit").resolve() / "coreweave_train.py")
 
 
 def test_worker_env_tags_the_wandb_run_only_with_a_project() -> None:

@@ -354,7 +354,8 @@ def main() -> None:
         # W&B keeps the metric definitions of the driver's writer only: coreweave_train.py runs the
         # train script and binds cwtrain's metrics to rollout/step there (README, "W&B")
         env["CWTRAIN_TRAIN_SCRIPT"] = str(Path(U.repo_base_dir) / args.train_script)
-        train_script = str(Path(args.rollout_module_dir) / "coreweave_train.py")
+        # absolute: miles resolves a relative train script against its own checkout
+        train_script = str(Path(args.rollout_module_dir).resolve() / "coreweave_train.py")
     # miles builds the workers' PYTHONPATH from this process's PYTHONPATH, plus its own repo and
     # Megatron. So prepend the rollout module here; PYTHONPATH in extra_env_vars would replace the
     # paths that miles adds.
