@@ -267,7 +267,9 @@ key on the Ray job's command line and in the run's config.
 miles drops the metrics that the hot-load hook returns, so the hook logs them into miles's
 run itself, as `hotload/*`. They share the `rollout/step` axis with miles's rollout metrics:
 step `v` is weight version `v`. `train.py` samples version `v` in rollout `v`; `train_async.py` samples it one rollout later. The rollout function adds `coreweave/*` on the same
-axis.
+axis. W&B keeps the axis bindings of the run's driver only, so with `WANDB_PROJECT` set the launcher
+starts the train script through [`coreweave_train.py`](coreweave_train.py). It binds `hotload/*`,
+`coreweave/*` and `timeline/*` to `rollout/step` once miles opens the run.
 
 | Question | Panels |
 | --- | --- |

@@ -226,6 +226,17 @@ def wandb_args(job: SlimeJob) -> list[str]:
     ]  # fmt: skip
 
 
+def train_entrypoint(job: SlimeJob, script: Path, py_dir: Path) -> tuple[list[str], dict[str, str]]:
+    """The Ray job's entrypoint and the environment it needs: ``script``, which is ``train.py``.
+
+    With W&B, ``coreweave_train.py`` runs ``script``. W&B keeps the metric definitions of the
+    driver's writer only, and it binds cwtrain's metrics to ``rollout/step`` there.
+    """
+    if not job.wandb_project:
+        return ["python3", str(script)], {}
+    return ["python3", str(py_dir / "coreweave_train.py")], {"CWTRAIN_TRAIN_SCRIPT": str(script)}
+
+
 def runtime_env(pythonpath: str, environ: Mapping[str, str] | None = None) -> dict:
     """Ray runtime env: everything the hook and the rollout function read inside the workers."""
     env = forwarded_env(environ, (*FORWARDED_PREFIXES, "SLIME_", "MEGATRON_"))
@@ -318,7 +329,8 @@ def main(environ: Mapping[str, str] | None = None) -> None:
     say("== rollout module")
     py_dir = job.work / "py"
     py_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy(job.kit / "coreweave_rollout.py", py_dir / "coreweave_rollout.py")
+    for name in ("coreweave_rollout.py", "coreweave_train.py"):
+        shutil.copy(job.kit / name, py_dir / name)
 
     say("== slime source")
     slime = prepare_slime(job)
@@ -349,8 +361,11 @@ def main(environ: Mapping[str, str] | None = None) -> None:
          "--num-gpus", str(job.actor_gpus), "--disable-usage-stats"], cwd=slime)  # fmt: skip
 
     say("== train")
-    cmd = ["ray", "job", "submit", "--runtime-env-json", json.dumps(runtime_env(pythonpath, environ)),
-           "--", "python3", str(slime / "train.py"), *model_args, *train_args(job)]  # fmt: skip
+    entrypoint, entry_env = train_entrypoint(job, slime / "train.py", py_dir)
+    runtime = runtime_env(pythonpath, environ)
+    runtime["env_vars"].update(entry_env)
+    cmd = ["ray", "job", "submit", "--runtime-env-json", json.dumps(runtime),
+           "--", *entrypoint, *model_args, *train_args(job)]  # fmt: skip
     os.chdir(slime)
     sys.stdout.flush()
     os.execvp(cmd[0], cmd)

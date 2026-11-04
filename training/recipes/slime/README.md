@@ -247,7 +247,9 @@ key on the Ray job's command line and in the run's config.
 slime drops the metrics that the hot-load hook returns, so the hook logs them into slime's
 run itself, as `hotload/*`. They share the `rollout/step` axis with slime's rollout metrics:
 step `v` is weight version `v`. `train.py` samples version `v` in rollout `v`. The rollout function adds `coreweave/*` on the same
-axis.
+axis. W&B keeps the axis bindings of the run's driver only, so with `WANDB_PROJECT` set the launcher
+starts `train.py` through [`coreweave_train.py`](coreweave_train.py). It binds `hotload/*`,
+`coreweave/*` and `timeline/*` to `rollout/step` once slime opens the run.
 
 | Question | Panels |
 | --- | --- |

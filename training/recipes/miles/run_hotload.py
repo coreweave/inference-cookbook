@@ -64,6 +64,7 @@ DAPO = "zhuzilin/dapo-math-17k"
 PINNED_IMAGE = "radixark/miles:v0.1.1"
 HELPERS = (
     "exec_command_cpu", "hf_download_dataset", "convert_checkpoint", "execute_train", "ExecuteTrainConfig",
+    "repo_base_dir",
 )
 
 
@@ -348,6 +349,12 @@ def main() -> None:
 
     # ---- environment: the hook and the rollout function read these inside the Ray workers
     env = worker_env(args.train_script)
+    train_script = args.train_script
+    if wandb:
+        # W&B keeps the metric definitions of the driver's writer only: coreweave_train.py runs the
+        # train script and binds cwtrain's metrics to rollout/step there (README, "W&B")
+        env["CWTRAIN_TRAIN_SCRIPT"] = str(Path(U.repo_base_dir) / args.train_script)
+        train_script = str(Path(args.rollout_module_dir) / "coreweave_train.py")
     # miles builds the workers' PYTHONPATH from this process's PYTHONPATH, plus its own repo and
     # Megatron. So prepend the rollout module here; PYTHONPATH in extra_env_vars would replace the
     # paths that miles adds.
@@ -359,7 +366,7 @@ def main() -> None:
         train_args=train_args,
         num_gpus_per_node=args.num_gpus,
         megatron_model_type=model_type,
-        train_script=args.train_script,
+        train_script=train_script,
         extra_env_vars=env,
         config=U.ExecuteTrainConfig(output_dir=f"{args.work_dir}/output"),
         megatron_path=args.megatron_path,

@@ -9,8 +9,9 @@ GitHub. Versions follow [Semantic Versioning](https://semver.org/).
   records each hot-load's timings, from the platform and per replica, and the rollouts' request
   latency, retries and throughput. It fills the prefix-cache counts that slime's and miles' hit
   rate reads. It adds the deployment and hot-load settings to the run config, without the endpoint
-  or any key. Each phase of a training step is a `timeline/<phase>/start` and `/end` span. Without
-  a W&B run, cwtrain logs nothing.
+  or any key. Each phase of a training step is a `timeline/<phase>/start` and `/end` span.
+  `cwtrain.integrations.slime.run_train_script` runs slime's or miles' train script so that these
+  metrics plot against their `rollout/step`. Without a W&B run, cwtrain logs nothing.
 
 ## 1.0.2 - 2026-10-23
 

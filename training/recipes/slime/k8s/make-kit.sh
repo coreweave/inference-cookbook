@@ -25,6 +25,7 @@ kubectl --context "$CTX" -n "$NS" create configmap "$KIT" \
   --from-file=run-trainer.sh="$HERE/run-trainer.sh" \
   --from-file=bucket-policy.example.json="$SHARED/bucket-policy.example.json" \
   --from-file=coreweave_rollout.py="$HERE/../coreweave_rollout.py" \
+  --from-file=coreweave_train.py="$HERE/../coreweave_train.py" \
   --from-file=launch.py="$HERE/../launch.py" \
   ${patches[@]+"${patches[@]}"} \
   --dry-run=client -o yaml | kubectl --context "$CTX" apply -f -

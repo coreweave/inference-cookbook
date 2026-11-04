@@ -54,6 +54,7 @@ def helpers_module(name: str) -> types.ModuleType:
     module = types.ModuleType(name)
     for helper in launch.HELPERS:
         setattr(module, helper, object())
+    module.repo_base_dir = "/root/miles"
     return module
 
 
@@ -179,12 +180,17 @@ def test_the_launcher_stages_the_model_where_every_later_step_reads_it(
 
 def launched_train_args(tmp_path, monkeypatch, *options: str, environ=None) -> str:
     """train.py's arguments from a launcher run with ``options``, against stand-in helpers."""
+    return launched_train(tmp_path, monkeypatch, *options, environ=environ)["train_args"]
+
+
+def launched_train(tmp_path, monkeypatch, *options: str, environ=None) -> dict:
+    """What a launcher run with ``options`` passes to miles' ``execute_train``."""
     module = helpers_module(UTILS)
-    calls: list[str] = []
+    calls: list[dict] = []
     module.exec_command_cpu = lambda cmd: None
     module.hf_download_dataset = lambda *a, **kw: None
     module.convert_checkpoint = lambda **kw: None
-    module.execute_train = lambda **kw: calls.append(kw["train_args"])
+    module.execute_train = lambda **kw: calls.append(kw)
     module.ExecuteTrainConfig = lambda **kw: kw
     variant = load_launcher(monkeypatch, module)
     monkeypatch.setattr(variant, "megatron_model_type", lambda name: name)
@@ -259,6 +265,22 @@ def test_the_trainer_hooks_stay_out_when_miles_skips_the_forward_pass(
     # miles refuses both hooks with this flag
     assert "--use-wandb" in args and "--custom-megatron-before" not in args
     assert "--skip-actor-forward-only" in args
+
+
+@pytest.mark.parametrize("script", ["train.py", "train_async.py"])
+def test_with_wandb_the_driver_runs_the_train_script_through_coreweave_train(
+    tmp_path, monkeypatch, script
+) -> None:
+    plain = launched_train(tmp_path, monkeypatch, "--train-script", script)
+    assert plain["train_script"] == script
+    assert "CWTRAIN_TRAIN_SCRIPT" not in plain["extra_env_vars"]
+    # W&B keeps only the driver's metric definitions, so the driver binds cwtrain's metrics
+    traced = launched_train(
+        tmp_path, monkeypatch, "--train-script", script, "--rollout-module-dir", "/work/py",
+        environ=WANDB,
+    )  # fmt: skip
+    assert traced["train_script"] == "/work/py/coreweave_train.py"
+    assert traced["extra_env_vars"]["CWTRAIN_TRAIN_SCRIPT"] == f"/root/miles/{script}"
 
 
 def test_worker_env_tags_the_wandb_run_only_with_a_project() -> None:
