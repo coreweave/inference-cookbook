@@ -297,7 +297,8 @@ and the training on rollout `i`. With `train_async.py`, rollout `i + 1`
 runs while step `i` trains, and the timeline shows the overlap. The hooks are
 `--custom-megatron-before-log-prob-hook-path` and `--custom-megatron-before-train-step-hook-path`. A
 hook of your own in `EXTRA_TRAIN_ARGS` comes later and replaces cwtrain's; the timeline then has no
-`logprobs` or `update` lane.
+`logprobs` or `update` lane. miles refuses both hooks with `--skip-actor-forward-only`, so with that
+flag in `EXTRA_TRAIN_ARGS` the launcher leaves them out, with the same result.
 
 The run's config has a `cwtrain` section: the cwtrain version, `RUN_ID`, the deployment (model,
 engine, instance type, replicas, `autoscaling.concurrency`), and the hot-load and rollout settings.

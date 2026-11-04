@@ -250,6 +250,17 @@ def test_wandb_flags_only_with_a_project_and_never_the_key(tmp_path, monkeypatch
     assert "--wandb-team team " in launch.wandb_args({**WANDB, "WANDB_ENTITY": "team"})
 
 
+def test_the_trainer_hooks_stay_out_when_miles_skips_the_forward_pass(
+    tmp_path, monkeypatch
+) -> None:
+    args = launched_train_args(
+        tmp_path, monkeypatch, "--extra-args=--skip-actor-forward-only", environ=WANDB
+    )
+    # miles refuses both hooks with this flag
+    assert "--use-wandb" in args and "--custom-megatron-before" not in args
+    assert "--skip-actor-forward-only" in args
+
+
 def test_worker_env_tags_the_wandb_run_only_with_a_project() -> None:
     assert "WANDB_TAGS" not in launch.worker_env("train.py", {})
     env = launch.worker_env("train_async.py", WANDB)
@@ -263,7 +274,7 @@ def test_a_wandb_project_without_a_key_stops_the_launcher_before_any_download() 
     with pytest.raises(SystemExit, match="CWTRAIN_HOTLOAD_RUN_ID"):
         launch.wandb_args({**WANDB, "CWTRAIN_HOTLOAD_RUN_ID": " "})
     source = LAUNCHER.read_text()
-    assert source.index("wandb = wandb_args()") < source.index("U.exec_command_cpu(")
+    assert source.index("wandb = wandb_args(") < source.index("U.exec_command_cpu(")
 
 
 @pytest.mark.parametrize("flag", ["--wandb-key k", "--wandb-key=k"])

@@ -176,15 +176,16 @@ def extra_args(raw: str) -> str:
     return raw
 
 
-def wandb_args(environ: Mapping[str, str] | None = None) -> str:
+def wandb_args(environ: Mapping[str, str] | None = None, extra: str = "") -> str:
     """miles' W&B flags when ``WANDB_PROJECT`` is set: one run named and grouped by the run ID.
 
     The key stays in the environment (``WANDB_API_KEY``). Every Ray worker inherits it from
     ``ray start``, and ``--wandb-key`` would put it in the job's command line.
 
     The trainer hooks mark when the log-probs and the update of each step start, for the run's
-    timeline. They come before ``--extra-args``, so a hook of your own there replaces cwtrain's,
-    and the timeline then has no trainer lanes.
+    timeline. They come before ``extra``, the ``--extra-args``, so a hook of your own there
+    replaces cwtrain's, and the timeline then has no trainer lanes. miles refuses both hooks with
+    ``--skip-actor-forward-only``, so with that flag in ``extra`` they are left out.
     """
     env = os.environ if environ is None else environ
     project = env.get("WANDB_PROJECT", "").strip()
@@ -200,7 +201,9 @@ def wandb_args(environ: Mapping[str, str] | None = None) -> str:
     if entity:
         flags += ["--wandb-team", entity]
     # miles appends a random suffix to the group unless told not to, and names the run after it
-    flags += ["--wandb-group", run_id, "--disable-wandb-random-suffix", *TRAINER_TIMELINE_ARGS]
+    flags += ["--wandb-group", run_id, "--disable-wandb-random-suffix"]
+    if "--skip-actor-forward-only" not in shlex.split(extra):
+        flags += TRAINER_TIMELINE_ARGS
     return shlex.join(flags) + " "
 
 
@@ -256,7 +259,8 @@ def worker_env(train_script: str, environ: Mapping[str, str] | None = None) -> d
 def main() -> None:
     args = parse_args()
     check_helpers(U, U_PROBLEM)
-    wandb = wandb_args()  # before any download: a missing key stops the run here
+    # before any download: a missing key stops the run here
+    wandb = wandb_args(extra=args.extra_args)
     hf_repo, model_name, hf_checkpoint = checkpoint_paths(args.model_name, args.model_dir)
     model_type = args.megatron_model_type or megatron_model_type(model_name)
     prompt_data = args.prompt_data or f"{args.data_dir}/dapo-math-17k/dapo-math-17k.jsonl"
