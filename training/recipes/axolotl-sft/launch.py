@@ -428,8 +428,8 @@ def log_publish(job: SftJob, loader: HotLoader, metrics: Mapping[str, float]) ->
 
     The run ended with ``axolotl train``. The publish's ``hotload/*`` metrics go on its
     ``train/global_step`` axis, at the last step, with the run's ``timeline/*`` spans (training,
-    the LoRA merge, the upload and the hot-load). A failure here is reported, not raised: the
-    model is already published.
+    the LoRA merge, the upload and the hot-load). It also runs after a failed publish, with what
+    that measured. A failure here is reported, not raised: it would hide the publish's outcome.
     """
     if not job.wandb_project:
         return
@@ -518,8 +518,12 @@ def main(environ: Mapping[str, str] | None = None) -> None:
     snapshot = write_full_snapshot(staged, job.work / job.identity, names=names)
 
     say("== publish")
-    publish(loader, snapshot, job, metrics)
-    log_publish(job, loader, metrics)
+    try:
+        publish(loader, snapshot, job, metrics)
+    finally:
+        # what the publish measured, also when it failed: then with hotload/completed 0
+        metrics.setdefault("hotload/completed", 0.0)
+        log_publish(job, loader, metrics)
 
 
 if __name__ == "__main__":

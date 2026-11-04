@@ -377,6 +377,20 @@ def test_main_logs_to_axolotls_wandb_run_and_records_the_publish_in_it(
     assert recorded["hotload"]["prompt_cache_policy"] == "reset_all"
 
 
+def test_main_records_a_failed_publish_in_the_wandb_run(
+    tmp_path, monkeypatch, clock, stub_axolotl, fake_wandb
+) -> None:
+    monkeypatch.setenv("STUB_TRAIN_OUTPUT", str(make_result(tmp_path / "result")))
+    with pytest.raises(CWTrainError, match="not READY"):
+        run_main(tmp_path, monkeypatch, clock, env=WANDB, fail="ready")
+
+    run = fake_wandb.run
+    (row,) = run.rows
+    assert row["hotload/completed"] == 0.0 and row["hotload/snapshot_bytes"] > 0
+    assert row["timeline/upload/start"] <= row["timeline/upload/end"]
+    assert math.isnan(row["timeline/hotload/start"]) and run.finished
+
+
 def test_a_wandb_failure_after_the_publish_is_reported_not_raised(
     tmp_path, monkeypatch, clock, capsys, fake_wandb
 ) -> None:
