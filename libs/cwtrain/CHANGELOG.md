@@ -3,6 +3,15 @@
 The major changes in each `cwtrain` release. A version's section is also its release notes on
 GitHub. Versions follow [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+- **W&B metrics:** when the trainer logs to W&B, cwtrain writes into the trainer's run. It
+  records each hot-load's timings, from the platform and per replica, and the rollouts' request
+  latency, retries and throughput. It fills the prefix-cache counts that slime's and miles' hit
+  rate reads. It adds the deployment and hot-load settings to the run config, without the endpoint
+  or any key. Each phase of a training step is a `timeline/<phase>/start` and `/end` span. Without
+  a W&B run, cwtrain logs nothing.
+
 ## 1.0.2 - 2026-10-23
 
 - **Routing replay:** rollout completions return each token's routed experts, which slime's and

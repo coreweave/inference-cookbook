@@ -32,6 +32,7 @@ from cwtrain.integrations.rollout import (
     rollout_cache_salt,
     sample_groups,
     sample_prompt,
+    shared_sampler,
 )
 
 ROLLOUT_ENV = {"CWTRAIN_ROLLOUT_BASE_URL": "u", "CWTRAIN_ROLLOUT_MODEL": "m"}
@@ -1129,3 +1130,78 @@ def test_the_trainers_replay_flag_turns_routes_on() -> None:
         RolloutConfig.for_trainer(
             TrainerArgs(True), {**ROLLOUT_ENV, "CWTRAIN_ROLLOUT_TOKEN_IDS": "0"}
         )
+
+
+# ------------------------------------------------------------------------- run metrics
+
+
+@dataclass
+class PrefixCacheInfo:  # slime's and miles' Sample.PrefixCacheInfo
+    cached_tokens: int = 0
+    total_prompt_tokens: int = 0
+
+
+@dataclass
+class CachingSample(Sample):
+    prefix_cache_info: PrefixCacheInfo = field(default_factory=PrefixCacheInfo)
+
+
+def test_sample_groups_reports_requests_retries_latency_and_the_prefix_cache(monkeypatch) -> None:
+    async def no_sleep(_s):
+        return None
+
+    monkeypatch.setattr("cwtrain.integrations.rollout.asyncio.sleep", no_sleep)
+    usage = {"usage": {"prompt_tokens_details": {"cached_tokens": 1}}}
+    cached = httpx.Response(200, json={**completions_response(["ab", "cd"]).json(), **usage})
+    busy = httpx.Response(503, text="busy")
+    transport, _seen = make_server([busy, cached, completions_response(["x"])])
+    cfg = RolloutConfig(base_url="https://gw/v1", model="m", concurrency=1)
+    sampler = CompletionSampler(cfg, transport=transport)
+    groups = [[CachingSample(prompt="p1"), CachingSample(prompt="p1")], [CachingSample("p2")]]
+
+    metrics = asyncio.run(
+        sample_groups(sampler, groups, tokenizer=Tokenizer(), max_tokens=8, temperature=1.0)
+    )
+
+    assert metrics["coreweave/requests"] == 2.0 and metrics["coreweave/request_retries"] == 1.0
+    assert 0 <= metrics["coreweave/request_seconds_p50"] <= metrics["coreweave/request_seconds_max"]
+    assert metrics["coreweave/response_tokens_per_second"] > 0
+    assert metrics["timeline/rollout/start"] <= metrics["timeline/rollout/end"]
+    # what slime's and miles' rollout/prefix_cache_hit_rate reads; a response without usage
+    # leaves the sample's info alone
+    assert groups[0][0].prefix_cache_info == PrefixCacheInfo(cached_tokens=1, total_prompt_tokens=2)
+    assert groups[1][0].prefix_cache_info == PrefixCacheInfo()
+    # the next rollout counts its own requests
+    transport2, _ = make_server([completions_response(["y"])])
+    sampler._client = httpx.AsyncClient(base_url=cfg.base_url, transport=transport2)
+    again = asyncio.run(
+        sample_groups(sampler, [[CachingSample(prompt="p3")]], tokenizer=Tokenizer(), max_tokens=8,
+                      temperature=1.0)
+    )  # fmt: skip
+    assert again["coreweave/requests"] == 1.0 and again["coreweave/request_retries"] == 0.0
+
+
+def test_request_stats_quantiles() -> None:
+    from cwtrain.integrations.rollout import RequestStats
+
+    stats = RequestStats()
+    assert stats.metrics() == {"coreweave/requests": 0.0, "coreweave/request_retries": 0.0}
+    for seconds in (1.0, 2.0, 3.0, 4.0, 5.0):
+        stats.record(seconds)
+    out = stats.metrics()
+    assert out["coreweave/request_seconds_p50"] == 3.0
+    assert out["coreweave/request_seconds_p95"] == 4.8
+    assert out["coreweave/request_seconds_max"] == 5.0
+
+
+def test_the_shared_sampler_records_its_settings_without_the_endpoint(wandb_run) -> None:
+    cfg = RolloutConfig(base_url="https://gw.example/v1", model="m", api_key="secret")
+
+    async def make() -> None:
+        shared_sampler(cfg)
+
+    asyncio.run(make())
+    rollout = wandb_run.config["cwtrain"]["rollout"]
+    assert rollout["model"] == "m" and rollout["concurrency"] == 16
+    assert "base_url" not in rollout and "api_key" not in rollout
+    assert "secret" not in str(wandb_run.config) and "gw.example" not in str(wandb_run.config)

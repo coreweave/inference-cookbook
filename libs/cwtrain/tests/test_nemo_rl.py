@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import abc
 import json
+import math
 import shutil
 import sys
 import types
@@ -261,6 +262,10 @@ class FakePolicy:
         return [{"rank": 0, "tensors": 3}, {"rank": 1, "tensors": 3}]
 
 
+#: What the stub loader's progress events report as the platform's timings.
+PLATFORM = {"hotload/platform_seconds": 3.5, "hotload/replica_seconds_first": 3.0}
+
+
 class StubLoader:
     def __init__(self) -> None:
         self.uploads: list[tuple[str, str, str | None]] = []
@@ -283,7 +288,9 @@ class StubLoader:
 
     def wait(self, hot_load_id, *, timeout=None, on_progress=None):
         if on_progress:
-            on_progress(SimpleNamespace(ready=2, total=2))
+            on_progress(
+                SimpleNamespace(ready=2, total=2, timings=lambda: dict(PLATFORM), timeline=dict)
+            )
         return SimpleNamespace(id=hot_load_id, completed=True, state=HotLoadState.COMPLETED)
 
     def verify_served(self, hot_load_id, identity):
@@ -319,6 +326,11 @@ def test_full_every_from_the_config_defaults_to_20(value, expected) -> None:
     # an unset ${oc.env:CWTRAIN_HOTLOAD_FULL_EVERY} can resolve to "", which means the default
     cfg = hook_config_from({"deployment_id": DEPLOYMENT_ID, "full_every": value}, environ={})
     assert cfg.full_every == expected and cfg.mirror_enabled and not cfg.verify
+
+
+def _logged(row: dict[str, float]) -> dict[str, float]:
+    """The row without the NaN that pads the timeline lanes it has no span for."""
+    return {k: v for k, v in row.items() if not math.isnan(v)}
 
 
 def test_weight_synchronizer_publishes_full_then_deltas_then_cuts(
@@ -361,7 +373,20 @@ def test_weight_synchronizer_publishes_full_then_deltas_then_cuts(
     assert sync.served_identity == "nemo-test-v000001"  # the deployment still serves v1
     assert served.read_text().strip() == "nemo-test-v000001"
     m3 = sync.sync_weights()  # v3: full_every=3, chain cut with a full snapshot
-    assert m3["hotload/incremental"] == 0.0
+    assert m3["hotload/incremental"] == 0.0 and m3["hotload/platform_seconds"] == 3.5
+    # the recipe's patch merges the last sync's metrics into the step's train/ metrics
+    assert _logged(sync.pop_metrics()) == m3 and sync.pop_metrics() == {}
+    for lane in ("export", "upload", "hotload"):
+        assert m3[f"timeline/{lane}/start"] <= m3[f"timeline/{lane}/end"]
+    # with the step's SpanTimer, the timeline also gets the GRPO phases and the step
+    sync._metrics = {"timeline/upload/start": 1.0, "timeline/upload/end": 2.0}
+    timer = SimpleNamespace(pop_spans=lambda: {"timeline/rollout/start": 3.0})
+    assert _logged(sync.pop_metrics(timer=timer, step=7)) == {
+        "timeline/upload/start": 1.0,
+        "timeline/upload/end": 2.0,
+        "timeline/rollout/start": 3.0,
+        "timeline/step": 7.0,
+    }
 
     assert loader.uploads == [
         ("FULL", "nemo-test-v000000", None),
@@ -1297,3 +1322,40 @@ def test_rollout_config_errors_name_where_the_value_was_set(cfg, env, message) -
     with pytest.raises(CWTrainError) as excinfo:
         rollout_config_from(cfg, {**base, **env})
     assert str(excinfo.value).startswith(message)
+
+
+def test_span_timer_keeps_the_wall_clock_span_of_each_grpo_phase(monkeypatch) -> None:
+    class Timer:  # NeMo-RL's, reduced to what SpanTimer extends
+        def __init__(self) -> None:
+            self.elapsed: dict[str, list[float]] = {}
+
+        def start(self, label: str) -> None:
+            pass
+
+        def stop(self, label: str) -> float:
+            self.elapsed.setdefault(label, []).append(1.0)
+            return 1.0
+
+    timer_module = types.ModuleType("nemo_rl.utils.timer")
+    timer_module.Timer = Timer
+    monkeypatch.setitem(sys.modules, "nemo_rl", types.ModuleType("nemo_rl"))
+    monkeypatch.setitem(sys.modules, "nemo_rl.utils", types.ModuleType("nemo_rl.utils"))
+    monkeypatch.setitem(sys.modules, "nemo_rl.utils.timer", timer_module)
+    monkeypatch.delitem(sys.modules, "cwtrain.integrations.nemo_rl.timeline", raising=False)
+    from cwtrain.integrations.nemo_rl import timeline
+
+    clock = iter([10.0, 12.0, 13.0, 15.0, 20.0, 21.0, 30.0, 31.0])
+    monkeypatch.setattr(timeline.time, "time", lambda: next(clock))
+    timer = timeline.SpanTimer()
+    for label in ("generation", "generation", "policy_training", "data_processing"):
+        timer.start(label)
+        timer.stop(label)
+
+    # two generation batches span from the first start to the last end; unmapped labels are left
+    assert timer.pop_spans() == {
+        "timeline/rollout/start": 10.0,
+        "timeline/rollout/end": 15.0,
+        "timeline/update/start": 20.0,
+        "timeline/update/end": 21.0,
+    }
+    assert timer.pop_spans() == {} and timer.elapsed["generation"] == [1.0, 1.0]

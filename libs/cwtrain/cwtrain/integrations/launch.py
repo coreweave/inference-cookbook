@@ -311,6 +311,24 @@ def forwarded_env(
     }
 
 
+def wandb_run_env(
+    framework: str, algorithm: str, environ: Mapping[str, str] | None = None
+) -> dict[str, str]:
+    """W&B run settings that make a recipe's runs easy to find: the job type and tags.
+
+    ``WANDB_JOB_TYPE=train`` and ``WANDB_TAGS=<framework>,<algorithm>``, so that a project's runs
+    can be filtered by trainer, each unless the environment already sets it. W&B reads both from
+    the environment of the process that starts the run.
+    """
+    env = os.environ if environ is None else environ
+    out: dict[str, str] = {}
+    if not env.get("WANDB_JOB_TYPE", "").strip():
+        out["WANDB_JOB_TYPE"] = "train"
+    if not env.get("WANDB_TAGS", "").strip():
+        out["WANDB_TAGS"] = f"{framework},{algorithm}"
+    return out
+
+
 def default_prompt_cache_policy(env: MutableMapping[str, str], policy: str = "reset_all") -> None:
     """Default the hot-load prompt-cache policy for a synchronous RL loop.
 
@@ -398,4 +416,5 @@ __all__ = [
     "say",
     "split_args",
     "stage_from_s3",
+    "wandb_run_env",
 ]

@@ -13,6 +13,7 @@ import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from cwtrain.errors import CWTrainError, HotLoadInProgressError
@@ -53,6 +54,17 @@ MANIFEST_PREFIX = "_manifests"
 _WAIT_LOG_HEARTBEAT = 60.0
 
 
+def _seconds(start: datetime, end: datetime) -> float:
+    return round(max(0.0, (end - start).total_seconds()), 3)
+
+
+def _span(lane: str, start: Any, end: Any) -> dict[str, float]:
+    return {
+        f"timeline/{lane}/start": round(start.timestamp(), 3),
+        f"timeline/{lane}/end": round(end.timestamp(), 3),
+    }
+
+
 @dataclass(frozen=True)
 class ProgressEvent:
     """One observation of a hot-load while waiting for it."""
@@ -68,6 +80,54 @@ class ProgressEvent:
     @property
     def total(self) -> int:
         return len(self.replicas)
+
+    def timings(self) -> dict[str, float]:
+        """Seconds from the platform's timestamps, as ``hotload/*`` metrics.
+
+        ``hotload/platform_seconds`` runs from the hot-load's creation to its end. The replica
+        that started first installs the snapshot (``hotload/replica_seconds_first``); the others
+        usually copy it from a peer (``hotload/replica_seconds_rest_max``, the slowest of them).
+        A value whose timestamps the platform did not report is left out.
+        """
+        out: dict[str, float] = {}
+        status = self.hot_load.status
+        if status.created_at and status.finished_at:
+            out["hotload/platform_seconds"] = _seconds(status.created_at, status.finished_at)
+        timed = sorted(
+            (r for r in self.replicas if r.started_at and r.finished_at),
+            key=lambda r: r.started_at,  # type: ignore[arg-type,return-value]
+        )
+        if timed:
+            spans = [_seconds(r.started_at, r.finished_at) for r in timed]  # type: ignore[arg-type]
+            out["hotload/replica_seconds_first"] = spans[0]
+            if len(spans) > 1:
+                out["hotload/replica_seconds_rest_max"] = max(spans[1:])
+        return out
+
+    def timeline(self) -> dict[str, float]:
+        """The replicas' install spans from the platform's timestamps, as ``timeline/*`` metrics.
+
+        ``hotload_first_replica`` is the replica that started first; ``hotload_peers`` runs from
+        the first start to the last finish of the others. Unix seconds; a span whose timestamps
+        the platform did not report is left out.
+        """
+        timed = sorted(
+            (r for r in self.replicas if r.started_at and r.finished_at),
+            key=lambda r: r.started_at,  # type: ignore[arg-type,return-value]
+        )
+        out: dict[str, float] = {}
+        if timed:
+            first, rest = timed[0], timed[1:]
+            out.update(_span("hotload_first_replica", first.started_at, first.finished_at))
+            if rest:
+                out.update(
+                    _span(
+                        "hotload_peers",
+                        min(r.started_at for r in rest),  # type: ignore[type-var]
+                        max(r.finished_at for r in rest),  # type: ignore[type-var]
+                    )
+                )
+        return out
 
     def summary(self) -> str:
         counts: dict[str, int] = {}
