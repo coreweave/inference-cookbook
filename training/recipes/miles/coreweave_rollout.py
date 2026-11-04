@@ -83,8 +83,6 @@ class CoreWeaveRolloutFn(BaseRolloutFn):
         metrics["coreweave/weight_version"] = (
             float(input.weight_version) if input.weight_version is not None else -1.0
         )
-        # miles binds rollout/* and perf/* to rollout/step; these join them in its W&B run, if any
-        tracking.bind(("coreweave/", "timeline/"), step_metric="rollout/step")
         log.info("rollout %d: %s", input.rollout_id, metrics)
         # every timeline key, so that a query for all of them gets this row (tracking.timeline_row)
         return RolloutFnTrainOutput(samples=groups, metrics=tracking.timeline_row(metrics))

@@ -168,6 +168,7 @@ def test_main_runs_the_steps_in_order(tmp_path: Path, monkeypatch) -> None:
     kit = tmp_path / "kit"
     kit.mkdir()
     (kit / "coreweave_rollout.py").write_text("# rollout\n")
+    (kit / "coreweave_train.py").write_text("# driver\n")
     (kit / "0001-a.patch").write_text("")
     slime = tmp_path / "slime"
     (slime / "scripts" / "models").mkdir(parents=True)
@@ -194,6 +195,7 @@ def test_main_runs_the_steps_in_order(tmp_path: Path, monkeypatch) -> None:
     launch.main(env)
 
     assert (tmp_path / "work" / "py" / "coreweave_rollout.py").is_file()
+    assert (tmp_path / "work" / "py" / "coreweave_train.py").is_file()
     kinds = [c[0] for c in calls]
     assert kinds.index("patch") < kinds.index("stage") < kinds.index("chdir")
     assert calls[kinds.index("patch")][2] == ["0001-a.patch"]
@@ -210,6 +212,18 @@ def test_main_runs_the_steps_in_order(tmp_path: Path, monkeypatch) -> None:
     assert runtime["env_vars"]["CWTRAIN_HOTLOAD_RUN_ID"] == "r"
     assert runtime["env_vars"]["PYTHONPATH"].split(":")[:2] == [str(tmp_path / "work" / "py"), str(slime)]
     assert cmd[8:10] == ["--num-layers", "36"]
+
+
+def test_with_wandb_the_driver_runs_train_py_through_coreweave_train() -> None:
+    script, py = Path("/root/slime/train.py"), Path("/work/py")
+    plain = launch.SlimeJob.from_env(BASE)
+    assert launch.train_entrypoint(plain, script, py) == (["python3", str(script)], {})
+    # W&B keeps only the driver's metric definitions, so the driver binds cwtrain's metrics
+    traced = launch.SlimeJob.from_env({**BASE, **WANDB})
+    assert launch.train_entrypoint(traced, script, py) == (
+        ["python3", "/work/py/coreweave_train.py"],
+        {"CWTRAIN_TRAIN_SCRIPT": str(script)},
+    )
 
 
 def test_megatron_patches_are_reapplied_on_every_start(tmp_path: Path, monkeypatch) -> None:

@@ -1131,3 +1131,65 @@ def test_the_trainer_timeline_args_name_the_hooks() -> None:
     for value in flags.values():
         module, _, name = value.rpartition(".")
         assert module == "cwtrain.integrations.slime" and callable(getattr(slime, name))
+
+
+TRAIN_SCRIPT = """import sys
+from slime.observability.logging_utils import init_tracking
+
+if __name__ == "__main__":
+    init_tracking(sys.argv[1:])
+    sys.modules["wandb"].ran = (__file__, list(sys.argv), sys.path[0])
+"""
+
+
+@pytest.fixture
+def driver(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+    """slime's train.py and its init_tracking, which opens the run's primary writer with W&B on."""
+    from tests.conftest import FakeRun
+
+    wandb = SimpleNamespace(run=None)
+    monkeypatch.setitem(sys.modules, "wandb", wandb)
+    monkeypatch.setattr(tracking, "_bound", set())
+
+    def init_tracking(argv: list[str]) -> None:
+        if "--use-wandb" in argv:
+            wandb.run = FakeRun("primary")
+
+    for name in ("slime", "slime.observability"):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    utils = types.ModuleType("slime.observability.logging_utils")
+    utils.init_tracking = init_tracking  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, utils.__name__, utils)
+    # a None entry makes `import` raise ImportError: this environment has no miles
+    monkeypatch.setitem(sys.modules, "miles.utils.tracking_utils.tracking", None)
+    monkeypatch.setattr(sys, "argv", ["coreweave_train.py"])
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    script = tmp_path / "slime" / "train.py"
+    script.parent.mkdir()
+    script.write_text(TRAIN_SCRIPT)
+    return SimpleNamespace(wandb=wandb, script=script, utils=utils)
+
+
+def test_the_driver_binds_cwtrains_metrics_once_it_opens_the_run(driver) -> None:
+    slime.run_train_script(driver.script, ["--use-wandb", "--num-rollout", "3"])
+
+    # train.py ran as `python3 train.py ARGS...` would run it
+    path, argv, first = driver.wandb.ran
+    assert path == str(driver.script) and first == str(driver.script.parent)
+    assert argv == [path, "--use-wandb", "--num-rollout", "3"]
+    assert driver.wandb.run.defined == [
+        ("coreweave/*", "rollout/step"),
+        ("hotload/*", "rollout/step"),
+        ("timeline/*", "rollout/step"),
+    ]
+
+
+def test_the_driver_runs_train_py_without_wandb_or_init_tracking(driver, caplog) -> None:
+    slime.run_train_script(driver.script, [])
+    assert driver.wandb.run is None and driver.wandb.ran[1] == [str(driver.script)]
+
+    del driver.utils.init_tracking
+    driver.script.write_text("import sys\nsys.modules['wandb'].ran = 'again'\n")
+    with caplog.at_level(logging.WARNING, logger="cwtrain.integrations.slime"):
+        slime.run_train_script(driver.script, [])
+    assert driver.wandb.ran == "again" and "has no init_tracking" in caplog.text

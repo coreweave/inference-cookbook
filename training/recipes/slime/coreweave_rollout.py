@@ -87,8 +87,6 @@ async def _generate(
     metrics.update(tracking.span("reward", scored, time.time()))
     metrics[tracking.TIMELINE_STEP] = float(rollout_id)
     metrics["coreweave/rollout_id"] = float(rollout_id)
-    # slime binds rollout/* and perf/* to rollout/step; these join them in its W&B run, if any
-    tracking.bind(("coreweave/", "timeline/"), step_metric="rollout/step")
     log.info("rollout %d: %s", rollout_id, metrics)
     # every timeline key, so that a query for all of them gets this row (tracking.timeline_row)
     return RolloutFnTrainOutput(samples=groups, metrics=tracking.timeline_row(metrics))

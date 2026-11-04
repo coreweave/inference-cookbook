@@ -103,6 +103,7 @@ import json
 import logging
 import os
 import re
+import runpy
 import shutil
 import sys
 import time
@@ -751,6 +752,49 @@ def join_run(args: Any) -> None:
             return
 
 
+#: What cwtrain logs into slime's and miles' W&B run, each plotted against ``rollout/step``.
+STEP_PREFIXES = ("coreweave/", "hotload/", "timeline/")
+
+#: Where slime's and miles' train scripts take ``init_tracking`` from, which opens the run's
+#: primary W&B writer in the driver.
+_TRACKING_MODULES = ("slime.observability.logging_utils", "miles.utils.tracking_utils.tracking")
+
+
+def run_train_script(script: str | os.PathLike[str], argv: Sequence[str]) -> None:
+    """Run slime's or miles' ``script`` with ``argv``, as ``python3 script ARGV...`` would.
+
+    W&B keeps the metric definitions of a shared-mode run's primary writer only: the driver,
+    which runs ``script``. The hook and the rollout function log from secondary writers in Ray
+    actors, so the bindings they make are lost, and their metrics plot against W&B's own step,
+    one per logged row. This binds :data:`STEP_PREFIXES` to ``rollout/step`` in the driver, once
+    the framework's ``init_tracking`` has opened the run.
+    """
+    for name in _TRACKING_MODULES:
+        try:
+            module = importlib.import_module(name)
+        except ImportError:  # the other framework
+            continue
+        init_tracking = getattr(module, "init_tracking", None)
+        if callable(init_tracking):
+            module.init_tracking = _bind_after(init_tracking)  # type: ignore[attr-defined]
+        else:
+            log.warning("%s has no init_tracking: cwtrain's W&B metrics keep W&B's step", name)
+    path = os.path.abspath(script)
+    sys.argv = [path, *argv]
+    sys.path.insert(0, os.path.dirname(path))
+    runpy.run_path(path, run_name="__main__")
+
+
+def _bind_after(init_tracking: Any) -> Any:
+    @functools.wraps(init_tracking)
+    def bound(*a: Any, **kw: Any) -> Any:
+        out = init_tracking(*a, **kw)
+        tracking.bind(STEP_PREFIXES, step_metric="rollout/step")
+        return out
+
+    return bound
+
+
 #: When the training since the last logged span started its phases, from the trainer-phase hooks.
 _trainer_marks: dict[str, float] = {}
 
@@ -897,6 +941,7 @@ def reset() -> None:
 
 
 __all__ = [
+    "STEP_PREFIXES",
     "TRAINER_TIMELINE_ARGS",
     "HookConfig",
     "HotLoad",
@@ -910,4 +955,5 @@ __all__ = [
     "record_settings",
     "reset",
     "rollout_step",
+    "run_train_script",
 ]

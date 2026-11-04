@@ -24,7 +24,9 @@ WORK=${WORK:-/work}
 
 echo "== install cwtrain + launcher"
 pip install --quiet --no-cache-dir /opt/cwtrain/cwtrain-*.whl "huggingface_hub[cli]"
-mkdir -p $WORK/py && cp /opt/cwtrain/coreweave_rollout.py /opt/cwtrain/run_hotload.py $WORK/py/
+mkdir -p $WORK/py
+cp /opt/cwtrain/coreweave_rollout.py /opt/cwtrain/coreweave_train.py /opt/cwtrain/run_hotload.py \
+  $WORK/py/
 
 echo "== check snapshot access"
 # Stop now, not at the first snapshot, if the trainer's credentials cannot list, read and write
