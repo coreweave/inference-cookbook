@@ -18,7 +18,7 @@ from cwtrain.dashboard import cli as dashboard_cli
 SETUP = ["dashboard", "setup", "--entity", "team", "--project", "project", "--framework", "miles"]
 
 
-def test_offline_dry_run_needs_neither_optional_sdk_nor_inference_credentials(
+def test_offline_dry_run_needs_neither_sdk_imports_nor_inference_credentials(
     monkeypatch, capsys, tmp_path
 ):
     real_import = builtins.__import__
@@ -147,7 +147,7 @@ def test_discovery_bounds_nonmatching_candidates_and_stops_before_creating_a_vie
     save.assert_not_called()
 
 
-def test_missing_dashboard_extra_has_actionable_error(monkeypatch, capsys):
+def test_incomplete_installation_has_actionable_error(monkeypatch, capsys):
     real_import = builtins.__import__
 
     def without_wandb(name, *args, **kwargs):
@@ -158,7 +158,7 @@ def test_missing_dashboard_extra_has_actionable_error(monkeypatch, capsys):
     monkeypatch.setattr(builtins, "__import__", without_wandb)
     assert cli.main(SETUP) == 1
     output = capsys.readouterr()
-    assert "pip install 'cwtrain[dashboard]'" in output.err and output.out == ""
+    assert "pip install --upgrade cwtrain" in output.err and output.out == ""
 
 
 def test_wandb_failure_does_not_print_request_details(wandb_api, capsys):

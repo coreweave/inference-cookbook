@@ -53,7 +53,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
             sdk_errors = (SpecVersionError, UnsupportedViewError)
     except ImportError as exc:
-        raise CWTrainError("install the dashboard extra: pip install 'cwtrain[dashboard]'") from exc
+        raise CWTrainError(
+            "cwtrain installation is incomplete; reinstall with: pip install --upgrade cwtrain"
+        ) from exc
     try:
         api = wandb.Api(timeout=30)
         if args.cmd == "timeline":

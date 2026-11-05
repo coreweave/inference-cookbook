@@ -310,14 +310,12 @@ dependencies = [
     { name = "boto3" },
     { name = "httpx" },
     { name = "numpy" },
+    { name = "wandb" },
+    { name = "wandb-workspaces" },
     { name = "zstandard" },
 ]
 
 [package.optional-dependencies]
-dashboard = [
-    { name = "wandb" },
-    { name = "wandb-workspaces" },
-]
 dev = [
     { name = "pytest" },
     { name = "ruff" },
@@ -336,11 +334,11 @@ requires-dist = [
     { name = "numpy", specifier = ">=1.24" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
-    { name = "wandb", marker = "extra == 'dashboard'", specifier = ">=0.28.2,<0.32" },
-    { name = "wandb-workspaces", marker = "extra == 'dashboard'", specifier = ">=0.4.13,<0.5" },
+    { name = "wandb", specifier = ">=0.28.2,<0.32" },
+    { name = "wandb-workspaces", specifier = ">=0.4.13,<0.5" },
     { name = "zstandard", specifier = ">=0.21" },
 ]
-provides-extras = ["dashboard", "dev"]
+provides-extras = ["dev"]
 
 [package.metadata.requires-dev]
 nemo-rl-tests = [

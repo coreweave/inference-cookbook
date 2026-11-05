@@ -116,7 +116,7 @@ jobs:
         # A CPU build of torch lets the NeMo-RL integration tests run instead of being skipped.
         run: |
           uv pip install torch --index-url https://download.pytorch.org/whl/cpu
-          uv pip install -e '.[dev,dashboard]' --group nemo-rl-tests
+          uv pip install -e '.[dev]' --group nemo-rl-tests
       - name: Lint
         run: |
           ruff check .

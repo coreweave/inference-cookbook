@@ -6,15 +6,14 @@ telemetry. `cwtrain dashboard timeline` separately exports one run's phase timel
 
 ## Install and authenticate
 
-Until a release includes the dashboard commands, install from a checkout containing this feature.
-From the repository root:
+The dashboard commands are planned for the next release; they are not included in
+`cwtrain 1.0.2`. Once released, install or upgrade the standard package:
 
 ```bash
-python -m pip install './libs/cwtrain[dashboard]'
+python -m pip install --upgrade cwtrain
 ```
 
-For a released version containing the feature, the package form is
-`python -m pip install 'cwtrain[dashboard]'`.
+The package includes the dashboard CLI and its W&B dependencies.
 
 Authenticate with `wandb login` or supply `WANDB_API_KEY` in your environment. Set `WANDB_BASE_URL`
 when using your organization's W&B deployment instead of the default cloud endpoint. These

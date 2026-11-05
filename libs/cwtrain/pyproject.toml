@@ -40,6 +40,9 @@ dependencies = [
     # Core: every recipe uses delta encoding (WeightMirror, write_delta).
     "numpy>=1.24",
     "zstandard>=0.21",
+    # The dashboard CLI is included in the standard installation.
+    "wandb>=0.28.2,<0.32",
+    "wandb-workspaces>=0.4.13,<0.5",
 ]
 
 [project.urls]
@@ -50,10 +53,6 @@ Issues = "https://github.com/coreweave/inference-cookbook/issues"
 Changelog = "https://github.com/coreweave/inference-cookbook/blob/main/libs/cwtrain/CHANGELOG.md"
 
 [project.optional-dependencies]
-dashboard = [
-    "wandb>=0.28.2,<0.32",
-    "wandb-workspaces>=0.4.13,<0.5",
-]
 dev = [
     "pytest>=8",
     "ruff>=0.6",

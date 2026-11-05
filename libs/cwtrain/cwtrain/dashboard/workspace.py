@@ -72,12 +72,14 @@ def definition(
 
 
 def build_workspace(entity: str, project: str, plan: dict[str, Any]) -> Any:
-    """Load optional dependencies only when constructing a native workspace."""
+    """Load W&B dependencies only when constructing a native workspace."""
     try:
         import wandb_workspaces.reports.v2 as wr
         import wandb_workspaces.workspaces as ws
     except ImportError as exc:
-        raise CWTrainError("install the dashboard extra: pip install 'cwtrain[dashboard]'") from exc
+        raise CWTrainError(
+            "cwtrain installation is incomplete; reinstall with: pip install --upgrade cwtrain"
+        ) from exc
 
     sections = {}
     for panel in plan["panels"]:

@@ -17,8 +17,8 @@ inference engines. The library covers each part of the loop:
 - **Rollouts and frameworks** (`cwtrain.integrations`): a rollout sampler for the deployment's
   OpenAI-compatible endpoint, the post-write hook for slime and miles, and the generation backend,
   weight synchronizer and policy-worker extension for NeMo-RL.
-- **W&B dashboards** (`cwtrain dashboard ...`): managed post-training workspace views and a local
-  phase-timeline export. See [Post-training dashboards](docs/dashboards.md).
+- **W&B dashboards** (`cwtrain dashboard ...`, pending release): managed post-training workspace
+  views and a local phase-timeline export. See [Post-training dashboards](docs/dashboards.md).
 
 The [CoreWeave Inference Cookbook](https://github.com/coreweave/inference-cookbook) has the recipes
 that use `cwtrain` with miles, slime, NeMo-RL and Axolotl, and examples that run them end to end.
@@ -26,7 +26,7 @@ that use `cwtrain` with miles, slime, NeMo-RL and Axolotl, and examples that run
 ## Install
 
 ```bash
-pip install cwtrain
+python -m pip install --upgrade cwtrain
 ```
 
 This also installs the `cwtrain` CLI. The framework integrations need no extras: install
@@ -130,10 +130,11 @@ The deployment holds its GPUs until you delete it. `cwtrain --help` lists the co
 
 ## W&B dashboards
 
-Install the dashboard extra from this repository until a release includes the commands:
+The dashboard commands are planned for the next release and are not included in
+`cwtrain 1.0.2`. Once released, the standard package includes them and their W&B dependencies:
 
 ```bash
-python -m pip install './libs/cwtrain[dashboard]'  # from the repository root
+python -m pip install --upgrade cwtrain
 cwtrain dashboard setup --entity ENTITY --project PROJECT --framework miles --dry-run
 ```
 
