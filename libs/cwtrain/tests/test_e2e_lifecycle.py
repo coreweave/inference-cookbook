@@ -20,16 +20,6 @@ STATE = {
 }
 
 
-MX_REFIT_KNOBS = (
-    "MX_REFIT_DELTA_SURGICAL",
-    "MX_REFIT_FULL_STREAMING",
-    "MX_REFIT_INPLACE",
-    "MX_REFIT_PREFER_PREPARED",
-    "MX_REFIT_PREFETCH",
-    "MX_REFIT_PREFETCH_S3_WATCH",
-)
-
-
 @pytest.fixture(autouse=True)
 def configure_bucket(monkeypatch):
     monkeypatch.setenv("CWTRAIN_E2E_BUCKET", STATE["bucket"])
@@ -161,7 +151,6 @@ def test_state_saved_before_provisioning(monkeypatch, tmp_path, zone_input):
         assert spec["hotLoad"]["bucket"] == state["bucket"]
         assert zone == "US-WEST-04A"
         assert spec["runtime"]["version"] == hotload.DEFAULT_RUNTIME_VERSION
-        assert spec["runtime"]["engineEnv"] == dict.fromkeys(MX_REFIT_KNOBS, "true")
         raise RuntimeError("create response lost")
 
     monkeypatch.delenv("CWTRAIN_E2E_RUNTIME_VERSION", raising=False)
@@ -174,37 +163,6 @@ def test_state_saved_before_provisioning(monkeypatch, tmp_path, zone_input):
         hotload.main()
     with pytest.raises(FileExistsError):
         hotload.main()
-
-
-def test_deployment_engine_env_overrides_refit_knobs(monkeypatch, tmp_path):
-    import json
-
-    monkeypatch.setattr("sys.argv", ["hotload", "--state", str(tmp_path / "state.json")])
-    monkeypatch.setenv("COREWEAVE_API_TOKEN", "test")
-    monkeypatch.setenv(
-        "CWTRAIN_E2E_DEPLOYMENT_JSON",
-        json.dumps(
-            {
-                "runtime": {
-                    "engine": "dynamo-vllm",
-                    "engineEnv": {"MX_REFIT_PREFETCH": "false", "STOP_TOKEN": "<s>"},
-                },
-                "resources": {"gpuCount": 1},
-                "autoscaling": {"min": 1},
-                "traffic": {"weight": 100},
-            }
-        ),
-    )
-    sent = {}
-    monkeypatch.setattr(
-        hotload, "run_resources", lambda client, state, spec, zone: sent.update(spec)
-    )
-    hotload.main()
-    assert sent["runtime"]["engineEnv"] == {
-        **dict.fromkeys(MX_REFIT_KNOBS, "true"),
-        "MX_REFIT_PREFETCH": "false",
-        "STOP_TOKEN": "<s>",
-    }
 
 
 def test_cleanup_only_without_state_needs_no_credentials(monkeypatch, tmp_path):

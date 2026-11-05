@@ -5,6 +5,11 @@ GitHub. Versions follow [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+- **Hot-load deployments:** `cwtrain deployment create` and `InferenceClient.create_deployment`
+  require `dynamo-vllm` `0.32.0+crwv.5` or later for a deployment with a `hotLoad` section, and use
+  it when `runtime.version` is unset. They turn on the six ModelExpress refit options
+  (`MX_REFIT_*`) in `runtime.engineEnv` unless the request sets them. An older version is refused
+  before any request is sent.
 - **W&B metrics:** when the trainer logs to W&B, cwtrain writes into the trainer's run. It
   records each hot-load's timings, from the platform and per replica, and the rollouts' request
   latency, retries and throughput. It fills the prefix-cache counts that slime's and miles' hit
