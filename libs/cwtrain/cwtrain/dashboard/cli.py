@@ -26,7 +26,7 @@ def add_parser(subparsers: Any) -> None:
     commands = subparsers.add_parser(
         "dashboard", help="native W&B post-training views"
     ).add_subparsers(dest="cmd", required=True)
-    setup = commands.add_parser("setup", help="create or refresh a managed W&B saved view")
+    setup = commands.add_parser("setup", help="create or reuse a managed W&B saved view")
     setup.add_argument("--entity", required=True)
     setup.add_argument("--project", required=True)
     setup.add_argument("--framework", choices=SUPPORTED_FRAMEWORKS, required=True)
@@ -102,7 +102,26 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             for row in source.history(stream="system", samples=20, pandas=False):
                 systems.update(row)
         plan = definition(args.framework, metric_keys=metrics, system_keys=systems)
-        plan["included_runs"] = [source.id for source in runs]
+        discovered_ids = {source.id for source in runs}
+        indexed_ids = {
+            source.id
+            for source in itertools.islice(
+                api.runs(
+                    f"{args.entity}/{args.project}",
+                    filters={
+                        "jobType": "train",
+                        "tags": {"$in": [args.framework]},
+                        "name": {"$in": sorted(discovered_ids)},
+                    },
+                    order="-created_at",
+                    per_page=10,
+                ),
+                len(discovered_ids),
+            )
+        }
+        # Tagged runs are already covered by the native filter. Only index misses
+        # need explicit IDs; ordinary new runs must not change the view definition.
+        plan["included_runs"] = sorted(discovered_ids - indexed_ids)
         workspace = build_workspace(args.entity, args.project, plan)
         result = save_managed(
             workspace,

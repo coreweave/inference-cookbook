@@ -44,6 +44,10 @@ the recipes' default framework tags and job type: runs with those values overrid
 match this selection. The command prints the URL of the resulting managed view, such as
 **Post-training — Miles**.
 
+The native filter includes the framework tag plus explicit IDs only for discovered runs missing
+from W&B's tag index. Ordinary new tagged runs are included automatically. If a new run needs an
+explicit ID not already installed in the view, setup stops instead of silently leaving it out.
+
 Run setup for each framework you want to inspect. The views retain each framework's metric names
 and step axes; they do not combine unlike losses or rewards into a cross-framework ranking.
 
@@ -57,13 +61,17 @@ cwtrain dashboard setup --entity ENTITY --project PROJECT --framework miles \
   --state-file ./dashboard-state.json
 ```
 
-Reuse the same state file for subsequent runs. Setup checks the managed view against its saved
-fingerprint and refuses to overwrite a view that has been edited since it was saved. Clone the
-managed view in W&B for personal customization and leave the managed copy for setup to maintain.
-Keep the state file when moving this workflow to another machine.
+Reuse the same state file for subsequent runs. An unchanged definition reuses the saved URL
+without writing to W&B. Setup stops if it detects edits to the recorded view or if the generated
+definition changes. Keep the state file when moving this workflow to another machine.
+
+The supported W&B workspace SDK does not expose or preserve all native UI settings. Setup
+therefore never replaces an existing saved view, even when the SDK-visible fingerprint is
+unchanged. Edit an existing view directly in W&B. To deliberately create another view, use a
+different state file and retain the original view and state.
 
 If a save fails with an unknown outcome, setup keeps a pending record and stops subsequent
-attempts. The server may already have created or updated the view even if its response was lost.
+attempts. The server may already have created the view even if its response was lost.
 Inspect W&B and the recorded state before recovering; keep the state file and do not switch to a
 different one to retry, since that can create a duplicate view.
 

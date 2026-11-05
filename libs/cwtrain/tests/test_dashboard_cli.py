@@ -8,7 +8,7 @@ import builtins
 import json
 import sys
 from types import ModuleType, SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, call
 
 import pytest
 
@@ -83,7 +83,7 @@ def test_setup_discovers_at_most_ten_matching_runs_and_forwards_only_available_k
         yield from sources
         pytest.fail("setup consumed more than ten runs")
 
-    api.runs.return_value = bounded_runs()
+    api.runs.side_effect = [bounded_runs(), sources[1:]]
     workspace = object()
     build = Mock(return_value=workspace)
     save = Mock(
@@ -97,12 +97,19 @@ def test_setup_discovers_at_most_ten_matching_runs_and_forwards_only_available_k
     state = tmp_path / "dashboards.json"
     assert cli.main([*SETUP, "--state-file", str(state)]) == 0
     module.Api.assert_called_once_with(timeout=30)
-    api.runs.assert_called_once_with(
-        "team/project",
-        filters={"jobType": "train"},
-        order="-created_at",
-        per_page=50,
-    )
+    assert api.runs.call_args_list == [
+        call("team/project", filters={"jobType": "train"}, order="-created_at", per_page=50),
+        call(
+            "team/project",
+            filters={
+                "jobType": "train",
+                "tags": {"$in": ["miles"]},
+                "name": {"$in": sorted(source.id for source in sources)},
+            },
+            order="-created_at",
+            per_page=10,
+        ),
+    ]
     for source in sources:
         source.history.assert_called_once_with(stream="system", samples=20, pandas=False)
     entity, project, plan = build.call_args.args
@@ -112,7 +119,7 @@ def test_setup_discovers_at_most_ten_matching_runs_and_forwards_only_available_k
         "train/pg_clipfrac",
     }
     assert any(panel.get("metric_regex") for panel in plan["panels"])
-    assert plan["included_runs"] == [source.id for source in sources]
+    assert plan["included_runs"] == [sources[0].id]
     save.assert_called_once_with(
         workspace,
         plan,

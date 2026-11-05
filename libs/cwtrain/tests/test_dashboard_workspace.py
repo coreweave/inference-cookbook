@@ -159,7 +159,7 @@ def managed(tmp_path):
     return plan, options
 
 
-def test_creation_rerun_and_spec_update_keep_one_managed_view(managed):
+def test_creation_and_unchanged_rerun_keep_one_managed_view_but_spec_update_stops(managed):
     plan, options = managed
     created = save_managed(RemoteWorkspace(), plan, **options)
     assert created["action"] == "created"
@@ -174,11 +174,75 @@ def test_creation_rerun_and_spec_update_keep_one_managed_view(managed):
 
     revised = {**plan, "spec_version": plan["spec_version"] + 1}
     desired = RemoteWorkspace(sections=["new panel"], settings={"smoothing": 0, "limit": 5})
-    updated = save_managed(desired, revised, **options)
-    assert updated["action"] == "updated" and updated["url"] == created["url"]
-    assert len(RemoteWorkspace.remote) == 1 and len(RemoteWorkspace.saves) == 2
-    assert RemoteWorkspace.remote[created["url"]].sections == ["new panel"]
-    assert RemoteWorkspace.remote[created["url"]].settings == desired.settings
+    with pytest.raises(CWTrainError, match="cannot preserve all native UI settings"):
+        save_managed(desired, revised, **options)
+    assert len(RemoteWorkspace.remote) == 1 and len(RemoteWorkspace.saves) == 1
+    assert RemoteWorkspace.remote[created["url"]].sections == ["original panels"]
+    assert RemoteWorkspace.remote[created["url"]].settings == {"smoothing": 0}
+    assert options["path"].read_bytes() == original_state
+
+
+def test_native_settings_discarded_by_sdk_cannot_be_silently_overwritten(managed, monkeypatch):
+    ws = pytest.importorskip("wandb_workspaces.workspaces")
+    plan, options = managed
+    created = save_managed(RemoteWorkspace(), plan, **options)
+    desired = build_workspace("team", "project", plan)
+    raw = desired._to_model()
+    raw.spec.section.workspace_settings = {
+        "shouldAutoGeneratePanels": False,
+        "futureNativeSetting": {"enabled": False},
+    }
+    before = ws.Workspace._from_model(raw)
+    raw.spec.section.workspace_settings["futureNativeSetting"]["enabled"] = True
+    after = ws.Workspace._from_model(raw)
+    # A real SDK load discards these settings; a dataclass fingerprint alone
+    # cannot establish that replacing the saved view would be safe.
+    assert after._to_model().spec.section.workspace_settings is None
+    assert fingerprint(before) == fingerprint(after)
+    state = json.loads(options["path"].read_text())
+    next(iter(state["views"].values()))["remote_hash"] = fingerprint(before)
+    options["path"].write_text(json.dumps(state))
+    original_state = options["path"].read_bytes()
+    monkeypatch.setattr(ws.Workspace, "from_url", classmethod(lambda cls, url: after))
+    monkeypatch.setattr(ws.Workspace, "save", lambda self: pytest.fail("rewrote the saved view"))
+    assert save_managed(desired, plan, **options)["url"] == created["url"]
+    with pytest.raises(CWTrainError, match="cannot preserve all native UI settings"):
+        save_managed(desired, {**plan, "spec_version": 2}, **options)
+    assert options["path"].read_bytes() == original_state
+
+
+def test_new_indexed_runs_and_recovered_fallbacks_reuse_without_writing(managed):
+    plan, options = managed
+    plan = {**plan, "included_runs": ["index-miss"]}
+    created = save_managed(RemoteWorkspace(), plan, **options)
+    before = options["path"].read_bytes()
+    # A new tagged run is handled by the native tag filter. The previous index
+    # miss may also disappear from the discovered cohort or become indexed.
+    refreshed = {**plan, "included_runs": []}
+    result = save_managed(RemoteWorkspace(), refreshed, **options)
+    assert result["action"] == "unchanged" and result["url"] == created["url"]
+    assert options["path"].read_bytes() == before
+    assert len(RemoteWorkspace.saves) == 1
+    # Ignoring ID changes indiscriminately would hide this new required run.
+    with pytest.raises(CWTrainError, match="dashboard definition changed"):
+        save_managed(RemoteWorkspace(), {**plan, "included_runs": ["new-index-miss"]}, **options)
+    assert options["path"].read_bytes() == before and len(RemoteWorkspace.saves) == 1
+
+
+def test_legacy_state_without_fallback_coverage_stays_fail_closed(managed):
+    plan, options = managed
+    plan = {**plan, "included_runs": ["index-miss"]}
+    save_managed(RemoteWorkspace(), plan, **options)
+    state = json.loads(options["path"].read_text())
+    record = next(iter(state["views"].values()))
+    del record["template_hash"]
+    del record["included_runs"]
+    options["path"].write_text(json.dumps(state))
+    before = options["path"].read_bytes()
+    assert save_managed(RemoteWorkspace(), plan, **options)["action"] == "unchanged"
+    with pytest.raises(CWTrainError, match="dashboard definition changed"):
+        save_managed(RemoteWorkspace(), {**plan, "included_runs": []}, **options)
+    assert options["path"].read_bytes() == before and len(RemoteWorkspace.saves) == 1
 
 
 @pytest.mark.parametrize("change", ["name", "sections", "stashed"])
@@ -252,20 +316,16 @@ def test_unknown_sdk_panel_config_is_fingerprinted_and_blocks_overwrite(managed)
     assert len(RemoteWorkspace.saves) == 1
 
 
-@pytest.mark.parametrize("existing", [False, True])
-def test_ambiguous_committed_save_blocks_retry_without_creating_a_duplicate(
-    managed, monkeypatch, existing
+def test_ambiguous_committed_creation_blocks_retry_without_creating_a_duplicate(
+    managed, monkeypatch
 ):
     plan, options = managed
-    if existing:
-        save_managed(RemoteWorkspace(), plan, **options)
-        plan = {**plan, "spec_version": 2}
     original_save = RemoteWorkspace.save
 
     def committed_but_response_lost(workspace):
         record = next(iter(json.loads(options["path"].read_text())["views"].values()))
         assert record["pending"] is True
-        assert bool(record["previous"]) is existing
+        assert record["previous"] is None
         original_save(workspace)
         raise TimeoutError("response lost after server commit")
 

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-PackageName: inference-cookbook
 
-"""Build native W&B views and safely maintain only a recorded managed view."""
+"""Build native W&B views and reuse recorded views without replacing UI settings."""
 
 from __future__ import annotations
 
@@ -214,11 +214,21 @@ def save_managed(
     username: str,
     app_url: str,
 ) -> dict[str, Any]:
-    """Reuse a saved URL, reject drift, and never overwrite a personal/default view."""
+    """Create a view or reuse its URL; existing views are never rewritten.
+
+    The supported workspace SDK does not expose or preserve every modern UI
+    setting. Its loaded dataclass therefore cannot prove that a replacement would
+    retain native settings. A changed plan fails closed until a lossless public
+    API is available; an unchanged rerun performs reads only.
+    """
     scope = fingerprint(
         [api_host.rstrip("/"), username, workspace.entity, workspace.project, plan["framework"]]
     )
     plan_hash = fingerprint(plan)
+    template_hash = fingerprint(
+        {key: value for key, value in plan.items() if key != "included_runs"}
+    )
+    required_fallbacks = set(plan.get("included_runs", ()))
     with state_file(path) as state:
         record = state["views"].get(scope)
         action = "created"
@@ -236,13 +246,17 @@ def save_managed(
                     f"leaving it unchanged: {url}. "
                     "Use a separate --state-file to create a new managed view; keep the original."
                 )
-            if record.get("plan_hash") == plan_hash:
+            if record.get("plan_hash") == plan_hash or (
+                record.get("template_hash") == template_hash
+                and required_fallbacks.issubset(record.get("included_runs", ()))
+            ):
                 return {"url": url, "action": "unchanged", "state_file": str(path)}
-            current.sections = workspace.sections
-            current.settings = workspace.settings
-            current.runset_settings = workspace.runset_settings
-            workspace = current
-            action = "updated"
+            raise CWTrainError(
+                "dashboard definition changed, but the W&B workspace SDK cannot preserve all "
+                f"native UI settings when replacing a saved view; leaving it unchanged: {url}. "
+                "Edit the existing view in W&B, or deliberately create a separate view with "
+                "a different --state-file."
+            )
         # A server may commit a creation even if its response is lost. Record intent
         # first and fail closed on the next invocation rather than creating a duplicate.
         state["views"][scope] = {"pending": True, "previous": record}
@@ -250,7 +264,13 @@ def save_managed(
         workspace.save()
         # Persist the URL before reloading. A failed verification must not create another view.
         url = workspace.url
-        record = {"url": url, "plan_hash": plan_hash, "remote_hash": None}
+        record = {
+            "url": url,
+            "plan_hash": plan_hash,
+            "template_hash": template_hash,
+            "included_runs": sorted(required_fallbacks),
+            "remote_hash": None,
+        }
         state["views"][scope] = record
         write_state(path, state)
         url = _managed_url(url, workspace.entity, workspace.project, app_url)
