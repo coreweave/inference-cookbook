@@ -230,25 +230,42 @@ def main(argv: list[str] | None = None, rows: list[dict[str, Any]] | None = None
     parser.add_argument("--seed", type=int, default=0, help="the --sample seed (default: 0)")
     parser.add_argument("--max-samples", type=int, help="first N questions (default: all)")
     parser.add_argument("--output", type=Path, default=OUTPUT)
+    parser.add_argument(
+        "--holdout", type=int, help="with --sample: N more questions, none of them in --output"
+    )
+    parser.add_argument(
+        "--holdout-output",
+        type=Path,
+        help="where --holdout writes (default: holdout.jsonl beside --output)",
+    )
     args = parser.parse_args(argv)
-    for name in ("sample", "max_samples"):
+    for name in ("sample", "max_samples", "holdout"):
         value = getattr(args, name)
         if value is not None and value <= 0:
             parser.error(f"--{name.replace('_', '-')} must be positive")
     if args.sample is not None and args.max_samples is not None:
         parser.error("--sample and --max-samples are alternatives")
+    if args.holdout is not None and args.sample is None:
+        parser.error("--holdout needs --sample")
     if args.dataset == "asearcher":
         candidates = list(asearcher_rows(rows if rows is not None else download_asearcher()))
     else:
         candidates = rows if rows is not None else download(args.dataset)
+    held_out: list[Mapping[str, Any]] = []
     if args.sample is not None:
-        if args.sample > len(candidates):
-            parser.error(f"--sample {args.sample} is more than the {len(candidates)} questions")
-        selected = random.Random(args.seed).sample(candidates, args.sample)
+        wanted = args.sample + (args.holdout or 0)
+        if wanted > len(candidates):
+            parser.error(f"--sample and --holdout want {wanted} of the {len(candidates)} questions")
+        selected = random.Random(args.seed).sample(candidates, wanted)
+        selected, held_out = selected[: args.sample], selected[args.sample :]
     else:
         selected = list(islice(candidates, args.max_samples))
     count = write((row_example(args.dataset, row) for row in selected), args.output)
     print(f"wrote {count} {args.dataset} questions to {args.output}")
+    if args.holdout:
+        path = args.holdout_output or args.output.with_name("holdout.jsonl")
+        count = write((row_example(args.dataset, row) for row in held_out), path)
+        print(f"wrote {count} held-out {args.dataset} questions to {path}")
 
 
 if __name__ == "__main__":

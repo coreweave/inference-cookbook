@@ -301,6 +301,27 @@ def test_the_data_script_samples_at_random_with_a_seed(tmp_path) -> None:
         answers("--sample", "2", "--max-samples", "2")
 
 
+def test_the_data_script_holds_out_questions_it_does_not_train_on(tmp_path) -> None:
+    prepare = load_prepare()
+    rows = [{"question": f"Q{n}?", "answer": [str(n)], "source": "opensource"} for n in range(100)]
+    output = tmp_path / "search.jsonl"
+
+    def answers(path: Path) -> list[str]:
+        return [json.loads(line)["ground_truth"] for line in path.read_text().splitlines()]
+
+    prepare.main(["--output", str(output), "--sample", "30", "--holdout", "20"], rows=rows)
+    train, held_out = answers(output), answers(tmp_path / "holdout.jsonl")
+    assert len(train) == 30 and len(held_out) == 20 and not set(train) & set(held_out)
+    other = tmp_path / "val.jsonl"
+    argv = ["--output", str(output), "--sample", "30", "--holdout", "20"]
+    prepare.main([*argv, "--holdout-output", str(other)], rows=rows)
+    assert answers(other) == held_out  # the seed fixes both
+    with pytest.raises(SystemExit):
+        prepare.main(["--output", str(output), "--holdout", "20"], rows=rows)  # needs --sample
+    with pytest.raises(SystemExit):
+        prepare.main(["--output", str(output), "--sample", "90", "--holdout", "20"], rows=rows)
+
+
 def test_the_data_script_keeps_asearcher_questions_with_one_open_answer(tmp_path) -> None:
     prepare = load_prepare()
 

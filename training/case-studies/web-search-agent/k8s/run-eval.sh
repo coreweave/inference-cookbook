@@ -74,7 +74,8 @@ import json, sys
 rows = [json.loads(line) for line in open(sys.argv[1])]
 for row in rows:
     calls = sum(item.get("type") == "function_call" for item in row["response"]["output"])
-    print(f"reward={row.get('reward')} tool_calls={calls}")
+    # The task's index in the benchmark's input, so that runs compare task by task.
+    print(f"task={row.get('_ng_task_index')} reward={row.get('reward')} tool_calls={calls}")
 rewards = [row.get("reward") or 0 for row in rows]
 print(f"tasks={len(rows)} mean_reward={sum(rewards) / max(len(rows), 1):.3f}")
 PY
