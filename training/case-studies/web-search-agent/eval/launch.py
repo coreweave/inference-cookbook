@@ -8,7 +8,7 @@ shared settings.
 It creates no inference resources: Gym runs on CPU and sends every request to the existing
 hot-load deployment that ``CWTRAIN_ROLLOUT_BASE_URL`` names. ``--benchmark`` picks the evaluation
 (BrowseComp by default), ``--model`` the deployment's served model (Nemotron 3.5 Lightning, as
-``nemotron-lightning-hotload``), and ``--judge-model`` / ``--judge-base-url`` the LLM judge (GLM-5.2
+``nemotron-lightning-hotload``), and ``--judge-model`` / ``--judge-base-url`` the LLM judge (GLM-5.3
 on W&B Inference by default). BrowseComp's search and browse tools use You.com.
 """
 
@@ -45,7 +45,7 @@ DEFAULT_MAX_CONTEXT_TOKENS = 32768
 DEFAULT_MAX_STEPS = 50
 # Generated tokens per BrowseComp turn (browsecomp.yaml's max_tokens).
 TURN_TOKENS = 4096
-DEFAULT_JUDGE_MODEL = "zai-org/GLM-5.2"
+DEFAULT_JUDGE_MODEL = "zai-org/GLM-5.3"
 DEFAULT_JUDGE_BASE_URL = "https://api.inference.wandb.ai/v1"
 
 

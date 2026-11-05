@@ -74,7 +74,7 @@ def test_browsecomp_is_the_default_with_glm_judge_and_nemotron_target():
     assert env["CWTRAIN_MAX_CONTEXT_TOKENS"] == "32768"
     assert env["CWTRAIN_CONTEXT_RESET_TOKENS"] == "16384"
     assert env["CWTRAIN_MAX_STEPS"] == "50"  # bounds each task, not Gym's 400
-    assert env["CWTRAIN_JUDGE_MODEL"] == "zai-org/GLM-5.2"
+    assert env["CWTRAIN_JUDGE_MODEL"] == "zai-org/GLM-5.3"
     assert env["CWTRAIN_JUDGE_BASE_URL"] == "https://api.inference.wandb.ai/v1"
     assert env["CWTRAIN_JUDGE_API_KEY"] == "judge-key"
     assert env["CWTRAIN_SEARCH_API_KEY"] == "you-key"
@@ -185,7 +185,7 @@ def test_the_eval_job_runs_on_cpu_and_reuses_the_trainer_secrets():
     for secret in ("INFERENCE_KEY_SECRET", "GYM_SECRET"):
         assert "${" + secret + "}" in job
     example = (K8S / "eval.env.example").read_text()
-    assert "BENCHMARK=browsecomp" in example and "JUDGE_MODEL=zai-org/GLM-5.2" in example
+    assert "BENCHMARK=browsecomp" in example and "JUDGE_MODEL=zai-org/GLM-5.3" in example
     assert "ROLLOUT_MODEL=nemotron-lightning-hotload" in example
 
 
