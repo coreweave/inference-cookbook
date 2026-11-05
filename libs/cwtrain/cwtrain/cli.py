@@ -254,6 +254,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="check that the storage credentials can list, read and write the snapshot prefix",
     )
     p.add_argument("--deployment", required=True)
+    from cwtrain.dashboard.cli import add_parser as add_dashboard_parser
+
+    add_dashboard_parser(sub)
     return parser
 
 
@@ -299,6 +302,11 @@ def _error(message: str, *, verbose: bool) -> int:
 
 
 def _run(args: argparse.Namespace) -> int:
+    if args.group == "dashboard":
+        from cwtrain.dashboard.cli import run as run_dashboard
+
+        _print(run_dashboard(args))
+        return 0
     if args.group == "hotload" and args.cmd == "inspect":
         _print(inspect_snapshot(args.checkpoint, previous_identity=args.previous_identity))
         return 0

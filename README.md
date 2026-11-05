@@ -184,6 +184,8 @@ cwtrain deployment delete <deployment-uuid> --wait
 - With W&B turned on, the recipes log each hot-load's upload and install times, the rollout
   requests' latency, and when each phase of a step ran, next to the trainer's own metrics. Each
   recipe's README says how, under "Watching in W&B".
+  The optional [post-training dashboard commands](libs/cwtrain/docs/dashboards.md) create
+  framework-specific W&B views and export an interactive phase timeline from an existing run.
 
 ## How it works
 
