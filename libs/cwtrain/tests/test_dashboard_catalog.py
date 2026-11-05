@@ -50,6 +50,23 @@ def test_entropy_and_reward_mix_do_not_claim_unavailable_measurements():
     assert miles["train/pg_clipfrac"].unit == "fraction"
 
 
+def test_miles_prioritizes_distinct_update_and_reference_kl_estimates():
+    training = [panel for panel in catalog("miles") if panel.section == "Training"]
+    update, reference = training[:2]
+    assert update.title == "Approximate update KL"
+    assert update.metrics == ("train/ppo_kl",)
+    assert reference.title == "KL to reference policy"
+    assert reference.metrics == ("train/kl_loss",)
+    assert update.x == reference.x == "train/step"
+    assert update.unit == reference.unit == "estimate"
+    assert "Signed" in update.description and "old-policy" in update.description
+    assert "before multiplication by kl_loss_coef" in reference.description
+    assert "only with use_kl_loss" in reference.description
+    mismatch = metric_panels("miles")["train/train_rollout_kl"]
+    assert mismatch.section == "Rollout"
+    assert "not reference-policy KL" in mismatch.description
+
+
 def test_catalog_is_immutable_versioned_and_uses_unscaled_native_values():
     assert SPEC_VERSION == 1
     assert SUPPORTED_FRAMEWORKS == ("miles", "slime", "nemo-rl", "axolotl")

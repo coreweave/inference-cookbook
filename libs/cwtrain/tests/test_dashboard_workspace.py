@@ -34,6 +34,21 @@ def test_discovery_keeps_available_members_and_never_invents_zero_series():
     assert definition("miles", metric_keys=set())["panels"] == []
 
 
+def test_reference_kl_is_present_only_when_logged_and_follows_update_kl():
+    keys = {"train/loss", "train/ppo_kl", "train/train_rollout_kl"}
+    plan = definition("miles", metric_keys=keys)
+    assert plan["panels"][0]["metrics"] == ("train/ppo_kl",)
+    assert "train/kl_loss" in plan["omitted_metrics"]
+    assert not any("train/kl_loss" in panel["metrics"] for panel in plan["panels"])
+
+    plan = definition("miles", metric_keys=keys | {"train/kl_loss"})
+    assert [panel["metrics"] for panel in plan["panels"][:2]] == [
+        ("train/ppo_kl",),
+        ("train/kl_loss",),
+    ]
+    assert "train/kl_loss" not in plan["omitted_metrics"]
+
+
 def test_native_sdk_serializes_axes_filters_order_and_full_fidelity():
     pytest.importorskip("wandb_workspaces.workspaces")
     plan = definition(

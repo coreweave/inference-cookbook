@@ -48,19 +48,22 @@ def _panel(
 
 def _training(framework: Framework) -> tuple[Panel, ...]:
     if framework in ("miles", "slime"):
+        update_kl = _panel(
+            "Training",
+            "Approximate update KL",
+            "train/step",
+            "estimate",
+            "train/ppo_kl",
+            description=(
+                "Signed mean of old-policy minus current-policy log-probabilities; "
+                "distinct from reference-policy KL."
+            ),
+        )
         panels = [
             _panel("Training", "Policy reward", "rollout/step", "reward", "rollout/raw_reward"),
             _panel("Training", "Training loss", "train/step", "loss", "train/loss"),
             _panel("Training", "Gradient norm", "train/step", "norm", "train/grad_norm"),
             _panel("Training", "Learning rate", "train/step", "rate", "train/lr-pg_0"),
-            _panel(
-                "Training",
-                "Approximate update KL",
-                "train/step",
-                "estimate",
-                "train/ppo_kl",
-                description="Signed PPO estimator; distinct from reference-policy KL.",
-            ),
             _panel(
                 "Training",
                 "Clipped fractions",
@@ -84,6 +87,20 @@ def _training(framework: Framework) -> tuple[Panel, ...]:
             ),
         ]
         if framework == "miles":
+            panels[0:0] = [
+                update_kl,
+                _panel(
+                    "Training",
+                    "KL to reference policy",
+                    "train/step",
+                    "estimate",
+                    "train/kl_loss",
+                    description=(
+                        "Sampled current-policy / reference-policy KL estimate before "
+                        "multiplication by kl_loss_coef; computed only with use_kl_loss."
+                    ),
+                ),
+            ]
             panels.extend(
                 (
                     _panel(
@@ -108,6 +125,7 @@ def _training(framework: Framework) -> tuple[Panel, ...]:
             # Miles can log entropy_loss=0 when entropy is not computed. A zero curve
             # would incorrectly suggest a measured policy-entropy collapse.
         else:
+            panels.insert(4, update_kl)
             panels.extend(
                 (
                     _panel(

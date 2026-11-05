@@ -101,6 +101,12 @@ Some distinctions matter when reading a panel:
   questions. NeMo's `train/gen_kl_error` and `train/policy_kl_error` describe the latter. The signed
   `train/ppo_kl` estimate can be negative. Miles' sometimes-uncomputed, zero-valued
   `train/entropy_loss` is omitted rather than presented as measured entropy.
+- **Reference-policy KL:** Miles' Training section puts `train/ppo_kl` first and, when logged,
+  `train/kl_loss` next. The latter is the reference-policy estimate before multiplication by
+  `kl_loss_coef`, not the weighted penalty. Miles computes and logs it only with `use_kl_loss`.
+  The current cookbook launcher leaves that flag disabled and sets `kl_loss_coef=0`, so an
+  absent reference-KL curve is an unavailable measurement, not zero. Dashboard setup does not
+  change training flags or reconstruct missing reference log-probabilities.
 - **Request latency:** the p50, p95, and maximum time successful requests through the whole
   response, including deployment queue time. They do not measure time to first token or all retry
   and backoff time. Retry counts are not failure rates.
