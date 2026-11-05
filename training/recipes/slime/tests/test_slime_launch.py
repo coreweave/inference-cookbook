@@ -93,6 +93,63 @@ def test_truncated_importance_sampling_is_on_unless_turned_off(given, on) -> Non
         launch.SlimeJob.from_env({**BASE, "USE_TIS": "sometimes"})
 
 
+WANDB = {"WANDB_PROJECT": "cookbook", "WANDB_API_KEY": "key", "CWTRAIN_HOTLOAD_RUN_ID": "run-1"}
+
+
+def test_wandb_flags_only_with_a_project_and_never_the_key() -> None:
+    assert "--use-wandb" not in launch.train_args(launch.SlimeJob.from_env(BASE))
+    extra = "--save-interval 50"
+    args = launch.train_args(launch.SlimeJob.from_env({**BASE, **WANDB, "EXTRA_TRAIN_ARGS": extra}))
+    i = args.index("--use-wandb")
+    assert args[i : i + 6] == [
+        "--use-wandb", "--wandb-project", "cookbook",
+        "--wandb-group", "run-1", "--disable-wandb-random-suffix",
+    ]  # fmt: skip
+    assert args[-2:] == ["--save-interval", "50"]  # extras still come last, and win
+    assert "key" not in args and "--wandb-key" not in args
+    team = launch.train_args(launch.SlimeJob.from_env({**BASE, **WANDB, "WANDB_ENTITY": "team"}))
+    assert flag_value(team, "--wandb-team") == "team"
+
+
+def test_wandb_brings_the_trainer_timeline_hooks_and_yours_win() -> None:
+    from cwtrain.integrations.slime import TRAINER_TIMELINE_ARGS
+
+    flag = "--custom-megatron-before-train-step-hook-path"
+    assert flag in TRAINER_TIMELINE_ARGS
+    assert flag not in launch.train_args(launch.SlimeJob.from_env(BASE))
+    args = launch.train_args(launch.SlimeJob.from_env({**BASE, **WANDB}))
+    i = args.index(TRAINER_TIMELINE_ARGS[0])
+    assert args[i : i + len(TRAINER_TIMELINE_ARGS)] == list(TRAINER_TIMELINE_ARGS)
+    # a hook of your own in EXTRA_TRAIN_ARGS comes later, and argparse keeps the last value
+    mine = launch.train_args(
+        launch.SlimeJob.from_env({**BASE, **WANDB, "EXTRA_TRAIN_ARGS": f"{flag} my.hook"})
+    )
+    assert mine.count(flag) == 2 and mine[-2:] == [flag, "my.hook"]
+
+
+def test_runtime_env_tags_the_wandb_run_only_with_a_project() -> None:
+    assert "WANDB_TAGS" not in launch.runtime_env("/py", {})["env_vars"]
+    vars_ = launch.runtime_env("/py", WANDB)["env_vars"]
+    assert vars_["WANDB_TAGS"] == "slime,grpo" and vars_["WANDB_JOB_TYPE"] == "train"
+    assert "WANDB_API_KEY" not in vars_  # a secret never travels in the runtime env
+    # tags you set are kept: the workers inherit them from the pod
+    mine = launch.runtime_env("/py", {**WANDB, "WANDB_TAGS": "mine"})["env_vars"]
+    assert "WANDB_TAGS" not in mine
+
+
+def test_a_wandb_project_without_a_key_or_run_id_stops_the_launcher() -> None:
+    with pytest.raises(LaunchError, match="WANDB_API_KEY_SECRET"):
+        launch.SlimeJob.from_env({**BASE, **WANDB, "WANDB_API_KEY": " "})
+    with pytest.raises(LaunchError, match="CWTRAIN_HOTLOAD_RUN_ID is required"):
+        launch.SlimeJob.from_env({**BASE, **WANDB, "CWTRAIN_HOTLOAD_RUN_ID": ""})
+
+
+@pytest.mark.parametrize("flag", ["--wandb-key k", "--wandb-key=k"])
+def test_the_wandb_key_as_an_argument_stops_the_launcher(flag) -> None:
+    with pytest.raises(LaunchError, match="--wandb-key is not supported"):
+        launch.SlimeJob.from_env({**BASE, "EXTRA_TRAIN_ARGS": f"--save-interval 50 {flag}"})
+
+
 def test_runtime_env_forwards_settings_to_the_workers() -> None:
     env = {"CWTRAIN_HOTLOAD_RUN_ID": "r", "SLIME_RELAX_NUMPY_CHECK": "1", "HOME": "/root"}
     vars_ = launch.runtime_env("/work/py:/root/slime", env)["env_vars"]
@@ -111,6 +168,7 @@ def test_main_runs_the_steps_in_order(tmp_path: Path, monkeypatch) -> None:
     kit = tmp_path / "kit"
     kit.mkdir()
     (kit / "coreweave_rollout.py").write_text("# rollout\n")
+    (kit / "coreweave_train.py").write_text("# driver\n")
     (kit / "0001-a.patch").write_text("")
     slime = tmp_path / "slime"
     (slime / "scripts" / "models").mkdir(parents=True)
@@ -137,6 +195,7 @@ def test_main_runs_the_steps_in_order(tmp_path: Path, monkeypatch) -> None:
     launch.main(env)
 
     assert (tmp_path / "work" / "py" / "coreweave_rollout.py").is_file()
+    assert (tmp_path / "work" / "py" / "coreweave_train.py").is_file()
     kinds = [c[0] for c in calls]
     assert kinds.index("patch") < kinds.index("stage") < kinds.index("chdir")
     assert calls[kinds.index("patch")][2] == ["0001-a.patch"]
@@ -153,6 +212,18 @@ def test_main_runs_the_steps_in_order(tmp_path: Path, monkeypatch) -> None:
     assert runtime["env_vars"]["CWTRAIN_HOTLOAD_RUN_ID"] == "r"
     assert runtime["env_vars"]["PYTHONPATH"].split(":")[:2] == [str(tmp_path / "work" / "py"), str(slime)]
     assert cmd[8:10] == ["--num-layers", "36"]
+
+
+def test_with_wandb_the_driver_runs_train_py_through_coreweave_train() -> None:
+    script, py = Path("/root/slime/train.py"), Path("/work/py")
+    plain = launch.SlimeJob.from_env(BASE)
+    assert launch.train_entrypoint(plain, script, py) == (["python3", str(script)], {})
+    # W&B keeps only the driver's metric definitions, so the driver binds cwtrain's metrics
+    traced = launch.SlimeJob.from_env({**BASE, **WANDB})
+    assert launch.train_entrypoint(traced, script, py) == (
+        ["python3", "/work/py/coreweave_train.py"],
+        {"CWTRAIN_TRAIN_SCRIPT": str(script)},
+    )
 
 
 def test_megatron_patches_are_reapplied_on_every_start(tmp_path: Path, monkeypatch) -> None:

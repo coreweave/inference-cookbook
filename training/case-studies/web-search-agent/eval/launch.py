@@ -10,16 +10,22 @@ hot-load deployment that ``CWTRAIN_ROLLOUT_BASE_URL`` names. ``--benchmark`` pic
 (BrowseComp by default), ``--model`` the deployment's served model (Nemotron 3.5 Lightning, as
 ``nemotron-lightning-hotload``), and ``--judge-model`` / ``--judge-base-url`` the LLM judge (GLM-5.3
 on W&B Inference by default). BrowseComp's search and browse tools use You.com.
+
+``report`` prints each task's reward and tool calls and the mean reward. With ``WANDB_PROJECT``
+set, it also logs them as a W&B run (job type ``eval``): the scores as the run's summary, and a
+table with one row per task.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from cwtrain.integrations import gym_tool_calls
 from cwtrain.integrations.rollout import RolloutConfig
@@ -35,6 +41,8 @@ def _you_search():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
 DEFAULT_BENCHMARK = "browsecomp"
 # The served name of Nemotron 3.5 Lightning on the NeMo-RL recipe's hot-load deployment
 # (ROLLOUT_MODEL in its run.env).
@@ -47,6 +55,10 @@ DEFAULT_MAX_STEPS = 50
 TURN_TOKENS = 4096
 DEFAULT_JUDGE_MODEL = "zai-org/GLM-5.3"
 DEFAULT_JUDGE_BASE_URL = "https://api.inference.wandb.ai/v1"
+# Characters of each task's final answer that the W&B table keeps.
+ANSWER_CHARS = 500
+# Gym's row keys for the task (and its repeat) a trajectory answers.
+TASK_INDEX = "_ng_task_index"
 
 
 @dataclass(frozen=True)
@@ -155,6 +167,138 @@ def start_environment(
     return env
 
 
+def wandb_settings(environ: Mapping[str, str]) -> dict[str, str] | None:
+    """The W&B run to log the scores to, or ``None`` when ``WANDB_PROJECT`` is unset.
+
+    Raises:
+        ValueError: ``WANDB_PROJECT`` is set, but ``WANDB_API_KEY`` is not and W&B is not in
+            offline mode.
+    """
+    project = environ.get("WANDB_PROJECT", "").strip()
+    if not project:
+        return None
+    offline = environ.get("WANDB_MODE", "").strip() in ("offline", "disabled")
+    if not offline and not environ.get("WANDB_API_KEY", "").strip():
+        raise ValueError(
+            "WANDB_PROJECT is set but WANDB_API_KEY is not: create the Secret that "
+            "WANDB_API_KEY_SECRET names, or leave WANDB_PROJECT empty"
+        )
+    settings = {
+        "project": project,
+        "entity": environ.get("WANDB_ENTITY", "").strip(),
+        "group": environ.get("WANDB_RUN_GROUP", "").strip(),
+        "name": environ.get("EVAL_NAME", "").strip(),
+    }
+    return {k: v for k, v in settings.items() if v}
+
+
+def final_answer(output: Sequence[dict[str, Any]]) -> str:
+    """The text of the trajectory's last message, which holds BrowseComp's ``Exact Answer:``."""
+    for item in reversed(output):
+        if item.get("type") == "message":
+            parts = item.get("content") or []
+            if isinstance(parts, str):
+                return parts
+            return "".join(p.get("text") or "" for p in parts if isinstance(p, dict))
+    return ""
+
+
+def tool_turns(output: Sequence[dict[str, Any]]) -> int:
+    """The model turns in a trajectory that called tools.
+
+    The agent runs all the calls of a model response before it asks the model again, so a turn's
+    calls are the ``function_call`` items before the next ``function_call_output`` items.
+    """
+    turns, calling = 0, False
+    for item in output:
+        kind = item.get("type")
+        if kind == "function_call_output":
+            calling = False
+        elif kind == "function_call" and not calling:
+            turns, calling = turns + 1, True
+    return turns
+
+
+def scores(rows: Sequence[dict[str, Any]], max_steps: int) -> tuple[list[dict[str, Any]], dict]:
+    """One record per task, and the summary of all of them.
+
+    A task reached the turn cap when it called tools in ``max_steps`` model turns; it is graded on
+    the answer it gave then. The agent's cap also counts turns without a tool call, so a task that
+    had such turns can reach it uncounted.
+    """
+    tasks = []
+    for position, row in enumerate(rows):
+        output = (row.get("response") or {}).get("output") or []
+        calls = sum(item.get("type") == "function_call" for item in output)
+        turns = tool_turns(output)
+        tasks.append(
+            {
+                "task": row.get(TASK_INDEX, position),
+                "reward": float(row.get("reward") or 0.0),
+                "tool_calls": calls,
+                "turns": turns,
+                "reached_turn_cap": turns >= max_steps,
+                "answer": final_answer(output)[:ANSWER_CHARS],
+            }
+        )
+    count = len(tasks)
+    summary = {
+        "tasks": count,
+        "mean_reward": sum(t["reward"] for t in tasks) / max(count, 1),
+        "correct": sum(t["reward"] >= 1.0 for t in tasks),
+        "tasks_at_turn_cap": sum(t["reached_turn_cap"] for t in tasks),
+        "mean_tool_calls": sum(t["tool_calls"] for t in tasks) / max(count, 1),
+    }
+    return tasks, summary
+
+
+def report(
+    rows: Sequence[dict[str, Any]],
+    args: argparse.Namespace,
+    environ: Mapping[str, str],
+    *,
+    out: Any = None,
+) -> dict:
+    """Print the scores, and log them to W&B when ``WANDB_PROJECT`` is set. Returns the summary."""
+    out = out or sys.stdout
+    tasks, summary = scores(rows, args.max_steps)
+    for task in tasks:
+        # The task's index in the benchmark's input, so that runs compare task by task.
+        print(f"task={task['task']} reward={task['reward']} tool_calls={task['tool_calls']}", file=out)
+    print(f"tasks={summary['tasks']} mean_reward={summary['mean_reward']:.3f}", file=out)
+    settings = wandb_settings(environ)
+    if settings is None:
+        return summary
+    # Empty W&B variables from an unfilled eval.env would override the run's own settings.
+    for name in ("WANDB_ENTITY", "WANDB_RUN_GROUP", "WANDB_NAME", "WANDB_PROJECT"):
+        if name in os.environ and not os.environ[name].strip():
+            del os.environ[name]
+    import wandb
+
+    run = wandb.init(
+        job_type="eval",
+        config={
+            "benchmark": args.benchmark,
+            "model": environ.get("CWTRAIN_ROLLOUT_MODEL") or args.model or DEFAULT_MODEL,
+            "identity": environ.get("EVAL_IDENTITY", "").strip() or None,
+            "limit": args.limit,
+            "max_steps": args.max_steps,
+            "max_context_tokens": args.max_context_tokens,
+            "judge_model": args.judge_model,
+            "gym_ref": environ.get("GYM_REF", "").strip() or None,
+        },
+        **settings,
+    )
+    try:
+        columns = ["task", "reward", "tool_calls", "turns", "reached_turn_cap", "answer"]
+        table = wandb.Table(columns=columns, data=[[t[c] for c in columns] for t in tasks])
+        run.log({**{f"eval/{k}": v for k, v in summary.items()}, "eval/task_results": table})
+        run.summary.update({f"eval/{k}": v for k, v in summary.items()})
+    finally:
+        run.finish()
+    return summary
+
+
 def command(args: argparse.Namespace, environ: Mapping[str, str]) -> list[str]:
     gym = str(Path(sys.executable).parent / "gym")
     benchmark = BENCHMARKS[getattr(args, "benchmark", DEFAULT_BENCHMARK)]
@@ -195,8 +339,8 @@ def command(args: argparse.Namespace, environ: Mapping[str, str]) -> list[str]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("prepare", "start", "collect"))
-    parser.add_argument("--gym-dir", type=Path, required=True)
+    parser.add_argument("action", choices=("prepare", "start", "collect", "report"))
+    parser.add_argument("--gym-dir", type=Path, help="The pinned NeMo Gym checkout (not report)")
     parser.add_argument(
         "--benchmark",
         choices=sorted(BENCHMARKS),
@@ -240,6 +384,15 @@ def main() -> None:
     args = parser.parse_args()
     if args.output is None:
         args.output = Path(f"results/coreweave_{args.benchmark}.jsonl")
+    if args.action == "report":
+        try:
+            rows = [json.loads(line) for line in args.output.read_text().splitlines() if line]
+            report(rows, args, os.environ)
+        except (OSError, ValueError) as error:
+            parser.error(str(error))
+        return
+    if args.gym_dir is None:
+        parser.error(f"{args.action} needs --gym-dir")
     gym_dir = args.gym_dir.resolve()
     benchmark = BENCHMARKS[args.benchmark]
     if not all((gym_dir / path).is_file() for path in benchmark.gym_configs):
@@ -249,6 +402,7 @@ def main() -> None:
     try:
         # prepare only downloads data, so it needs no endpoint or keys
         env = dict(os.environ) if args.action == "prepare" else start_environment(os.environ, args)
+        wandb_settings(os.environ)  # a W&B run without its key fails now, not after the eval
     except (OSError, ValueError) as error:
         parser.error(str(error))
     if args.action == "start":

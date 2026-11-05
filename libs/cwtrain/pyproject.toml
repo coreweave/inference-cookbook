@@ -47,6 +47,7 @@ Homepage = "https://github.com/coreweave/inference-cookbook"
 Repository = "https://github.com/coreweave/inference-cookbook"
 Documentation = "https://docs.coreweave.com/products/inference/rl-rollouts"
 Issues = "https://github.com/coreweave/inference-cookbook/issues"
+Changelog = "https://github.com/coreweave/inference-cookbook/blob/main/libs/cwtrain/CHANGELOG.md"
 
 [project.optional-dependencies]
 dev = [

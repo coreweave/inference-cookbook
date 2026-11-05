@@ -129,6 +129,8 @@ configuration, trigger rules, cleanup, and how to run it from a workstation.
 - Keep one logical change per pull request. Include tests with code changes. CI runs the checks
   above on pull requests that touch `libs/cwtrain`, `training/`, `k8s/`, `docs/` or
   `.gitignore`.
+- A pull request with a major change to `cwtrain` adds a bullet under `## Unreleased` at the top
+  of [`libs/cwtrain/CHANGELOG.md`](libs/cwtrain/CHANGELOG.md).
 - Commit messages and pull request titles follow
   [Conventional Commits](https://www.conventionalcommits.org/): `feat:`, `fix(launch):`, `ci:`,
   `docs:`, `chore:`.
@@ -145,8 +147,8 @@ build metadata.
 The workflow runs lint, tests, and builds on every Python version in the CI matrix. When they pass
 and the `pypi` environment's reviewers approve, it publishes the Python 3.12 wheel and source
 distribution to public PyPI. It then creates a GitHub release with the same files. The release
-notes are a link to `libs/cwtrain` at the tag. Pull requests and branch pushes run the checks but
-do not publish or create releases.
+notes are the version's section of [`libs/cwtrain/CHANGELOG.md`](libs/cwtrain/CHANGELOG.md). Pull
+requests and branch pushes run the checks but do not publish or create releases.
 
 One-time setup for a repository and PyPI maintainer:
 
@@ -162,8 +164,10 @@ One-time setup for a repository and PyPI maintainer:
 
 For each release:
 
-1. Set `project.version` in `libs/cwtrain/pyproject.toml` to the release version, and merge that
-   commit into `main`.
+1. Set `project.version` in `libs/cwtrain/pyproject.toml` to the release version. At the top of
+   `libs/cwtrain/CHANGELOG.md`, rename the `## Unreleased` section to `## X.Y.Z - YYYY-MM-DD`, or
+   add a section with that heading, listing the major changes since the last release. CI fails
+   when the version has no section. Merge that commit into `main`.
 2. Tag that commit and push the tag (replace `0.1.0` with the new version):
 
    ```bash

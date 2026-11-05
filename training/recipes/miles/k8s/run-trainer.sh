@@ -12,13 +12,21 @@ set -euo pipefail
 # a number. Unset it, so that the hook uses its default.
 hotload_timeout=${CWTRAIN_HOTLOAD_TIMEOUT:-}
 [[ -n "${hotload_timeout//[[:space:]]/}" ]] || unset CWTRAIN_HOTLOAD_TIMEOUT
+# An empty W&B setting from run.env reaches the Job as an empty value. Unset it, so that W&B's own
+# default applies (WANDB_PROJECT empty: no W&B at all).
+for var in WANDB_PROJECT WANDB_ENTITY; do
+  value=${!var:-}
+  [[ -n "${value//[[:space:]]/}" ]] || unset "$var"
+done
 
 : "${HF_MODEL:?}" "${NUM_ROLLOUT:=6}" "${ACTOR_GPUS:=2}" "${TP_SIZE:=2}"
 WORK=${WORK:-/work}
 
 echo "== install cwtrain + launcher"
 pip install --quiet --no-cache-dir /opt/cwtrain/cwtrain-*.whl "huggingface_hub[cli]"
-mkdir -p $WORK/py && cp /opt/cwtrain/coreweave_rollout.py /opt/cwtrain/run_hotload.py $WORK/py/
+mkdir -p $WORK/py
+cp /opt/cwtrain/coreweave_rollout.py /opt/cwtrain/coreweave_train.py /opt/cwtrain/run_hotload.py \
+  $WORK/py/
 
 echo "== check snapshot access"
 # Stop now, not at the first snapshot, if the trainer's credentials cannot list, read and write

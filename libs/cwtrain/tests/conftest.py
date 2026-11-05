@@ -474,3 +474,40 @@ def perturb(weights, names: tuple[str, ...], seed: int = 1):
         buf[idx] ^= rng.integers(1, 256, size=len(idx), dtype=np.uint8)
         out[name] = (dtype, shape, buf.tobytes())
     return out
+
+
+class FakeRun:
+    """Records what cwtrain writes into a W&B run (``wandb.run``)."""
+
+    def __init__(self, run_id: str = "run-1") -> None:
+        self.id = run_id
+        self.rows: list[dict[str, Any]] = []
+        self.defined: list[tuple[str, str | None]] = []
+        self.config = FakeConfig()
+
+    def log(self, row: dict[str, Any]) -> None:
+        self.rows.append(dict(row))
+
+    def define_metric(self, name: str, step_metric: str | None = None) -> None:
+        self.defined.append((name, step_metric))
+
+
+class FakeConfig(dict):
+    def update(self, values: dict[str, Any], allow_val_change: bool = False) -> None:  # type: ignore[override]
+        assert allow_val_change
+        super().update(values)
+
+
+@pytest.fixture
+def wandb_run(monkeypatch: pytest.MonkeyPatch) -> FakeRun:
+    """An open W&B run in this process, as a trainer that logs to W&B has."""
+    import sys
+    import types
+
+    from cwtrain.integrations import tracking
+
+    run = FakeRun()
+    monkeypatch.setitem(sys.modules, "wandb", types.SimpleNamespace(run=run))
+    monkeypatch.setattr(tracking, "_bound", set())
+    monkeypatch.setattr(tracking, "_warned", False)
+    return run

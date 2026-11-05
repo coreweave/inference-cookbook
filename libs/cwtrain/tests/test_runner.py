@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -491,3 +492,41 @@ def test_publish_rejects_invalid_index_before_writes(loader, api, tmp_path, inde
         loader.publish(root, "step_1", wait=False)
     assert not loader.s3.objects
     assert not any(request.method != "GET" for request in api.requests)
+
+
+def test_progress_event_timings_come_from_the_platform_timestamps() -> None:
+    from cwtrain.hotload import ProgressEvent
+    from cwtrain.infra.models import HotLoad, HotLoadReplica
+
+    hl = hot_load_json("hl-1", "v1", "HOT_LOAD_STATE_COMPLETED")
+    hl["status"].update(createdAt="2026-11-02T10:00:00Z", finishedAt="2026-11-02T10:01:10Z")
+
+    def replica(name: str, started: str, finished: str) -> HotLoadReplica:
+        data = replica_json(name, "REPLICA_STATE_READY", "v1")
+        data.update(startedAt=f"2026-11-02T10:{started}Z", finishedAt=f"2026-11-02T10:{finished}Z")
+        return HotLoadReplica.from_json(data)
+
+    # r1 started first and installed from object storage; the others copied from it
+    replicas = [
+        replica("r2", "01:02", "01:05"),
+        replica("r1", "00:05", "01:01"),
+        replica("r3", "01:02", "01:09"),
+    ]
+    event = ProgressEvent(HotLoad.from_json(hl), replicas, 70.0)
+    assert event.timings() == {
+        "hotload/platform_seconds": 70.0,
+        "hotload/replica_seconds_first": 56.0,
+        "hotload/replica_seconds_rest_max": 7.0,
+    }
+    t0 = datetime(2026, 11, 2, 10, 0, tzinfo=UTC).timestamp()
+    assert event.timeline() == {
+        "timeline/hotload_first_replica/start": t0 + 5,
+        "timeline/hotload_first_replica/end": t0 + 61,
+        "timeline/hotload_peers/start": t0 + 62,
+        "timeline/hotload_peers/end": t0 + 69,
+    }
+    # without the timestamps, nothing is guessed
+    bare = HotLoad.from_json(hot_load_json("hl-2", "v2", "HOT_LOAD_STATE_PENDING"))
+    untimed = [HotLoadReplica.from_json(replica_json("r1", "REPLICA_STATE_UPDATING"))]
+    assert ProgressEvent(bare, untimed, 1.0).timings() == {}
+    assert ProgressEvent(bare, untimed, 1.0).timeline() == {}

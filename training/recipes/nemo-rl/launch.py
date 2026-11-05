@@ -40,9 +40,47 @@ from cwtrain.integrations.launch import (
     run,
     say,
     stage_from_s3,
+    wandb_run_env,
 )
 
 TESTED = "NeMo-RL v0.7.0 (nvcr.io/nvidia/nemo-rl:v0.7.0)"
+NO_WANDB_KEY = (
+    "WANDB_PROJECT is set, but the trainer has no WANDB_API_KEY: create the Secret that "
+    "WANDB_API_KEY_SECRET names (default wandb-api-key) with the key under api_key, or leave "
+    "WANDB_PROJECT empty to train without W&B"
+)
+
+
+def hydra_string(name: str, value: str) -> str:
+    """``value`` quoted for a Hydra override, so that it stays a string (a project ``2026``)."""
+    if "'" in value or "\\" in value:
+        raise LaunchError(f"{name} must not hold a quote or a backslash, got {value!r}")
+    return f"'{value}'"
+
+
+def wandb_overrides(environ: Mapping[str, str]) -> tuple[str, ...]:
+    """NeMo-RL's W&B logger when ``WANDB_PROJECT`` is set: one run named and grouped by the run ID.
+
+    The recipe's config turns the logger off, so a run without the setting sends nothing to W&B.
+    ``EXTRA_OVERRIDES`` come later on the command line and win.
+    """
+    project = env_text(environ, "WANDB_PROJECT", "")
+    if not project:
+        return ()
+    if not environ.get("WANDB_API_KEY", "").strip():
+        raise LaunchError(NO_WANDB_KEY)
+    run_id = hydra_string("CWTRAIN_HOTLOAD_RUN_ID", require(environ, "CWTRAIN_HOTLOAD_RUN_ID"))
+    entity = env_text(environ, "WANDB_ENTITY", "")
+    return (
+        "logger.wandb_enabled=true",
+        f"logger.wandb.project={hydra_string('WANDB_PROJECT', project)}",
+        f"logger.wandb.name={run_id}",
+        # NeMo-RL passes logger.wandb to wandb.init; its config has no group or entity key
+        f"++logger.wandb.group={run_id}",
+        *([f"++logger.wandb.entity={hydra_string('WANDB_ENTITY', entity)}"] if entity else []),
+        # the policy workers' GPU use, logged next to the training metrics
+        "logger.monitor_gpus=true",
+    )
 
 
 @dataclass(frozen=True)
@@ -59,6 +97,7 @@ class NemoJob:
     base_s3_uri: str = ""
     grpo_config: str = "grpo_coreweave.yaml"  # a file in the kit
     prepare_data: tuple[str, ...] = ()  # a Python script and its arguments, run before training
+    wandb_overrides: tuple[str, ...] = ()  # empty: W&B off
     extra_overrides: tuple[str, ...] = ()
 
     @classmethod
@@ -80,6 +119,7 @@ class NemoJob:
             base_s3_uri=text("BASE_S3_URI", ""),
             grpo_config=text("GRPO_CONFIG", "grpo_coreweave.yaml"),
             prepare_data=tuple(shlex.split(env.get("PREPARE_DATA") or "")),
+            wandb_overrides=wandb_overrides(env),
             # whitespace-separated, quotes kept for Hydra's own parser
             extra_overrides=tuple((env.get("EXTRA_OVERRIDES") or "").split()),
         )
@@ -106,6 +146,7 @@ def grpo_command(job: NemoJob) -> list[str]:
         f"policy.model_name={job.model_dir}",
         f"grpo.max_num_steps={job.num_steps}",
         f"cluster.gpus_per_node={job.actor_gpus}",
+        *job.wandb_overrides,
         *job.extra_overrides,
     ]
 
@@ -179,6 +220,9 @@ def main(environ: Mapping[str, str] | None = None) -> None:
     # run_grpo.py. hook_config_from reads CWTRAIN_HOTLOAD_PROMPT_CACHE_POLICY when coreweave_cfg
     # sets no prompt_cache_policy.
     default_prompt_cache_policy(os.environ)
+    if job.wandb_overrides:
+        # The run's job type and tags (framework, algorithm), unless set; wandb.init reads them.
+        os.environ.update(wandb_run_env("nemo-rl", "grpo", os.environ))
     sys.stdout.flush()
     os.execvp(cmd[0], cmd)
 

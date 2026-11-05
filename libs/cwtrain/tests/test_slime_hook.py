@@ -6,6 +6,9 @@ from __future__ import annotations
 
 import json
 import logging
+import math
+import sys
+import types
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,7 +20,8 @@ from cwtrain.hotload import HotLoadState, PromptCachePolicy, SnapshotInfo, Snaps
 from cwtrain.hotload.delta import checkpoint_checksums
 from cwtrain.hotload.errors import HotLoadVerificationError, SnapshotError
 from cwtrain.hotload.mirror import MirrorError, tensor_locations
-from cwtrain.integrations import slime
+from cwtrain.infra.models import Deployment
+from cwtrain.integrations import slime, tracking
 from cwtrain.integrations.slime import HookConfig, SlimePublisher, default_run_id, is_rank_zero
 from tests.conftest import (
     DEPLOYMENT_ID,
@@ -30,6 +34,9 @@ from tests.conftest import (
 )
 
 RUN = "qwen3-grpo-20260922"
+
+#: What the stub loaders' progress events report as the platform's timings.
+PLATFORM = {"hotload/platform_seconds": 3.5, "hotload/replica_seconds_first": 3.0}
 
 
 class StubHotLoad:
@@ -76,7 +83,9 @@ class StubLoader:
         self.waits.append(hot_load_id)
         identity = hot_load_id.removeprefix("hl-")
         if on_progress:
-            on_progress(SimpleNamespace(ready=2, total=2))
+            on_progress(
+                SimpleNamespace(ready=2, total=2, timings=lambda: dict(PLATFORM), timeline=dict)
+            )
         self.completed_identities.add(identity)
         return StubHotLoad(identity)
 
@@ -896,3 +905,291 @@ def test_null_metadata_baseline_can_be_mirrored_and_published(env, real_args, mo
     slime.hook(real_args, real_args.update_weight_disk_dir, [])
     assert mirror_built(real_args)
     assert len(stub.uploads) == 1
+
+
+# ------------------------------------------------------------------------------ W&B run
+
+
+def test_the_hook_logs_its_metrics_into_the_trainers_wandb_run(
+    env, args, monkeypatch, wandb_run
+) -> None:
+    from tests.conftest import deployment_json
+
+    stub = StubLoader(completed={f"{RUN}-v000000"})
+    stub.deployment = Deployment.from_json(deployment_json()["deployment"])
+    install_stub(monkeypatch, stub)
+    v1 = write_delta_checkpoint(Path(args.update_weight_disk_dir) / "weight_v000001", version=1)
+
+    metrics = slime.hook(args, str(v1), [])
+
+    # slime and miles drop the hook's return value; the row carries it to W&B
+    assert metrics["hotload/platform_seconds"] == 3.5
+    (row,) = wandb_run.rows
+    logged = {k: v for k, v in row.items() if not (isinstance(v, float) and math.isnan(v))}
+    assert logged == {**metrics, "hotload/version": 1.0, "timeline/step": 1.0, "rollout/step": 1}
+    # every timeline key, NaN for the lanes this row has no span for (tracking.timeline_row)
+    assert set(tracking.timeline_keys()) <= set(row) and math.isnan(row["timeline/rollout/start"])
+    assert ("hotload/*", "rollout/step") in wandb_run.defined
+    assert ("timeline/*", "rollout/step") in wandb_run.defined
+    # the hook's own phases, on the timeline's wall-clock axis
+    assert row["timeline/upload/start"] <= row["timeline/upload/end"]
+    assert (
+        row["timeline/upload/end"] <= row["timeline/hotload/start"] <= row["timeline/hotload/end"]
+    )
+    settings = wandb_run.config["cwtrain"]
+    assert settings["run_id"] == RUN and settings["deployment"]["model"] == "Qwen/Qwen3-8B"
+    assert settings["hotload"] == {
+        "wait": True,
+        "full_every": 0,
+        "mirror": False,
+        "prompt_cache_policy": "unspecified",
+        "verify": False,
+    }
+
+
+def test_the_hook_does_not_log_on_other_ranks_or_without_a_run(env, args, monkeypatch) -> None:
+    stub = StubLoader()
+    install_stub(monkeypatch, stub)
+    assert slime.hook(args, args.update_weight_disk_dir, [])  # no wandb.run: nothing to log into
+    args.rank = 1
+    assert slime.hook(args, args.update_weight_disk_dir, []) is None
+
+
+def test_rollout_step_follows_the_trainers_step_axis() -> None:
+    assert slime.rollout_step(SimpleNamespace(), 3) == 3
+    per_train_step = SimpleNamespace(
+        wandb_always_use_train_step=True,
+        rollout_batch_size=8,
+        n_samples_per_prompt=4,
+        global_batch_size=16,
+    )
+    assert slime.rollout_step(per_train_step, 3) == 6  # two train steps per rollout
+
+
+class FakeOptimizer:
+    """Megatron's optimizer, as the train-step hook receives it."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def zero_grad(self, set_to_none: bool = True) -> None:
+        del set_to_none
+        self.calls += 1
+
+
+def _logged(row: dict[str, float]) -> dict[str, float]:
+    """The row without the NaN that pads the timeline lanes it has no span for."""
+    return {k: v for k, v in row.items() if not (isinstance(v, float) and math.isnan(v))}
+
+
+def test_the_trainer_hooks_log_each_train_step_when_it_releases_its_gradients(
+    env, args, monkeypatch, wandb_run
+) -> None:
+    clock = iter([100.0, 101.0, 105.0, 107.0, 108.0, 110.0])
+    monkeypatch.setattr(slime.time, "time", lambda: next(clock, 200.0))
+    stub = StubLoader(completed={f"{RUN}-v000000"})
+    install_stub(monkeypatch, stub)
+    v1 = write_delta_checkpoint(Path(args.update_weight_disk_dir) / "weight_v000001", version=1)
+    optimizer = FakeOptimizer()
+
+    slime.before_log_prob(args, None, "ref_")  # 100: the reference model's pass starts it
+    slime.before_log_prob(args, None, "")  # 101: the actor's pass changes nothing
+    slime.before_train_step(args, 0, 0, None, optimizer, None)  # 105: the first step starts
+    optimizer.zero_grad()  # 107: and ends, whether or not the optimizer stepped
+    optimizer.zero_grad()  # the next step's start: no step to end
+    slime.before_train_step(args, 0, 1, None, optimizer, None)  # 108: wrapped once, not twice
+    optimizer.zero_grad()  # 110
+
+    # a rollout's spans need no weight sync after it, so the last rollout logs them too
+    first, second = (_logged(row) for row in wandb_run.rows)
+    assert first == {
+        "timeline/step": 0.0,
+        "timeline/logprobs/start": 100.0,
+        "timeline/logprobs/end": 105.0,
+        "timeline/update/start": 105.0,
+        "timeline/update/end": 107.0,
+        "rollout/step": 0,
+    }
+    assert second == {
+        "timeline/step": 0.0,
+        "timeline/update/start": 108.0,
+        "timeline/update/end": 110.0,
+        "rollout/step": 0,
+    }
+    assert optimizer.calls == 3
+    slime.hook(args, str(v1), [])  # the weight sync logs only its own row
+    (publish,) = wandb_run.rows[2:]
+    assert publish["timeline/step"] == 1.0 and math.isnan(publish["timeline/update/start"])
+
+
+def test_the_next_steps_start_keeps_the_log_prob_mark(env, args, monkeypatch, wandb_run) -> None:
+    clock = iter([100.0, 105.0, 107.0])
+    monkeypatch.setattr(slime.time, "time", lambda: next(clock, 200.0))
+    optimizer = FakeOptimizer()
+    slime.before_train_step(args, 0, 0, None, optimizer, None)  # 100
+    optimizer.zero_grad()  # 105: rollout 0's training ends
+
+    slime.before_log_prob(args, None, "")  # 107: rollout 1's log-prob pass
+    optimizer.zero_grad()  # its first step starts, before the hook marks it
+    assert len(wandb_run.rows) == 1
+    assert slime._trainer_marks == {"logprobs": 107.0}
+
+
+def test_the_weight_sync_logs_the_spans_of_steps_it_could_not_time(
+    env, args, monkeypatch, wandb_run
+) -> None:
+    clock = iter([100.0, 105.0, 107.0])
+    monkeypatch.setattr(slime.time, "time", lambda: next(clock, 200.0))
+    stub = StubLoader(completed={f"{RUN}-v000000"})
+    install_stub(monkeypatch, stub)
+    v1 = write_delta_checkpoint(Path(args.update_weight_disk_dir) / "weight_v000001", version=1)
+
+    slime.before_log_prob(args, None, "")  # 100
+    slime.before_train_step(args, 0, 0, None, None, None)  # 105: no optimizer to time
+    slime.hook(args, str(v1), [])  # 107: the weights of that training are written
+
+    trainer, publish = wandb_run.rows
+    assert _logged(trainer) == {
+        "timeline/step": 0.0,
+        "timeline/logprobs/start": 100.0,
+        "timeline/logprobs/end": 105.0,
+        "timeline/update/start": 105.0,
+        "timeline/update/end": 107.0,
+        "rollout/step": 0,
+    }
+    assert publish["timeline/step"] == 1.0 and publish["rollout/step"] == 1
+    # the marks start over for the next training; other ranks never mark
+    args.rank = 1
+    slime.before_train_step(args, 1, 0, None, FakeOptimizer(), None)
+    assert slime._trainer_spans(300.0) == {}
+
+
+@pytest.fixture
+def slime_wandb(monkeypatch: pytest.MonkeyPatch) -> list[tuple[object, ...]]:
+    """slime's train actor and W&B module, whose secondary init opens a run in this process."""
+    from tests.conftest import FakeRun
+
+    wandb = SimpleNamespace(run=None)
+    calls: list[tuple[object, ...]] = []
+
+    def init_wandb_secondary(args: object, role: object = None) -> None:
+        calls.append((args.wandb_run_id, role))
+        wandb.run = FakeRun(args.wandb_run_id)
+
+    monkeypatch.setitem(sys.modules, "wandb", wandb)
+    monkeypatch.setattr(tracking, "_bound", set())
+    monkeypatch.setitem(sys.modules, "slime.backends.megatron_utils.actor", types.ModuleType("a"))
+    monkeypatch.setitem(
+        sys.modules,
+        "slime.observability.wandb_utils",
+        SimpleNamespace(init_wandb_secondary=init_wandb_secondary),
+    )
+    return calls
+
+
+def test_rank_zero_joins_the_trainers_run_when_another_stage_holds_it(
+    env, args, monkeypatch, slime_wandb
+) -> None:
+    # pipeline parallelism: slime opened its writer on the last stage, the hooks run on rank 0
+    install_stub(monkeypatch, StubLoader(completed={f"{RUN}-v000000"}))
+    v1 = write_delta_checkpoint(Path(args.update_weight_disk_dir) / "weight_v000001", version=1)
+    args.use_wandb, args.wandb_run_id = True, "run-7"
+
+    slime.hook(args, str(v1), [])
+    slime.hook(args, str(v1), [])  # joined once
+
+    assert slime_wandb == [("run-7", None)]
+    run = sys.modules["wandb"].run
+    assert [row["hotload/version"] for row in run.rows] == [1.0, 1.0]
+    assert run.config["cwtrain"]["run_id"] == RUN
+
+
+@pytest.mark.parametrize("use_wandb", [False, True])
+def test_rank_zero_opens_no_writer_without_wandb_or_when_it_fails(
+    env, args, monkeypatch, slime_wandb, caplog, use_wandb
+) -> None:
+    install_stub(monkeypatch, StubLoader(completed={f"{RUN}-v000000"}))
+    v1 = write_delta_checkpoint(Path(args.update_weight_disk_dir) / "weight_v000001", version=1)
+    args.use_wandb, args.wandb_run_id = use_wandb, "run-7"
+
+    def fail(args: object, role: object = None) -> None:
+        raise RuntimeError("no network")
+
+    monkeypatch.setattr(
+        sys.modules["slime.observability.wandb_utils"], "init_wandb_secondary", fail
+    )
+    with caplog.at_level(logging.WARNING, logger="cwtrain.integrations.slime"):
+        assert slime.hook(args, str(v1), [])["hotload/incremental"] == 1.0
+    assert sys.modules["wandb"].run is None
+    assert ("no network" in caplog.text) == use_wandb
+
+
+def test_the_trainer_timeline_args_name_the_hooks() -> None:
+    flags = dict(
+        zip(slime.TRAINER_TIMELINE_ARGS[::2], slime.TRAINER_TIMELINE_ARGS[1::2], strict=True)
+    )
+    for value in flags.values():
+        module, _, name = value.rpartition(".")
+        assert module == "cwtrain.integrations.slime" and callable(getattr(slime, name))
+
+
+TRAIN_SCRIPT = """import sys
+from slime.observability.logging_utils import init_tracking
+
+if __name__ == "__main__":
+    init_tracking(sys.argv[1:])
+    sys.modules["wandb"].ran = (__file__, list(sys.argv), sys.path[0])
+"""
+
+
+@pytest.fixture
+def driver(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+    """slime's train.py and its init_tracking, which opens the run's primary writer with W&B on."""
+    from tests.conftest import FakeRun
+
+    wandb = SimpleNamespace(run=None)
+    monkeypatch.setitem(sys.modules, "wandb", wandb)
+    monkeypatch.setattr(tracking, "_bound", set())
+
+    def init_tracking(argv: list[str]) -> None:
+        if "--use-wandb" in argv:
+            wandb.run = FakeRun("primary")
+
+    for name in ("slime", "slime.observability"):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    utils = types.ModuleType("slime.observability.logging_utils")
+    utils.init_tracking = init_tracking  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, utils.__name__, utils)
+    # a None entry makes `import` raise ImportError: this environment has no miles
+    monkeypatch.setitem(sys.modules, "miles.utils.tracking_utils.tracking", None)
+    monkeypatch.setattr(sys, "argv", ["coreweave_train.py"])
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    script = tmp_path / "slime" / "train.py"
+    script.parent.mkdir()
+    script.write_text(TRAIN_SCRIPT)
+    return SimpleNamespace(wandb=wandb, script=script, utils=utils)
+
+
+def test_the_driver_binds_cwtrains_metrics_once_it_opens_the_run(driver) -> None:
+    slime.run_train_script(driver.script, ["--use-wandb", "--num-rollout", "3"])
+
+    # train.py ran as `python3 train.py ARGS...` would run it
+    path, argv, first = driver.wandb.ran
+    assert path == str(driver.script) and first == str(driver.script.parent)
+    assert argv == [path, "--use-wandb", "--num-rollout", "3"]
+    assert driver.wandb.run.defined == [
+        ("coreweave/*", "rollout/step"),
+        ("hotload/*", "rollout/step"),
+        ("timeline/*", "rollout/step"),
+    ]
+
+
+def test_the_driver_runs_train_py_without_wandb_or_init_tracking(driver, caplog) -> None:
+    slime.run_train_script(driver.script, [])
+    assert driver.wandb.run is None and driver.wandb.ran[1] == [str(driver.script)]
+
+    del driver.utils.init_tracking
+    driver.script.write_text("import sys\nsys.modules['wandb'].ran = 'again'\n")
+    with caplog.at_level(logging.WARNING, logger="cwtrain.integrations.slime"):
+        slime.run_train_script(driver.script, [])
+    assert driver.wandb.ran == "again" and "has no init_tracking" in caplog.text

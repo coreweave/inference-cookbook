@@ -46,6 +46,15 @@ spec:
         # the judge; its key and the You.com key come from the mounted GYM_SECRET
         - {name: JUDGE_BASE_URL, value: "${JUDGE_BASE_URL}"}
         - {name: JUDGE_MODEL, value: "${JUDGE_MODEL}"}
+        # W&B, off while WANDB_PROJECT is empty: the scores and a table of the tasks, as a run in
+        # the training run's group. The pod starts without the key Secret.
+        - {name: WANDB_PROJECT, value: "${WANDB_PROJECT}"}
+        - {name: WANDB_ENTITY, value: "${WANDB_ENTITY}"}
+        - {name: WANDB_RUN_GROUP, value: "${WANDB_GROUP}"}
+        - {name: EVAL_NAME, value: "${EVAL_NAME}"}
+        - {name: EVAL_IDENTITY, value: "${EVAL_IDENTITY}"}
+        - name: WANDB_API_KEY
+          valueFrom: {secretKeyRef: {name: "${WANDB_API_KEY_SECRET}", key: api_key, optional: true}}
         - {name: PYTHONUNBUFFERED, value: "1"}
         volumeMounts:
         - {name: kit, mountPath: /opt/cwtrain-gym, readOnly: true}
