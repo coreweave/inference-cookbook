@@ -1,12 +1,20 @@
 {
   "runtime": {
     "engine": "dynamo-vllm",
-    "version": "0.30.0+crwv.5",
+    "version": "0.32.0+crwv.5",
     "engineConfig": {
       "max-model-len": "4096",
       "gpu-memory-utilization": "0.85",
       "max-num-seqs": "8",
       "reasoning-parser": "nemotron_v3"
+    },
+    "engineEnv": {
+      "MX_REFIT_DELTA_SURGICAL": "true",
+      "MX_REFIT_FULL_STREAMING": "true",
+      "MX_REFIT_INPLACE": "true",
+      "MX_REFIT_PREFER_PREPARED": "true",
+      "MX_REFIT_PREFETCH": "true",
+      "MX_REFIT_PREFETCH_S3_WATCH": "true"
     }
   },
   "resources": {

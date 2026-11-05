@@ -93,6 +93,13 @@ cwtrain deployment parameters --gateway <gateway id>
 cwtrain deployment create --file deployment.json --wait
 ```
 
+A request with a `hotLoad` section needs `dynamo-vllm` `0.32.0+crwv.5` or later: `create` uses
+that version when `runtime.version` is unset and refuses an older one. It also turns on the
+ModelExpress refit options in `runtime.engineEnv` (`MX_REFIT_DELTA_SURGICAL`,
+`MX_REFIT_FULL_STREAMING`, `MX_REFIT_INPLACE`, `MX_REFIT_PREFER_PREPARED`, `MX_REFIT_PREFETCH` and
+`MX_REFIT_PREFETCH_S3_WATCH`, set to `"true"`). A value in the request overrides each one.
+`InferenceClient.create_deployment` does the same.
+
 `create` prints the deployment as JSON, with its `id` and its `rollout_base_url` for rollouts.
 With `--wait`, it returns when the deployment is READY. This takes minutes, and longer for large
 models. If the deployment fails, or is not READY within `--timeout` (an hour by default), `create`

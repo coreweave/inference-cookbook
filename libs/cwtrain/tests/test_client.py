@@ -12,6 +12,7 @@ import pytest
 from cwtrain.errors import (
     AlreadyExistsError,
     APIError,
+    CWTrainError,
     FailedPreconditionError,
     HotLoadInProgressError,
     InvalidArgumentError,
@@ -296,7 +297,7 @@ def test_create_list_delete_deployment(api: FakeAPI, client: InferenceClient) ->
     api.queue("GET", DEPLOYMENTS, httpx.Response(200, json={"items": [created["deployment"]]}))
     api.queue("DELETE", f"{DEPLOYMENTS}/{DEPLOYMENT_ID}", httpx.Response(200, json={}))
 
-    spec = {"id": DEPLOYMENT_ID, "name": "qwen3-8b-rl", "gatewayIds": ["g"], "hotLoad": {}}
+    spec = {"id": DEPLOYMENT_ID, "name": "qwen3-8b-rl", "gatewayIds": ["g"]}
     dep = client.create_deployment(spec)
     assert dep.id == DEPLOYMENT_ID and dep.hot_load is not None
     assert posted(api, DEPLOYMENTS) == [spec]  # a given ID is kept
@@ -307,6 +308,73 @@ def test_create_list_delete_deployment(api: FakeAPI, client: InferenceClient) ->
 
     client.delete_deployment(DEPLOYMENT_ID)
     assert api.requests[-1].method == "DELETE"
+
+
+MX_REFIT_KNOBS = (
+    "MX_REFIT_DELTA_SURGICAL",
+    "MX_REFIT_FULL_STREAMING",
+    "MX_REFIT_INPLACE",
+    "MX_REFIT_PREFER_PREPARED",
+    "MX_REFIT_PREFETCH",
+    "MX_REFIT_PREFETCH_S3_WATCH",
+)
+
+
+def hot_load_spec(**runtime) -> dict:
+    return {"name": "qwen3-8b-rl", "runtime": {"engine": "dynamo-vllm", **runtime}, "hotLoad": {}}
+
+
+def test_hot_load_deployment_gets_the_minimum_version_and_the_refit_options(
+    api: FakeAPI, client: InferenceClient
+) -> None:
+    from tests.conftest import deployment_json
+
+    api.queue("POST", DEPLOYMENTS, httpx.Response(200, json=deployment_json()))
+    spec = hot_load_spec()
+    client.create_deployment(spec)
+    (sent,) = posted(api, DEPLOYMENTS)
+    assert sent["runtime"] == {
+        "engine": "dynamo-vllm",
+        "version": "0.32.0+crwv.5",
+        "engineEnv": dict.fromkeys(MX_REFIT_KNOBS, "true"),
+    }
+    assert spec == hot_load_spec()  # the caller's spec is not changed
+
+
+def test_hot_load_deployment_keeps_its_own_version_and_engine_env(
+    api: FakeAPI, client: InferenceClient
+) -> None:
+    from tests.conftest import deployment_json
+
+    api.queue("POST", DEPLOYMENTS, httpx.Response(200, json=deployment_json()))
+    env = {"MX_REFIT_PREFETCH": "false", "STOP_TOKEN": "<s>"}
+    client.create_deployment(hot_load_spec(version="0.33.0+crwv.0", engineEnv=env))
+    (sent,) = posted(api, DEPLOYMENTS)
+    assert sent["runtime"]["version"] == "0.33.0+crwv.0"
+    assert sent["runtime"]["engineEnv"] == {**dict.fromkeys(MX_REFIT_KNOBS, "true"), **env}
+
+
+@pytest.mark.parametrize(
+    "version", ["0.30.0+crwv.5", "0.32.0+crwv.4", "0.32.0+crwv.1.mxext", "0.32.0", "latest"]
+)
+def test_hot_load_deployment_refuses_a_version_before_the_minimum(
+    api: FakeAPI, client: InferenceClient, version: str
+) -> None:
+    with pytest.raises(CWTrainError, match=r"0\.32\.0\+crwv\.5"):
+        client.create_deployment(hot_load_spec(version=version))
+    assert posted(api, DEPLOYMENTS) == []
+
+
+def test_deployment_without_hot_load_is_sent_unchanged(
+    api: FakeAPI, client: InferenceClient
+) -> None:
+    from tests.conftest import deployment_json
+
+    api.queue("POST", DEPLOYMENTS, httpx.Response(200, json=deployment_json(hot_load=False)))
+    spec = {"name": "qwen3-8b", "runtime": {"engine": "dynamo-vllm", "version": "0.30.0+crwv.5"}}
+    client.create_deployment(spec)
+    (sent,) = posted(api, DEPLOYMENTS)
+    assert sent["runtime"] == spec["runtime"]
 
 
 ALREADY_EXISTS = httpx.Response(409, json=error_json("already_exists", "resource already exists"))

@@ -521,7 +521,7 @@ def test_deployment_create_warns_without_hot_load(gateway_api, tmp_path, caplog)
 def test_deployment_create_sends_tags_in_the_engine_options(gateway_api, tmp_path, capsys):
     runtime = {
         "engine": "dynamo-vllm",
-        "version": "0.30.0",
+        "version": "0.32.0+crwv.5",
         "engineConfig": {"reasoning-parser": "<think>"},
         "engineEnv": {"STOP_TOKEN": "<s>"},
     }
@@ -529,7 +529,8 @@ def test_deployment_create_sends_tags_in_the_engine_options(gateway_api, tmp_pat
     request = deployment_request(tmp_path, runtime=runtime)
     assert cli.main(["deployment", "create", "--file", str(request)]) == 0
     (sent,) = [json.loads(r.content) for r in gateway_api.requests if r.method == "POST"]
-    assert sent["runtime"] == runtime
+    assert sent["runtime"]["engineConfig"] == runtime["engineConfig"]
+    assert sent["runtime"]["engineEnv"]["STOP_TOKEN"] == "<s>"
 
     # a placeholder anywhere else is still refused
     gateway_api.requests.clear()
@@ -538,6 +539,16 @@ def test_deployment_create_sends_tags_in_the_engine_options(gateway_api, tmp_pat
     err = capsys.readouterr().err
     assert "runtime.version = '<runtime version>'" in err and "engineConfig" not in err
     assert gateway_api.requests == []
+
+
+def test_deployment_create_refuses_a_hot_load_version_before_the_minimum(
+    gateway_api, tmp_path, capsys
+):
+    runtime = {"engine": "dynamo-vllm", "version": "0.30.0+crwv.5"}
+    request = deployment_request(tmp_path, runtime=runtime)
+    assert cli.main(["deployment", "create", "--file", str(request)]) == 1
+    assert "0.32.0+crwv.5" in capsys.readouterr().err
+    assert [r for r in gateway_api.requests if r.method == "POST"] == []
 
 
 @pytest.mark.parametrize("status,code", [(403, "permission_denied"), (404, "not_found")])

@@ -16,6 +16,7 @@ from pathlib import Path
 
 from cwtrain.hotload import HotLoader
 from cwtrain.infra import InferenceClient, lifecycle
+from cwtrain.infra.client import MIN_HOT_LOAD_RUNTIME_VERSION
 from e2e.storage import (
     bucket_client,
     configured_bucket,
@@ -28,7 +29,7 @@ log = logging.getLogger(__name__)
 
 #: Default dynamo-vllm runtime. The ModelExpress (MX) client that performs hot-loads ships inside
 #: the engine build, so the ``+crwv.N`` suffix also selects the MX client version.
-DEFAULT_RUNTIME_VERSION = "0.32.0+crwv.1"
+DEFAULT_RUNTIME_VERSION = MIN_HOT_LOAD_RUNTIME_VERSION
 
 
 def required(name: str) -> str:

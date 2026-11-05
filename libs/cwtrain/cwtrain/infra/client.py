@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import os
 import random
+import re
 import time
 import uuid
 from collections.abc import Iterator, Mapping
@@ -26,6 +27,7 @@ from cwtrain import __version__
 from cwtrain.errors import (
     AlreadyExistsError,
     APIError,
+    CWTrainError,
     NotFoundError,
     UnavailableError,
     error_from_response,
@@ -51,6 +53,24 @@ TOKEN_ENV_VAR = "COREWEAVE_API_TOKEN"
 TOKEN_ENV_VARS = (TOKEN_ENV_VAR, "CW_API_TOKEN")
 API_PREFIX = "/v1alpha1/inference"
 
+#: The oldest ``dynamo-vllm`` version a hot-load deployment may use: the first that accepts the
+#: ModelExpress refit options and ships the client's C++ extensions. It is the default.
+MIN_HOT_LOAD_RUNTIME_VERSION = "0.32.0+crwv.5"
+#: ModelExpress refit options a hot-load deployment turns on unless its ``runtime.engineEnv``
+#: sets them.
+MX_REFIT_ENGINE_ENV = dict.fromkeys(
+    (
+        "MX_REFIT_DELTA_SURGICAL",
+        "MX_REFIT_FULL_STREAMING",
+        "MX_REFIT_INPLACE",
+        "MX_REFIT_PREFER_PREPARED",
+        "MX_REFIT_PREFETCH",
+        "MX_REFIT_PREFETCH_S3_WATCH",
+    ),
+    "true",
+)
+_RUNTIME_VERSION = re.compile(r"(\d+)\.(\d+)\.(\d+)\+crwv\.(\d+)")
+
 # The API caps page sizes at 1000. Ask for the cap so a listing is usually one round trip.
 _MAX_PAGE_SIZE = 1000
 
@@ -63,6 +83,27 @@ def token_from_env(environ: Mapping[str, str] | None = None) -> str | None:
         if value:
             return value
     return None
+
+
+def _runtime_version_key(version: str) -> tuple[int, ...] | None:
+    match = _RUNTIME_VERSION.match(version)
+    return tuple(int(part) for part in match.groups()) if match else None
+
+
+def _hot_load_runtime(runtime: Mapping[str, Any]) -> dict[str, Any]:
+    """``runtime`` with the default version and the refit options a hot-load deployment needs."""
+    version = runtime.get("version") or MIN_HOT_LOAD_RUNTIME_VERSION
+    key = _runtime_version_key(version)
+    if key is None or key < _runtime_version_key(MIN_HOT_LOAD_RUNTIME_VERSION):
+        raise CWTrainError(
+            f"runtime.version {version!r} is too old for hot-loading; use "
+            f"{MIN_HOT_LOAD_RUNTIME_VERSION} or later"
+        )
+    return {
+        **runtime,
+        "version": version,
+        "engineEnv": {**MX_REFIT_ENGINE_ENV, **(runtime.get("engineEnv") or {})},
+    }
 
 
 class InferenceClient:
@@ -181,9 +222,16 @@ class InferenceClient:
         to retry when the outcome is unknown. If an earlier attempt created the deployment, the
         API answers ``ALREADY_EXISTS``, and the deployment is fetched and returned.
 
+        A deployment with ``hotLoad`` defaults ``runtime.version`` to
+        :data:`MIN_HOT_LOAD_RUNTIME_VERSION` and refuses an older one. Its ``runtime.engineEnv``
+        gets :data:`MX_REFIT_ENGINE_ENV`; a value in ``spec`` overrides each option.
+
         Raises:
             AlreadyExistsError: another deployment in the organization has the same name.
+            CWTrainError: a hot-load deployment's ``runtime.version`` is older than the minimum.
         """
+        if spec.get("hotLoad") is not None:
+            spec = {**spec, "runtime": _hot_load_runtime(spec.get("runtime") or {})}
         return Deployment.from_json(self._create("deployment", spec))
 
     def delete_deployment(self, deployment_id: str) -> None:

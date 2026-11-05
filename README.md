@@ -90,7 +90,9 @@ does.
   [`bucket-policy.example.json`](k8s/bucket-policy.example.json) has this structure.
 - A gateway, and a deployment created with engine `dynamo-vllm` and a `hotLoad` section naming the
   bucket and path prefix for snapshots ([example request](training/examples/miles-grpo-qwen3-4b/deployment.example.json)).
-  The recipes use `cwtrain deployment create` to create it from such a request. You can also use
+  The recipes use `cwtrain deployment create` to create it from such a request; it requires
+  `dynamo-vllm` `0.32.0+crwv.5` or later and turns on the ModelExpress refit options
+  (`MX_REFIT_*`) unless the request sets them. You can also use
   the API, or the **Hot loading** section of the Cloud Console's create drawer. You can enable
   hot-load only when you create a deployment; you cannot add it later. All of the deployment's
   gateways must be in one zone.
