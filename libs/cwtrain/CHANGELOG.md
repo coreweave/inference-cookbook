@@ -5,6 +5,10 @@ GitHub. Versions follow [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+- **Readable dashboard timestamps:** timeline tooltips show local dates and times with
+  milliseconds and UTC offsets. Span durations use days, hours, minutes, and seconds.
+  System charts format their timestamp axes as dates and times.
+
 - **Top-k sampling:** Miles and Slime now forward `rollout_top_k` through group sampling.
   Explicit disable values (`-1` and `0`) reach the completions API instead of inheriting the
   served model's generation defaults, which could silently enable top-k filtering.

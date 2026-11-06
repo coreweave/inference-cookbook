@@ -68,7 +68,7 @@ def test_miles_prioritizes_distinct_update_and_reference_kl_estimates():
 
 
 def test_catalog_is_immutable_versioned_and_uses_unscaled_native_values():
-    assert SPEC_VERSION == 2
+    assert SPEC_VERSION == 3
     assert SUPPORTED_FRAMEWORKS == ("miles", "slime", "nemo-rl", "axolotl")
     for framework in SUPPORTED_FRAMEWORKS:
         panels = catalog(framework)

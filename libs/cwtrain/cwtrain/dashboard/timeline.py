@@ -147,8 +147,10 @@ def timeline_spec() -> dict[str, Any]:
     color = {"scale": "color", "field": "phase"}
     span_tip = {
         "signal": "{'Phase': phaseLabels[datum.phase], 'Timeline step': datum.step, "
-        "'History row': datum.row, 'Start (Unix s)': datum.start, 'End (Unix s)': datum.end, "
-        "'Duration (ms)': datum.duration * 1000}"
+        "'History row': datum.row, "
+        "'Start (local time)': timeFormat(toDate(datum.start * 1000), '%Y-%m-%d %H:%M:%S.%L %Z'), "
+        "'End (local time)': timeFormat(toDate(datum.end * 1000), '%Y-%m-%d %H:%M:%S.%L %Z'), "
+        "'Duration': datum.duration_label}"
     }
     coverage_tip = {
         "signal": "{'Phase': phaseLabels[datum.phase], "
@@ -262,6 +264,26 @@ def timeline_spec() -> dict[str, Any]:
                     _filter(phase_filter),
                     {"type": "formula", "expr": "datum.start-origin", "as": "start_seconds"},
                     {"type": "formula", "expr": "datum.end-origin", "as": "end_seconds"},
+                    {
+                        "type": "formula",
+                        "expr": "round((datum.end-datum.start)*1000)/1000",
+                        "as": "duration_seconds_rounded",
+                    },
+                    {
+                        "type": "formula",
+                        "expr": (
+                            "datum.end>datum.start && datum.duration_seconds_rounded<0.001 "
+                            "? '<0.001 s' : "
+                            "(datum.duration_seconds_rounded>=86400?"
+                            "floor(datum.duration_seconds_rounded/86400)+' d ':'')+"
+                            "(datum.duration_seconds_rounded>=3600?"
+                            "floor(datum.duration_seconds_rounded%86400/3600)+' h ':'')+"
+                            "(datum.duration_seconds_rounded>=60?"
+                            "floor(datum.duration_seconds_rounded%3600/60)+' min ':'')+"
+                            "format(datum.duration_seconds_rounded%60,'.3~f')+' s'"
+                        ),
+                        "as": "duration_label",
+                    },
                 ],
             },
             {

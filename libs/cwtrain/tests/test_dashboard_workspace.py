@@ -81,6 +81,9 @@ def test_native_sdk_serializes_axes_filters_order_and_full_fidelity():
         assert panel["pointVisualizationMethod"] == "bucketing-gorilla"
     gpu = by_title["GPU utilization"]
     assert gpu["xAxis"] == "_timestamp"
+    assert gpu["xAxisFormat"] == "datetime"
+    assert gpu["xAxisTitle"] == "Time (local)"
+    assert "xAxisFormat" not in by_title["Training loss"]
     assert gpu["useMetricRegex"] is True and gpu["metrics"] == []
     assert re.fullmatch(gpu["metricRegex"], "system/gpu.12.gpu/l:new-writer")
     assert not re.fullmatch(gpu["metricRegex"], "system.gpu.process.0.gpu")
