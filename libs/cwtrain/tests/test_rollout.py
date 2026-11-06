@@ -152,8 +152,12 @@ def test_group_sampling_preserves_explicit_top_k_in_the_request(top_k) -> None:
     )
     asyncio.run(
         sample_groups(
-            sampler, [[Sample(prompt="p")]], tokenizer=Tokenizer(),
-            max_tokens=8, temperature=1.0, top_k=top_k,
+            sampler,
+            [[Sample(prompt="p")]],
+            tokenizer=Tokenizer(),
+            max_tokens=8,
+            temperature=1.0,
+            top_k=top_k,
         )
     )
     if top_k is None:
