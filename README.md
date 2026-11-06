@@ -61,6 +61,14 @@ bucket policy.
 | [nemo-rl-grpo-nemotron-3.5-lightning-30b-a3b](training/examples/nemo-rl-grpo-nemotron-3.5-lightning-30b-a3b/README.md) | NeMo-RL, GRPO | Nemotron 3.5 Lightning 30B-A3B BF16 | DAPO-Math-17k | 1 replica, 2 H100 GPUs |
 | [axolotl-sft-qwen3-4b](training/examples/axolotl-sft-qwen3-4b/README.md) | Axolotl SFT, full or LoRA | Qwen3-4B | 2,000 rows of NuminaMath-CoT | 2 replicas, 1 GPU each |
 
+To try `cwtrain` without Kubernetes, open the [hot-load notebook](training/examples/hotload_notebook.py)
+in [molab](https://molab.marimo.io/notebooks) or run `uvx marimo edit --sandbox
+training/examples/hotload_notebook.py` locally. It trains Qwen3-0.6B with GRPO on one GPU, samples
+its rollouts from a 1-GPU hot-load deployment, and hot-loads each step's weights as a verified
+delta, one button per stage. It needs only `COREWEAVE_API_TOKEN`, which also reaches the bucket
+through temporary keys from `cwic`. Its Local mode samples on the notebook's GPU and needs no
+CoreWeave account.
+
 ## Case studies
 
 A case study solves a real problem with Dedicated Inference: the problem, where the data comes
