@@ -144,6 +144,24 @@ def test_sample_groups_fills_samples_and_orders_choices() -> None:
     assert by_prompt["p1"]["auth"] == "Bearer k" and by_prompt["p1"]["path"] == "/v1/completions"
 
 
+@pytest.mark.parametrize("top_k", [None, -1, 0, 20])
+def test_group_sampling_preserves_explicit_top_k_in_the_request(top_k) -> None:
+    transport, seen = make_server([completions_response(["ok"])])
+    sampler = CompletionSampler(
+        RolloutConfig(base_url="https://gw/v1", model="m"), transport=transport
+    )
+    asyncio.run(
+        sample_groups(
+            sampler, [[Sample(prompt="p")]], tokenizer=Tokenizer(),
+            max_tokens=8, temperature=1.0, top_k=top_k,
+        )
+    )
+    if top_k is None:
+        assert "top_k" not in seen[0]
+    else:
+        assert seen[0]["top_k"] == top_k
+
+
 def test_retries_transient_failures_then_succeeds(monkeypatch) -> None:
     async def no_sleep(_s):
         return None

@@ -559,7 +559,8 @@ class CompletionSampler:
             payload["stop_token_ids"] = [int(t) for t in stop_token_ids]
         if include_stop_str_in_output is not None:
             payload["include_stop_str_in_output"] = bool(include_stop_str_in_output)
-        if top_k is not None and top_k > 0:
+        # Explicit disable values must override a model's generation_config.json defaults.
+        if top_k is not None:
             payload["top_k"] = int(top_k)
         if cache_salt:
             payload = with_nvext(payload, cache_salt=cache_salt)
@@ -1032,6 +1033,7 @@ async def sample_groups(
     max_tokens: int,
     temperature: float,
     top_p: float = 1.0,
+    top_k: int | None = None,
     stop: Sequence[str] | None = None,
     cache_salt: str | None = None,
 ) -> dict[str, float]:
@@ -1067,6 +1069,7 @@ async def sample_groups(
                 max_tokens=max_tokens,
                 temperature=temperature,
                 top_p=top_p,
+                top_k=top_k,
                 stop=stop,
                 cache_salt=cache_salt,
             )

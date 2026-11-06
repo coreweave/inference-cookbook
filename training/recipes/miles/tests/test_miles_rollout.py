@@ -75,6 +75,7 @@ def rollout(monkeypatch):
 
     async def sample_groups(sampler, groups, **kwargs):
         seen["configs"].append(sampler)
+        seen.setdefault("top_k", []).append(kwargs.get("top_k"))
         seen.setdefault("salts", []).append(kwargs.get("cache_salt"))
         for group in groups:
             for sample in group:
@@ -117,6 +118,19 @@ def test_routes_follow_the_replay_flag(rollout) -> None:
     assert out.samples[0][0].rollout_routed_experts.shape == (3, 4, 2)
     run(module, replay=False)
     assert seen["configs"][-1].routed_experts is False
+
+
+@pytest.mark.parametrize("top_k", [-1, 0, 20])
+def test_rollout_forwards_top_k(rollout, top_k) -> None:
+    module, seen = rollout
+    run(module, replay=False, rollout_top_k=top_k)
+    assert seen["top_k"] == [top_k]
+
+
+def test_rollout_defaults_to_disabled_top_k(rollout) -> None:
+    module, seen = rollout
+    run(module, replay=False)
+    assert seen["top_k"] == [-1]
 
 
 def test_routes_with_another_layer_count_than_the_trainer_fail_the_rollout(rollout) -> None:

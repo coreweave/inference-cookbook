@@ -18,16 +18,6 @@ from __future__ import annotations
 import logging
 import time
 
-from miles.rollout.base_types import (
-    BaseRolloutFn,
-    RolloutFnConstructorInput,
-    RolloutFnInput,
-    RolloutFnTrainInput,
-    RolloutFnTrainOutput,
-)
-from miles.rollout.rm_hub import batched_async_rm
-from miles.utils.processing_utils import load_tokenizer
-
 from cwtrain.errors import CWTrainError
 from cwtrain.integrations import tracking
 from cwtrain.integrations.rollout import (
@@ -38,6 +28,15 @@ from cwtrain.integrations.rollout import (
     sample_groups,
     shared_sampler,
 )
+from miles.rollout.base_types import (
+    BaseRolloutFn,
+    RolloutFnConstructorInput,
+    RolloutFnInput,
+    RolloutFnTrainInput,
+    RolloutFnTrainOutput,
+)
+from miles.rollout.rm_hub import batched_async_rm
+from miles.utils.processing_utils import load_tokenizer
 
 log = logging.getLogger(__name__)
 
@@ -66,6 +65,7 @@ class CoreWeaveRolloutFn(BaseRolloutFn):
             max_tokens=int(args.rollout_max_response_len),
             temperature=float(args.rollout_temperature),
             top_p=float(getattr(args, "rollout_top_p", 1.0) or 1.0),
+            top_k=getattr(args, "rollout_top_k", -1),
             stop=getattr(args, "rollout_stop", None),
             # one rollout samples one version; keep its prompts out of later versions' cache
             cache_salt=rollout_cache_salt(input.rollout_id),
