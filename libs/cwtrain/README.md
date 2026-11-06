@@ -17,6 +17,9 @@ inference engines. The library covers each part of the loop:
 - **Rollouts and frameworks** (`cwtrain.integrations`): a rollout sampler for the deployment's
   OpenAI-compatible endpoint, the post-write hook for slime and miles, and the generation backend,
   weight synchronizer and policy-worker extension for NeMo-RL.
+- **W&B dashboards** (`cwtrain dashboard ...`, pending release): native post-training views,
+  run comparisons, interactive phase timelines, and local timeline export.
+  See [Post-training dashboards](docs/dashboards.md).
 
 The [CoreWeave Inference Cookbook](https://github.com/coreweave/inference-cookbook) has the recipes
 that use `cwtrain` with miles, slime, NeMo-RL and Axolotl, and examples that run them end to end.
@@ -24,7 +27,7 @@ that use `cwtrain` with miles, slime, NeMo-RL and Axolotl, and examples that run
 ## Install
 
 ```bash
-pip install cwtrain
+python -m pip install --upgrade cwtrain
 ```
 
 This also installs the `cwtrain` CLI. The framework integrations need no extras: install
@@ -125,3 +128,19 @@ cwtrain deployment delete <uuid> --wait
 
 The deployment holds its GPUs until you delete it. `cwtrain --help` lists the commands, and
 `cwtrain <group> <command> --help` shows a command's options.
+
+## W&B dashboards
+
+The dashboard commands are planned for the next release and are not included in
+`cwtrain 1.0.2`. Once released, the standard package includes them and their W&B dependencies:
+
+```bash
+python -m pip install --upgrade cwtrain
+cwtrain dashboard setup --entity ENTITY --project PROJECT --framework miles --dry-run
+```
+
+The dry run previews the full metric catalogue offline. Authenticate with `wandb login` or
+`WANDB_API_KEY`, then omit `--dry-run` to create a managed **Post-training** view from the
+project's recorded metrics. Dashboard commands need W&B credentials, not CoreWeave or storage
+credentials. The [dashboard guide](docs/dashboards.md) covers the other frameworks, safe reruns,
+metric semantics, and exporting an interactive run timeline to HTML.

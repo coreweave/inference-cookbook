@@ -1,0 +1,336 @@
+{
+  "$schema": "https://vega.github.io/schema/vega/v5.json",
+  "description": "Run overview: current configuration and latest logged values for up to five visible runs. Timeline selection does not change these whole-run values.",
+  "width": 900,
+  "height": 310,
+  "padding": {
+    "left": 16,
+    "right": 16,
+    "top": 8,
+    "bottom": 8
+  },
+  "autosize": {
+    "type": "fit-x",
+    "contains": "padding",
+    "resize": true
+  },
+  "signals": [
+    {
+      "name": "labelWidth",
+      "update": "width<500?145:185"
+    },
+    {
+      "name": "columnWidth",
+      "update": "max(1,(width-labelWidth)/max(1,length(data('runs'))))"
+    }
+  ],
+  "data": [
+    {
+      "name": "wandb"
+    },
+    {
+      "name": "runs",
+      "source": "wandb",
+      "transform": [
+        {
+          "type": "window",
+          "ops": [
+            "row_number"
+          ],
+          "as": [
+            "run_index"
+          ]
+        },
+        {
+          "type": "formula",
+          "expr": "isValid(datum['${field:created}']) && isFinite(toNumber(toDate(datum['${field:created}']))) ? timeFormat(toDate(datum['${field:created}']),'%Y-%m-%d %H:%M') : 'Not recorded'",
+          "as": "created_value"
+        },
+        {
+          "type": "formula",
+          "expr": "(isValid(datum['${field:model}']) && datum['${field:model}']!=='' ? toString(datum['${field:model}']) : 'Not recorded')",
+          "as": "model_value"
+        },
+        {
+          "type": "formula",
+          "expr": "'${string:framework} / '+(isValid(datum['${field:algorithm}']) && datum['${field:algorithm}']!=='' ? toString(datum['${field:algorithm}']) : 'Not recorded')",
+          "as": "algorithm_value"
+        },
+        {
+          "type": "formula",
+          "expr": "(isValid(datum['${field:engine}']) && datum['${field:engine}']!=='' ? toString(datum['${field:engine}']) : 'Not recorded')+(isValid(datum['${field:engine_version}'])?' \u00b7 '+toString(datum['${field:engine_version}']):'')",
+          "as": "engine_value"
+        },
+        {
+          "type": "formula",
+          "expr": "datum['${field:replicas_min}']===datum['${field:replicas_max}'] ? (isNumber(datum['${field:replicas_min}']) && isFinite(datum['${field:replicas_min}']) ? format(datum['${field:replicas_min}'],'d') : 'Not recorded') : (isNumber(datum['${field:replicas_min}']) && isFinite(datum['${field:replicas_min}']) ? format(datum['${field:replicas_min}'],'d') : 'Not recorded')+'\u2013'+(isNumber(datum['${field:replicas_max}']) && isFinite(datum['${field:replicas_max}']) ? format(datum['${field:replicas_max}'],'d') : 'Not recorded')",
+          "as": "replicas_value"
+        },
+        {
+          "type": "formula",
+          "expr": "(isNumber(datum['${field:batch}']) && isFinite(datum['${field:batch}']) ? format(datum['${field:batch}'],'d') : 'Not recorded')+' prompts \u00d7 '+(isNumber(datum['${field:samples}']) && isFinite(datum['${field:samples}']) ? format(datum['${field:samples}'],'d') : 'Not recorded')+' samples'",
+          "as": "batch_value"
+        },
+        {
+          "type": "formula",
+          "expr": "(isNumber(datum['${field:train_batch}']) && isFinite(datum['${field:train_batch}']) ? format(datum['${field:train_batch}'],'d') : 'Not recorded')+' samples'",
+          "as": "train_batch_value"
+        },
+        {
+          "type": "formula",
+          "expr": "isBoolean(datum['${field:kl_enabled}']) ? (datum['${field:kl_enabled}']?'Enabled':'Disabled')+' \u00b7 coefficient '+(isNumber(datum['${field:kl_coef}']) && isFinite(datum['${field:kl_coef}']) ? format(datum['${field:kl_coef}'],'.4~g') : 'Not recorded') : 'Not recorded'",
+          "as": "kl_value"
+        },
+        {
+          "type": "formula",
+          "expr": "(isNumber(datum['${field:rollout_step}']) && isFinite(datum['${field:rollout_step}']) ? format(datum['${field:rollout_step}'],'d') : 'Not recorded')",
+          "as": "rollout_value"
+        },
+        {
+          "type": "formula",
+          "expr": "(isNumber(datum['${field:train_step}']) && isFinite(datum['${field:train_step}']) ? format(datum['${field:train_step}'],'d') : 'Not recorded')",
+          "as": "train_value"
+        },
+        {
+          "type": "formula",
+          "expr": "(isNumber(datum['${field:reward}']) && isFinite(datum['${field:reward}']) ? format(datum['${field:reward}'],'.5~g') : 'Not recorded')",
+          "as": "reward_value"
+        }
+      ]
+    },
+    {
+      "name": "labels",
+      "values": [
+        {
+          "label": "Created (local time)",
+          "row": 0
+        },
+        {
+          "label": "Model",
+          "row": 1
+        },
+        {
+          "label": "Framework / algorithm",
+          "row": 2
+        },
+        {
+          "label": "Inference engine",
+          "row": 3
+        },
+        {
+          "label": "Configured replicas",
+          "row": 4
+        },
+        {
+          "label": "Rollout batch",
+          "row": 5
+        },
+        {
+          "label": "Training batch",
+          "row": 6
+        },
+        {
+          "label": "Reference-policy KL",
+          "row": 7
+        },
+        {
+          "label": "Latest rollout step",
+          "row": 8
+        },
+        {
+          "label": "Latest optimizer step",
+          "row": 9
+        },
+        {
+          "label": "Latest policy reward",
+          "row": 10
+        }
+      ]
+    },
+    {
+      "name": "cells",
+      "source": "runs",
+      "transform": [
+        {
+          "type": "fold",
+          "fields": [
+            "created_value",
+            "model_value",
+            "algorithm_value",
+            "engine_value",
+            "replicas_value",
+            "batch_value",
+            "train_batch_value",
+            "kl_value",
+            "rollout_value",
+            "train_value",
+            "reward_value"
+          ],
+          "as": [
+            "field",
+            "value"
+          ]
+        },
+        {
+          "type": "formula",
+          "expr": "indexof([\"created_value\", \"model_value\", \"algorithm_value\", \"engine_value\", \"replicas_value\", \"batch_value\", \"train_batch_value\", \"kl_value\", \"rollout_value\", \"train_value\", \"reward_value\"],datum.field)",
+          "as": "row"
+        }
+      ]
+    }
+  ],
+  "marks": [
+    {
+      "type": "rect",
+      "from": {
+        "data": "labels"
+      },
+      "interactive": false,
+      "encode": {
+        "update": {
+          "x": {
+            "value": 0
+          },
+          "width": {
+            "signal": "width"
+          },
+          "y": {
+            "signal": "36+datum.row*22"
+          },
+          "height": {
+            "value": 22
+          },
+          "fill": {
+            "signal": "datum.row%2===0?'#f7f9fb':'#ffffff'"
+          }
+        }
+      }
+    },
+    {
+      "type": "text",
+      "from": {
+        "data": "labels"
+      },
+      "interactive": false,
+      "encode": {
+        "update": {
+          "x": {
+            "value": 8
+          },
+          "y": {
+            "signal": "47+datum.row*22"
+          },
+          "baseline": {
+            "value": "middle"
+          },
+          "text": {
+            "field": "label"
+          },
+          "fontSize": {
+            "value": 12
+          },
+          "fill": {
+            "value": "#657184"
+          },
+          "limit": {
+            "signal": "labelWidth-16"
+          }
+        }
+      }
+    },
+    {
+      "type": "text",
+      "from": {
+        "data": "runs"
+      },
+      "encode": {
+        "update": {
+          "x": {
+            "signal": "labelWidth+(datum.run_index-1)*columnWidth+10"
+          },
+          "y": {
+            "value": 18
+          },
+          "text": {
+            "field": "${field:run_name}"
+          },
+          "fontSize": {
+            "value": 13
+          },
+          "fontWeight": {
+            "value": 600
+          },
+          "fill": {
+            "value": "#263747"
+          },
+          "limit": {
+            "signal": "max(1,columnWidth-20)"
+          },
+          "tooltip": {
+            "field": "${field:run_name}"
+          }
+        }
+      }
+    },
+    {
+      "type": "text",
+      "from": {
+        "data": "cells"
+      },
+      "encode": {
+        "update": {
+          "x": {
+            "signal": "labelWidth+(datum.run_index-1)*columnWidth+10"
+          },
+          "y": {
+            "signal": "47+datum.row*22"
+          },
+          "baseline": {
+            "value": "middle"
+          },
+          "text": {
+            "field": "value"
+          },
+          "fontSize": {
+            "value": 12
+          },
+          "fill": {
+            "value": "#263747"
+          },
+          "limit": {
+            "signal": "max(1,columnWidth-20)"
+          },
+          "tooltip": {
+            "signal": "datum['${field:run_name}']+' \u00b7 '+datum.value"
+          }
+        }
+      }
+    },
+    {
+      "type": "text",
+      "interactive": false,
+      "encode": {
+        "update": {
+          "x": {
+            "value": 8
+          },
+          "y": {
+            "value": 299
+          },
+          "fontSize": {
+            "value": 11
+          },
+          "fill": {
+            "value": "#748094"
+          },
+          "text": {
+            "value": "Whole-run values \u00b7 up to 5 visible runs \u00b7 open a run from the sidebar for status and full details"
+          },
+          "limit": {
+            "signal": "width-16"
+          }
+        }
+      }
+    }
+  ]
+}

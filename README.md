@@ -103,7 +103,7 @@ does.
 Install the library and its CLI from [PyPI](https://pypi.org/project/cwtrain/):
 
 ```bash
-pip install cwtrain
+python -m pip install --upgrade cwtrain
 ```
 
 Point it at your account and bucket:
@@ -184,6 +184,10 @@ cwtrain deployment delete <deployment-uuid> --wait
 - With W&B turned on, the recipes log each hot-load's upload and install times, the rollout
   requests' latency, and when each phase of a step ran, next to the trainer's own metrics. Each
   recipe's README says how, under "Watching in W&B".
+  The [post-training dashboard commands](libs/cwtrain/docs/dashboards.md) create
+  framework-specific W&B views and export an interactive phase timeline from an existing run.
+  These commands are planned for the next release and are not in `cwtrain 1.0.2`; once
+  released, they are included with `python -m pip install --upgrade cwtrain`.
 
 ## How it works
 
