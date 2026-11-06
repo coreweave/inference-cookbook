@@ -8,13 +8,18 @@ telemetry. Miles and Slime also include a native run Overview and an interactive
 ## Install and authenticate
 
 The dashboard commands are planned for the next release; they are not included in
-`cwtrain 1.0.2`. Once released, install or upgrade the standard package:
+`cwtrain 1.0.2`. Once released, install the standard package:
 
 ```bash
-python -m pip install --upgrade cwtrain
+python -m pip install cwtrain
 ```
 
 The package includes the dashboard CLI and its W&B dependencies.
+The requirements are lower bounds (`wandb>=0.28.2`, `wandb-workspaces>=0.4.13`), allowing a normal
+install to retain compatible SDK versions already present in a trainer image. Dashboard setup
+does not require W&B 0.31. CI checks first-time wheel installs beside W&B 0.28.2 and 0.30.0 with
+both pip and uv, including offline metric logging and native panel serialization. These checks
+do not replace full training tests in the recipe images.
 
 Authenticate with `wandb login` or supply `WANDB_API_KEY` in your environment. Set `WANDB_BASE_URL`
 when using your organization's W&B deployment instead of the default cloud endpoint. These

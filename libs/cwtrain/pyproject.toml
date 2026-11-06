@@ -41,9 +41,10 @@ dependencies = [
     "numpy>=1.24",
     "zstandard>=0.21",
     # The dashboard CLI is included in the standard installation.
-    # Native dashboard setup uses Api.create_custom_chart.
-    "wandb>=0.31,<0.32",
-    "wandb-workspaces>=0.4.13,<0.5",
+    # Api.create_custom_chart is available in 0.28.2. Keep lower bounds so
+    # installing the wheel preserves compatible W&B versions in trainer images.
+    "wandb>=0.28.2",
+    "wandb-workspaces>=0.4.13",
 ]
 
 [project.urls]

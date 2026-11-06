@@ -334,8 +334,8 @@ requires-dist = [
     { name = "numpy", specifier = ">=1.24" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
-    { name = "wandb", specifier = ">=0.28.2,<0.32" },
-    { name = "wandb-workspaces", specifier = ">=0.4.13,<0.5" },
+    { name = "wandb", specifier = ">=0.28.2" },
+    { name = "wandb-workspaces", specifier = ">=0.4.13" },
     { name = "zstandard", specifier = ">=0.21" },
 ]
 provides-extras = ["dev"]

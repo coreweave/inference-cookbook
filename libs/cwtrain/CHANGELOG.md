@@ -8,7 +8,8 @@ GitHub. Versions follow [Semantic Versioning](https://semver.org/).
 - **Post-training dashboards:** `cwtrain dashboard setup` creates a native W&B saved view from
   recorded metrics, with framework-specific training, rollout, hot-load, evaluation, and system
   charts. Miles and Slime include a run comparison Overview and an interactive reward step
-  selector above elapsed-time phase spans. The standard package includes dashboard dependencies;
+  selector above elapsed-time phase spans. The standard package includes dashboard dependencies
+  with lower bounds, supporting W&B 0.28.2 and later without requiring a 0.31 upgrade;
   unchanged setup reruns reuse the view without rewriting personal changes. A separate
   `cwtrain dashboard timeline` command exports unsampled run history to local HTML.
 
