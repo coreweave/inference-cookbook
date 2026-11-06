@@ -123,6 +123,11 @@ jobs:
           ruff format --check .
       - name: Test
         run: pytest -q
+      - name: Test native dashboard dataflow
+        if: matrix.python == '3.12'
+        run: |
+          npm install --prefix "$RUNNER_TEMP/cwtrain-vega" --ignore-scripts --no-audit --no-fund vega@5.33.0
+          VEGA_RUNTIME="$RUNNER_TEMP/cwtrain-vega/node_modules/vega" node tests/test_dashboard_vega.cjs
       - name: Build distributions
         run: uv build
       - name: Store release distributions

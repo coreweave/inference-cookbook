@@ -36,7 +36,8 @@ def test_offline_dry_run_needs_neither_sdk_imports_nor_inference_credentials(
     output = capsys.readouterr()
     plan = json.loads(output.out)
     assert output.err == ""
-    assert plan["name"] == "Post-training — Miles"
+    assert plan["name"] == "Post-training"
+    assert [panel["kind"] for panel in plan["native_panels"]] == ["overview", "timeline"]
     assert plan["entity"] == "team" and plan["project"] == "project"
     assert plan["panels"] and plan["omitted_metrics"] == []
     assert not state.exists() and not list(tmp_path.iterdir())
@@ -127,6 +128,7 @@ def test_setup_discovers_at_most_ten_matching_runs_and_forwards_only_available_k
         api_host="https://api.wandb.example",
         username="researcher",
         app_url=sources[0].url,
+        api=api,
     )
     result = json.loads(capsys.readouterr().out)
     assert result["discovered_runs"] == [source.id for source in sources]

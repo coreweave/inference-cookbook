@@ -19,7 +19,7 @@ from typing import Literal
 
 Framework = Literal["miles", "slime", "nemo-rl", "axolotl"]
 SUPPORTED_FRAMEWORKS: tuple[Framework, ...] = ("miles", "slime", "nemo-rl", "axolotl")
-SPEC_VERSION = 1
+SPEC_VERSION = 2
 
 
 @dataclass(frozen=True, slots=True)

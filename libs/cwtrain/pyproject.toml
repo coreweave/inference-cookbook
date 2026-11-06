@@ -41,7 +41,8 @@ dependencies = [
     "numpy>=1.24",
     "zstandard>=0.21",
     # The dashboard CLI is included in the standard installation.
-    "wandb>=0.28.2,<0.32",
+    # Native dashboard setup uses Api.create_custom_chart.
+    "wandb>=0.31,<0.32",
     "wandb-workspaces>=0.4.13,<0.5",
 ]
 

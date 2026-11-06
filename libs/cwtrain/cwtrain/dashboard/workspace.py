@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import re
+import uuid
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import asdict, fields, is_dataclass, replace
@@ -18,10 +19,9 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 
+from cwtrain.dashboard import native
 from cwtrain.dashboard.catalog import SPEC_VERSION, Framework, catalog, system_panels
 from cwtrain.errors import CWTrainError
-
-_LABELS = {"miles": "Miles", "slime": "Slime", "nemo-rl": "NeMo-RL", "axolotl": "Axolotl"}
 
 
 def definition(
@@ -62,8 +62,9 @@ def definition(
     return {
         "spec_version": SPEC_VERSION,
         "framework": framework,
-        "name": f"Post-training — {_LABELS[framework]}",
+        "name": "Post-training",
         "panels": panel_specs,
+        "native_panels": native.panels(framework, metric_keys),
         "omitted_metrics": sorted(set(omitted)),
         "system_discovery": "recent matching runs; unavailable offline",
         "run_filter": {"tags": {"$in": [framework]}, "jobType": "train"},
@@ -82,6 +83,15 @@ def build_workspace(entity: str, project: str, plan: dict[str, Any]) -> Any:
         ) from exc
 
     sections = {}
+    for panel in plan.get("native_panels", ()):
+        sections[panel["section"]] = [
+            wr.CustomChart(
+                query=panel["query"],
+                chart_name=f"{entity}/cwtrain-{panel['kind']}-{panel['spec_sha256'][:12]}",
+                chart_fields=panel["fields"],
+                chart_strings=panel["strings"],
+            )
+        ]
     for panel in plan["panels"]:
         sections.setdefault(panel["section"], []).append(
             wr.LinePlot(
@@ -102,7 +112,7 @@ def build_workspace(entity: str, project: str, plan: dict[str, Any]) -> Any:
     framework_filter = ws.Tags().isin([plan["framework"]])
     if plan.get("included_runs"):
         framework_filter = ws.Or(framework_filter, ws.Metric("ID").isin(plan["included_runs"]))
-    return ws.Workspace(
+    return native.workspace_type()(
         entity=entity,
         project=project,
         name=plan["name"],
@@ -112,7 +122,10 @@ def build_workspace(entity: str, project: str, plan: dict[str, Any]) -> Any:
                 name=name,
                 panels=panels,
                 is_open=True,
-                layout_settings=ws.SectionLayoutSettings(columns=2, rows=2),
+                layout_settings=ws.SectionLayoutSettings(
+                    columns=1 if name in {"Overview", "Timeline"} else 2,
+                    rows=1 if name in {"Overview", "Timeline"} else 2,
+                ),
             )
             for name, panels in sections.items()
         ],
@@ -213,6 +226,7 @@ def save_managed(
     api_host: str,
     username: str,
     app_url: str,
+    api: Any = None,
 ) -> dict[str, Any]:
     """Create a view or reuse its URL; existing views are never rewritten.
 
@@ -259,8 +273,30 @@ def save_managed(
             )
         # A server may commit a creation even if its response is lost. Record intent
         # first and fail closed on the next invocation rather than creating a duplicate.
-        state["views"][scope] = {"pending": True, "previous": record}
+        if plan.get("native_panels") and api is None:
+            raise CWTrainError("native dashboard setup requires a W&B API client")
+        state["views"][scope] = {"pending": True, "previous": record, "presets": {}}
         write_state(path, state)
+        presets = state["views"][scope]["presets"]
+        for panel in plan.get("native_panels", ()):
+            # A preset belongs to this managed view; never update a preset used
+            # by another view. Persist its name before the request in case the
+            # server commits and the response is lost.
+            name = f"cwtrain-{panel['kind']}-{uuid.uuid4().hex[:12]}"
+            presets[panel["kind"]] = {"name": name, "status": "pending"}
+            write_state(path, state)
+            preset_id = api.create_custom_chart(
+                entity=workspace.entity,
+                name=name,
+                display_name=f"Post-training {panel['kind']}",
+                spec_type="vega2",
+                access="private",
+                spec=native.spec(panel["kind"]),
+            )
+            presets[panel["kind"]].update(status="complete", id=preset_id)
+            write_state(path, state)
+            group = next(s for s in workspace.sections if s.name == panel["section"])
+            group.panels[0].chart_name = preset_id
         workspace.save()
         # Persist the URL before reloading. A failed verification must not create another view.
         url = workspace.url
@@ -270,6 +306,7 @@ def save_managed(
             "template_hash": template_hash,
             "included_runs": sorted(required_fallbacks),
             "remote_hash": None,
+            "presets": presets,
         }
         state["views"][scope] = record
         write_state(path, state)

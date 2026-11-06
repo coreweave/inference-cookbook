@@ -1,0 +1,1316 @@
+{
+  "$schema": "https://vega.github.io/schema/vega/v5.json",
+  "description": "Logged policy reward by rollout step doubles as a step-range selector. The recorded phase spans below retain actual elapsed-time durations.",
+  "width": 900,
+  "height": 460,
+  "padding": {
+    "left": 12,
+    "right": 8,
+    "top": 4,
+    "bottom": 38
+  },
+  "autosize": {
+    "type": "fit-x",
+    "contains": "padding",
+    "resize": true
+  },
+  "config": {
+    "axis": {
+      "labelFontSize": 11,
+      "titleFontSize": 12,
+      "gridColor": "#e5e7eb"
+    }
+  },
+  "signals": [
+    {
+      "name": "phaseOrder",
+      "value": [
+        "mirror",
+        "upload",
+        "hotload",
+        "hotload_first_replica",
+        "hotload_peers",
+        "rollout",
+        "reward",
+        "logprobs",
+        "update"
+      ]
+    },
+    {
+      "name": "phaseLabels",
+      "value": {
+        "mirror": "Mirror",
+        "upload": "Upload",
+        "hotload": "Hot-load",
+        "hotload_first_replica": "First replica",
+        "hotload_peers": "Peers",
+        "rollout": "Rollout",
+        "reward": "Reward",
+        "logprobs": "Log-probs",
+        "update": "Update"
+      }
+    },
+    {
+      "name": "startKeys",
+      "value": [
+        "${field:start_mirror}",
+        "${field:start_upload}",
+        "${field:start_hotload}",
+        "${field:start_hotload_first_replica}",
+        "${field:start_hotload_peers}",
+        "${field:start_rollout}",
+        "${field:start_reward}",
+        "${field:start_logprobs}",
+        "${field:start_update}"
+      ]
+    },
+    {
+      "name": "endKeys",
+      "value": [
+        "${field:end_mirror}",
+        "${field:end_upload}",
+        "${field:end_hotload}",
+        "${field:end_hotload_first_replica}",
+        "${field:end_hotload_peers}",
+        "${field:end_rollout}",
+        "${field:end_reward}",
+        "${field:end_logprobs}",
+        "${field:end_update}"
+      ]
+    },
+    {
+      "name": "detailHeight",
+      "value": 250
+    },
+    {
+      "name": "overviewTop",
+      "value": 0
+    },
+    {
+      "name": "overviewHeight",
+      "value": 108
+    },
+    {
+      "name": "fullDuration",
+      "update": "length(data('extent')) && isValid(data('extent')[0].end) ? max(0.001,data('extent')[0].end) : 1"
+    },
+    {
+      "name": "detailTop",
+      "value": 195
+    },
+    {
+      "name": "missingCount",
+      "update": "length(data('unassigned_spans'))"
+    },
+    {
+      "name": "overviewPlotWidth",
+      "update": "max(40,width-(missingCount>0?90:0))"
+    },
+    {
+      "name": "minStep",
+      "update": "length(data('step_extent')) && isValid(data('step_extent')[0].min) && isFinite(data('step_extent')[0].min) ? data('step_extent')[0].min : 0"
+    },
+    {
+      "name": "maxStep",
+      "update": "length(data('step_extent')) && isValid(data('step_extent')[0].max) && isFinite(data('step_extent')[0].max) ? data('step_extent')[0].max : 0"
+    },
+    {
+      "name": "selectionMode",
+      "value": "all",
+      "on": [
+        {
+          "events": "@overview_hit:pointerdown",
+          "update": "hasSteps?'steps':'all'"
+        },
+        {
+          "events": "@overview_hit:dblclick",
+          "update": "'all'"
+        },
+        {
+          "events": "@unassigned_hit:pointerdown",
+          "update": "selectionMode==='missing'?'all':'missing'"
+        },
+        {
+          "events": "@reset_hit:pointerdown",
+          "update": "'all'"
+        }
+      ]
+    },
+    {
+      "name": "brush",
+      "value": [
+        0,
+        0
+      ],
+      "on": [
+        {
+          "events": "@overview_hit:pointerdown",
+          "update": "[invert('overview_x',clamp(x(),0,overviewPlotWidth)),invert('overview_x',clamp(x(),0,overviewPlotWidth))]"
+        },
+        {
+          "events": "[@overview_hit:pointerdown,window:pointerup] > window:pointermove!",
+          "update": "[brush[0],invert('overview_x',clamp(x(),0,overviewPlotWidth))]"
+        },
+        {
+          "events": "@overview_hit:dblclick",
+          "update": "[0,0]"
+        },
+        {
+          "events": "@reset_hit:pointerdown",
+          "update": "[0,0]"
+        }
+      ]
+    },
+    {
+      "name": "selectedStepMin",
+      "update": "clamp(floor(min(brush[0],brush[1])+0.5),minStep,maxStep)"
+    },
+    {
+      "name": "selectedStepMax",
+      "update": "clamp(floor(max(brush[0],brush[1])+0.5),minStep,maxStep)"
+    },
+    {
+      "name": "detailDomain",
+      "update": "selectionMode==='all' || !length(data('selected_extent')) || !isValid(data('selected_extent')[0].start) || !isFinite(data('selected_extent')[0].start) ? [0,fullDuration] : [data('selected_extent')[0].start,max(data('selected_extent')[0].start+0.001,data('selected_extent')[0].end)]"
+    },
+    {
+      "name": "hasSteps",
+      "update": "length(data('step_values'))>0"
+    }
+  ],
+  "data": [
+    {
+      "name": "wandb"
+    },
+    {
+      "name": "history_rows",
+      "source": "wandb",
+      "transform": [
+        {
+          "type": "filter",
+          "expr": "isNumber(datum.val) && isFinite(datum.val)"
+        },
+        {
+          "type": "pivot",
+          "field": "key",
+          "value": "val",
+          "groupby": [
+            "id",
+            "${field:run_name}",
+            "${field:history_step}"
+          ],
+          "op": "max"
+        }
+      ]
+    },
+    {
+      "name": "reward_step_mapping",
+      "source": "history_rows",
+      "transform": [
+        {
+          "type": "filter",
+          "expr": "isNumber(datum['${field:timeline_step}']) && isFinite(datum['${field:timeline_step}']) && isNumber(datum['${field:reward_step}']) && isFinite(datum['${field:reward_step}'])"
+        },
+        {
+          "type": "aggregate",
+          "groupby": [
+            "id",
+            "${field:reward_step}"
+          ],
+          "fields": [
+            "${field:timeline_step}",
+            "${field:timeline_step}"
+          ],
+          "ops": [
+            "distinct",
+            "min"
+          ],
+          "as": [
+            "step_count",
+            "timeline_step"
+          ]
+        },
+        {
+          "type": "filter",
+          "expr": "datum.step_count===1"
+        },
+        {
+          "type": "formula",
+          "expr": "toString(datum.id)+':'+toString(datum['${field:reward_step}'])",
+          "as": "reward_key"
+        }
+      ]
+    },
+    {
+      "name": "reward_points",
+      "source": "history_rows",
+      "transform": [
+        {
+          "type": "formula",
+          "expr": "toString(datum.id)+':'+toString(datum['${field:reward_step}'])",
+          "as": "reward_key"
+        },
+        {
+          "type": "lookup",
+          "from": "reward_step_mapping",
+          "key": "reward_key",
+          "fields": [
+            "reward_key"
+          ],
+          "values": [
+            "timeline_step"
+          ],
+          "as": [
+            "step"
+          ],
+          "default": null
+        },
+        {
+          "type": "formula",
+          "expr": "datum['${field:reward_value}']",
+          "as": "reward"
+        },
+        {
+          "type": "formula",
+          "expr": "datum['${field:history_step}']",
+          "as": "history_step"
+        },
+        {
+          "type": "formula",
+          "expr": "datum['${field:run_name}']",
+          "as": "run_name"
+        },
+        {
+          "type": "filter",
+          "expr": "isNumber(datum.step) && isFinite(datum.step) && isNumber(datum.reward) && isFinite(datum.reward)"
+        },
+        {
+          "type": "window",
+          "groupby": [
+            "id",
+            "step"
+          ],
+          "sort": {
+            "field": [
+              "history_step"
+            ],
+            "order": [
+              "descending"
+            ]
+          },
+          "ops": [
+            "row_number"
+          ],
+          "as": [
+            "sample_rank"
+          ]
+        },
+        {
+          "type": "filter",
+          "expr": "datum.sample_rank===1"
+        },
+        {
+          "type": "collect",
+          "sort": {
+            "field": [
+              "id",
+              "step"
+            ],
+            "order": [
+              "ascending",
+              "ascending"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "spans",
+      "source": "history_rows",
+      "transform": [
+        {
+          "type": "fold",
+          "fields": [
+            "${field:start_mirror}",
+            "${field:start_upload}",
+            "${field:start_hotload}",
+            "${field:start_hotload_first_replica}",
+            "${field:start_hotload_peers}",
+            "${field:start_rollout}",
+            "${field:start_reward}",
+            "${field:start_logprobs}",
+            "${field:start_update}"
+          ],
+          "as": [
+            "phase_key",
+            "start"
+          ]
+        },
+        {
+          "type": "filter",
+          "expr": "datum.start != null && isFinite(datum.start)"
+        },
+        {
+          "type": "formula",
+          "expr": "indexof(startKeys,datum.phase_key)",
+          "as": "phase_index"
+        },
+        {
+          "type": "formula",
+          "expr": "datum[endKeys[datum.phase_index]]",
+          "as": "end"
+        },
+        {
+          "type": "filter",
+          "expr": "datum.end != null && isFinite(datum.end) && datum.end >= datum.start"
+        },
+        {
+          "type": "formula",
+          "expr": "phaseOrder[datum.phase_index]",
+          "as": "phase"
+        },
+        {
+          "type": "formula",
+          "expr": "datum['${field:run_name}']",
+          "as": "run_name"
+        },
+        {
+          "type": "formula",
+          "expr": "datum['${field:timeline_step}']",
+          "as": "step"
+        },
+        {
+          "type": "formula",
+          "expr": "datum['${field:history_step}']",
+          "as": "history_step"
+        },
+        {
+          "type": "joinaggregate",
+          "groupby": [
+            "id",
+            "run_name"
+          ],
+          "fields": [
+            "start"
+          ],
+          "ops": [
+            "min"
+          ],
+          "as": [
+            "origin"
+          ]
+        },
+        {
+          "type": "formula",
+          "expr": "datum.start-datum.origin",
+          "as": "start_seconds"
+        },
+        {
+          "type": "formula",
+          "expr": "datum.end-datum.origin",
+          "as": "end_seconds"
+        },
+        {
+          "type": "formula",
+          "expr": "(datum.end-datum.start)*1000",
+          "as": "duration_ms"
+        },
+        {
+          "type": "formula",
+          "expr": "isNumber(datum.step) && isFinite(datum.step)",
+          "as": "has_step"
+        }
+      ]
+    },
+    {
+      "name": "extent",
+      "source": "spans",
+      "transform": [
+        {
+          "type": "aggregate",
+          "fields": [
+            "end_seconds"
+          ],
+          "ops": [
+            "max"
+          ],
+          "as": [
+            "end"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "assigned_spans",
+      "source": "spans",
+      "transform": [
+        {
+          "type": "filter",
+          "expr": "datum.has_step"
+        }
+      ]
+    },
+    {
+      "name": "unassigned_spans",
+      "source": "spans",
+      "transform": [
+        {
+          "type": "filter",
+          "expr": "!datum.has_step"
+        }
+      ]
+    },
+    {
+      "name": "step_values",
+      "source": [
+        "assigned_spans",
+        "reward_points"
+      ]
+    },
+    {
+      "name": "step_extent",
+      "source": "step_values",
+      "transform": [
+        {
+          "type": "aggregate",
+          "fields": [
+            "step",
+            "step"
+          ],
+          "ops": [
+            "min",
+            "max"
+          ],
+          "as": [
+            "min",
+            "max"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "selected_spans",
+      "source": "spans",
+      "transform": [
+        {
+          "type": "filter",
+          "expr": "selectionMode==='all' || (selectionMode==='missing' ? !datum.has_step : datum.has_step && datum.step>=selectedStepMin && datum.step<=selectedStepMax)"
+        }
+      ]
+    },
+    {
+      "name": "selected_extent",
+      "source": "selected_spans",
+      "transform": [
+        {
+          "type": "aggregate",
+          "fields": [
+            "start_seconds",
+            "end_seconds"
+          ],
+          "ops": [
+            "min",
+            "max"
+          ],
+          "as": [
+            "start",
+            "end"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "visible",
+      "source": "selected_spans"
+    },
+    {
+      "name": "bars",
+      "source": "visible",
+      "transform": [
+        {
+          "type": "filter",
+          "expr": "scale('detail_x',datum.end_seconds)-scale('detail_x',datum.start_seconds)>=2"
+        }
+      ]
+    },
+    {
+      "name": "short",
+      "source": "visible",
+      "transform": [
+        {
+          "type": "filter",
+          "expr": "scale('detail_x',datum.end_seconds)-scale('detail_x',datum.start_seconds)<2"
+        }
+      ]
+    }
+  ],
+  "scales": [
+    {
+      "name": "detail_x",
+      "type": "linear",
+      "domain": {
+        "signal": "detailDomain"
+      },
+      "range": "width",
+      "zero": false
+    },
+    {
+      "name": "overview_x",
+      "type": "linear",
+      "domain": {
+        "signal": "[minStep-0.5,maxStep+0.5]"
+      },
+      "range": {
+        "signal": "[0,overviewPlotWidth]"
+      },
+      "zero": false
+    },
+    {
+      "name": "detail_y",
+      "type": "band",
+      "domain": [
+        "mirror",
+        "upload",
+        "hotload",
+        "hotload_first_replica",
+        "hotload_peers",
+        "rollout",
+        "reward",
+        "logprobs",
+        "update"
+      ],
+      "range": {
+        "signal": "[0,detailHeight]"
+      },
+      "padding": 0.3
+    },
+    {
+      "name": "color",
+      "type": "ordinal",
+      "domain": [
+        "mirror",
+        "upload",
+        "hotload",
+        "hotload_first_replica",
+        "hotload_peers",
+        "rollout",
+        "reward",
+        "logprobs",
+        "update"
+      ],
+      "range": [
+        "#b78845",
+        "#c9954d",
+        "#2488a5",
+        "#80b5c8",
+        "#589bb3",
+        "#2b8e6f",
+        "#d38b24",
+        "#9363bd",
+        "#6e48a1"
+      ]
+    },
+    {
+      "name": "reward_y",
+      "type": "linear",
+      "domain": {
+        "data": "reward_points",
+        "field": "reward"
+      },
+      "range": {
+        "signal": "[overviewHeight,0]"
+      },
+      "zero": false,
+      "nice": true
+    },
+    {
+      "name": "reward_color",
+      "type": "ordinal",
+      "domain": {
+        "data": "reward_points",
+        "field": "id"
+      },
+      "range": [
+        "#2488a5",
+        "#9763b6",
+        "#c47e32",
+        "#388b69",
+        "#ba6079",
+        "#6c7895"
+      ]
+    }
+  ],
+  "marks": [
+    {
+      "type": "text",
+      "encode": {
+        "update": {
+          "x": {
+            "value": 0
+          },
+          "y": {
+            "signal": "overviewTop-12"
+          },
+          "text": {
+            "signal": "'Select rollout steps \u2014 '+(selectionMode==='missing'?'No recorded step':!hasSteps?'No recorded steps':selectionMode==='steps'?'Steps '+format(selectedStepMin,'d')+'\u2013'+format(selectedStepMax,'d'):'All steps ('+format(minStep,'d')+'\u2013'+format(maxStep,'d')+')')"
+          },
+          "fontSize": {
+            "value": 13
+          },
+          "fontWeight": {
+            "value": "bold"
+          },
+          "fill": {
+            "value": "#374151"
+          },
+          "limit": {
+            "signal": "max(20,width-80)"
+          }
+        }
+      }
+    },
+    {
+      "type": "group",
+      "name": "overview",
+      "encode": {
+        "update": {
+          "y": {
+            "signal": "overviewTop"
+          },
+          "width": {
+            "signal": "width"
+          },
+          "height": {
+            "signal": "overviewHeight"
+          }
+        }
+      },
+      "axes": [
+        {
+          "orient": "bottom",
+          "scale": "overview_x",
+          "title": {
+            "signal": "hasSteps?'Rollout step':''"
+          },
+          "format": "d",
+          "tickCount": {
+            "signal": "min(width<500?4:8,maxStep-minStep+1)"
+          },
+          "domain": false,
+          "encode": {
+            "labels": {
+              "update": {
+                "opacity": {
+                  "signal": "hasSteps?1:0"
+                }
+              }
+            },
+            "ticks": {
+              "update": {
+                "opacity": {
+                  "signal": "hasSteps?1:0"
+                }
+              }
+            }
+          }
+        },
+        {
+          "orient": "left",
+          "scale": "reward_y",
+          "title": "Policy reward",
+          "tickCount": 3,
+          "format": ".2~f",
+          "domain": false,
+          "encode": {
+            "labels": {
+              "update": {
+                "opacity": {
+                  "signal": "length(data('reward_points'))?1:0"
+                }
+              }
+            },
+            "ticks": {
+              "update": {
+                "opacity": {
+                  "signal": "length(data('reward_points'))?1:0"
+                }
+              }
+            },
+            "title": {
+              "update": {
+                "opacity": {
+                  "signal": "length(data('reward_points'))?1:0"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "marks": [
+        {
+          "type": "rect",
+          "interactive": false,
+          "encode": {
+            "update": {
+              "width": {
+                "signal": "overviewPlotWidth"
+              },
+              "height": {
+                "signal": "overviewHeight"
+              },
+              "fill": {
+                "value": "#f8fafc"
+              },
+              "stroke": {
+                "value": "#e5e7eb"
+              },
+              "cornerRadius": {
+                "value": 4
+              }
+            }
+          }
+        },
+        {
+          "type": "rect",
+          "interactive": false,
+          "encode": {
+            "update": {
+              "x": {
+                "signal": "selectionMode==='steps'?scale('overview_x',selectedStepMin-0.5):0"
+              },
+              "x2": {
+                "signal": "selectionMode==='steps'?scale('overview_x',selectedStepMax+0.5):overviewPlotWidth"
+              },
+              "height": {
+                "signal": "overviewHeight"
+              },
+              "cornerRadius": {
+                "value": 3
+              },
+              "fill": {
+                "value": "#2488a5"
+              },
+              "fillOpacity": {
+                "signal": "hasSteps && selectionMode!=='missing'?(selectionMode==='steps'?0.13:0.025):0"
+              },
+              "stroke": {
+                "value": "#2488a5"
+              },
+              "strokeOpacity": {
+                "signal": "hasSteps && selectionMode!=='missing'?1:0"
+              },
+              "strokeWidth": {
+                "value": 1.5
+              }
+            }
+          }
+        },
+        {
+          "type": "group",
+          "from": {
+            "facet": {
+              "name": "reward_run",
+              "data": "reward_points",
+              "groupby": "id"
+            }
+          },
+          "marks": [
+            {
+              "type": "line",
+              "interactive": false,
+              "from": {
+                "data": "reward_run"
+              },
+              "sort": {
+                "field": "datum.step"
+              },
+              "encode": {
+                "update": {
+                  "x": {
+                    "scale": "overview_x",
+                    "field": "step"
+                  },
+                  "y": {
+                    "scale": "reward_y",
+                    "field": "reward"
+                  },
+                  "stroke": {
+                    "scale": "reward_color",
+                    "field": "id"
+                  },
+                  "strokeWidth": {
+                    "value": 2
+                  }
+                }
+              }
+            }
+          ]
+        },
+        {
+          "type": "symbol",
+          "interactive": false,
+          "from": {
+            "data": "reward_points"
+          },
+          "encode": {
+            "update": {
+              "x": {
+                "scale": "overview_x",
+                "field": "step"
+              },
+              "y": {
+                "scale": "reward_y",
+                "field": "reward"
+              },
+              "fill": {
+                "scale": "reward_color",
+                "field": "id"
+              },
+              "size": {
+                "signal": "length(data('reward_points'))<100?24:0"
+              }
+            }
+          }
+        },
+        {
+          "type": "text",
+          "interactive": false,
+          "encode": {
+            "update": {
+              "x": {
+                "signal": "overviewPlotWidth/2"
+              },
+              "y": {
+                "signal": "overviewHeight/2"
+              },
+              "align": {
+                "value": "center"
+              },
+              "fill": {
+                "value": "#6b7280"
+              },
+              "fontSize": {
+                "value": 12
+              },
+              "limit": {
+                "signal": "overviewPlotWidth"
+              },
+              "text": {
+                "signal": "length(data('reward_points'))?'':'No reward aligned to recorded steps \u00b7 step selection remains available'"
+              }
+            }
+          }
+        },
+        {
+          "name": "drag_hint_background",
+          "type": "rect",
+          "interactive": false,
+          "encode": {
+            "update": {
+              "x": {
+                "signal": "max(8,overviewPlotWidth-166)"
+              },
+              "y": {
+                "signal": "overviewHeight-30"
+              },
+              "width": {
+                "value": 156
+              },
+              "height": {
+                "value": 22
+              },
+              "cornerRadius": {
+                "value": 4
+              },
+              "fill": {
+                "value": "#ffffff"
+              },
+              "fillOpacity": {
+                "value": 0.94
+              },
+              "opacity": {
+                "signal": "hasSteps && selectionMode==='all'?1:0"
+              }
+            }
+          }
+        },
+        {
+          "name": "drag_hint",
+          "type": "text",
+          "interactive": false,
+          "encode": {
+            "update": {
+              "x": {
+                "signal": "max(8,overviewPlotWidth-166)+78"
+              },
+              "y": {
+                "signal": "overviewHeight-19"
+              },
+              "align": {
+                "value": "center"
+              },
+              "baseline": {
+                "value": "middle"
+              },
+              "fontSize": {
+                "value": 12
+              },
+              "fontWeight": {
+                "value": 600
+              },
+              "fill": {
+                "value": "#176d87"
+              },
+              "text": {
+                "signal": "hasSteps && selectionMode==='all'?'\u2190 Drag to select \u2192':''"
+              }
+            }
+          }
+        },
+        {
+          "name": "overview_hit",
+          "type": "rect",
+          "encode": {
+            "update": {
+              "width": {
+                "signal": "hasSteps?overviewPlotWidth:0"
+              },
+              "height": {
+                "signal": "overviewHeight"
+              },
+              "fill": {
+                "value": "transparent"
+              },
+              "cursor": {
+                "value": "crosshair"
+              },
+              "tooltip": {
+                "value": "Drag on the reward overview to select rollout steps. Double-click or Reset to show all steps."
+              }
+            }
+          }
+        },
+        {
+          "name": "unassigned_hit",
+          "type": "rect",
+          "encode": {
+            "update": {
+              "x": {
+                "signal": "overviewPlotWidth+20"
+              },
+              "width": {
+                "signal": "missingCount>0?70:0"
+              },
+              "height": {
+                "value": 28
+              },
+              "cornerRadius": {
+                "value": 4
+              },
+              "fill": {
+                "signal": "selectionMode==='missing'?'#d9e5f2':'#eef1f5'"
+              },
+              "stroke": {
+                "signal": "selectionMode==='missing'?'#4477aa':'#cbd2dc'"
+              },
+              "strokeOpacity": {
+                "signal": "missingCount>0?1:0"
+              },
+              "cursor": {
+                "value": "pointer"
+              },
+              "tooltip": {
+                "signal": "{'Spans without recorded rollout step':missingCount,'Action':'Click to inspect; click again to show all'}"
+              }
+            }
+          }
+        },
+        {
+          "type": "text",
+          "interactive": false,
+          "encode": {
+            "update": {
+              "x": {
+                "signal": "overviewPlotWidth+55"
+              },
+              "y": {
+                "value": 14
+              },
+              "align": {
+                "value": "center"
+              },
+              "baseline": {
+                "value": "middle"
+              },
+              "fontSize": {
+                "value": 10
+              },
+              "fill": {
+                "value": "#4b5563"
+              },
+              "text": {
+                "signal": "missingCount>0?'No step ('+missingCount+')':''"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "type": "text",
+      "interactive": false,
+      "encode": {
+        "update": {
+          "x": {
+            "value": 0
+          },
+          "y": {
+            "value": 164
+          },
+          "fontSize": {
+            "value": 12
+          },
+          "fill": {
+            "value": "#176d87"
+          },
+          "text": {
+            "signal": "hasSteps?(selectionMode==='steps'?'Showing selected steps below \u00b7 drag to change the range \u00b7 Reset for all steps':'Drag across the reward chart to select steps and filter the phase timeline below'):'No rollout step values were recorded'"
+          },
+          "limit": {
+            "signal": "width"
+          },
+          "fontWeight": {
+            "value": 600
+          }
+        }
+      }
+    },
+    {
+      "name": "reset_hit",
+      "type": "rect",
+      "encode": {
+        "update": {
+          "x": {
+            "signal": "width-64"
+          },
+          "y": {
+            "value": -24
+          },
+          "width": {
+            "value": 64
+          },
+          "height": {
+            "value": 24
+          },
+          "fill": {
+            "value": "#f4f6f8"
+          },
+          "stroke": {
+            "value": "#cbd2dc"
+          },
+          "cornerRadius": {
+            "value": 4
+          },
+          "cursor": {
+            "value": "pointer"
+          },
+          "tooltip": {
+            "value": "Show all recorded steps and spans"
+          }
+        }
+      }
+    },
+    {
+      "type": "text",
+      "interactive": false,
+      "encode": {
+        "update": {
+          "x": {
+            "signal": "width-32"
+          },
+          "y": {
+            "value": -12
+          },
+          "align": {
+            "value": "center"
+          },
+          "baseline": {
+            "value": "middle"
+          },
+          "text": {
+            "value": "Reset"
+          },
+          "fontSize": {
+            "value": 11
+          },
+          "fill": {
+            "value": "#374151"
+          }
+        }
+      }
+    },
+    {
+      "type": "text",
+      "encode": {
+        "update": {
+          "x": {
+            "value": 0
+          },
+          "y": {
+            "signal": "detailTop-12"
+          },
+          "text": {
+            "signal": "selectionMode==='steps' ? 'Recorded phase spans \u2014 rollout steps '+format(selectedStepMin,'d')+'\u2013'+format(selectedStepMax,'d') : selectionMode==='missing' ? 'Recorded phase spans \u2014 no recorded rollout step' : 'Recorded phase spans \u2014 all steps'"
+          },
+          "fontSize": {
+            "value": 12
+          },
+          "fontWeight": {
+            "value": "bold"
+          },
+          "fill": {
+            "value": "#374151"
+          }
+        }
+      }
+    },
+    {
+      "type": "group",
+      "name": "detail",
+      "encode": {
+        "update": {
+          "width": {
+            "signal": "width"
+          },
+          "height": {
+            "signal": "detailHeight"
+          },
+          "y": {
+            "signal": "detailTop"
+          }
+        }
+      },
+      "axes": [
+        {
+          "orient": "left",
+          "scale": "detail_y",
+          "ticks": false,
+          "domain": false,
+          "encode": {
+            "labels": {
+              "update": {
+                "text": {
+                  "signal": "phaseLabels[datum.value]"
+                }
+              }
+            }
+          }
+        },
+        {
+          "orient": "bottom",
+          "scale": "detail_x",
+          "title": "Seconds since first recorded span (per run)",
+          "tickCount": {
+            "signal": "width<500?4:8"
+          },
+          "grid": true,
+          "gridScale": "detail_y"
+        }
+      ],
+      "marks": [
+        {
+          "type": "rect",
+          "from": {
+            "data": "bars"
+          },
+          "encode": {
+            "update": {
+              "x": {
+                "signal": "clamp(scale('detail_x',datum.start_seconds),0,width)"
+              },
+              "x2": {
+                "signal": "clamp(scale('detail_x',datum.end_seconds),0,width)"
+              },
+              "y": {
+                "scale": "detail_y",
+                "field": "phase"
+              },
+              "height": {
+                "scale": "detail_y",
+                "band": 1
+              },
+              "fill": {
+                "scale": "color",
+                "field": "phase"
+              },
+              "cornerRadius": {
+                "value": 2
+              },
+              "tooltip": {
+                "signal": "{'Run':datum.run_name,'Phase':phaseLabels[datum.phase],'Timeline step':datum.step,'History step':datum.history_step,'Start (Unix s)':datum.start,'End (Unix s)':datum.end,'Duration (ms)':datum.duration_ms}"
+              }
+            }
+          }
+        },
+        {
+          "type": "rule",
+          "from": {
+            "data": "short"
+          },
+          "encode": {
+            "update": {
+              "x": {
+                "signal": "clamp(scale('detail_x',datum.start_seconds),0,width)"
+              },
+              "y": {
+                "signal": "scale('detail_y',datum.phase)+bandwidth('detail_y')*0.1"
+              },
+              "y2": {
+                "signal": "scale('detail_y',datum.phase)+bandwidth('detail_y')*0.9"
+              },
+              "stroke": {
+                "scale": "color",
+                "field": "phase"
+              },
+              "strokeWidth": {
+                "value": 2
+              },
+              "tooltip": {
+                "signal": "{'Run':datum.run_name,'Phase':phaseLabels[datum.phase],'Timeline step':datum.step,'History step':datum.history_step,'Start (Unix s)':datum.start,'End (Unix s)':datum.end,'Duration (ms)':datum.duration_ms}"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "type": "text",
+      "interactive": false,
+      "encode": {
+        "update": {
+          "x": {
+            "signal": "width/2"
+          },
+          "y": {
+            "signal": "detailTop+detailHeight/2"
+          },
+          "align": {
+            "value": "center"
+          },
+          "fontSize": {
+            "value": 12
+          },
+          "fill": {
+            "value": "#6b7280"
+          },
+          "text": {
+            "signal": "length(data('selected_spans'))?'':selectionMode==='steps'?'No recorded spans in this step range':'No recorded phase spans'"
+          },
+          "limit": {
+            "signal": "width"
+          }
+        }
+      }
+    }
+  ]
+}

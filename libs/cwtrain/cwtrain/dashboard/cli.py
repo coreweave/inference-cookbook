@@ -130,6 +130,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             api_host=api.settings["base_url"],
             username=api.viewer.username,
             app_url=runs[0].url,
+            api=api,
         )
         # The workspace SDK drops reverse-proxy path prefixes in its generated URL.
         # Retain its loadable URL in state, but return the run's canonical browser route.
@@ -138,7 +139,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             **result,
             "framework": args.framework,
             "discovered_runs": [source.id for source in runs],
-            "panels": len(plan["panels"]),
+            "panels": len(plan["panels"]) + len(plan.get("native_panels", ())),
             "omitted_metrics": plan["omitted_metrics"],
         }
     except CWTrainError:

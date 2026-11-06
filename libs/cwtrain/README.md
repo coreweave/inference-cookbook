@@ -17,8 +17,9 @@ inference engines. The library covers each part of the loop:
 - **Rollouts and frameworks** (`cwtrain.integrations`): a rollout sampler for the deployment's
   OpenAI-compatible endpoint, the post-write hook for slime and miles, and the generation backend,
   weight synchronizer and policy-worker extension for NeMo-RL.
-- **W&B dashboards** (`cwtrain dashboard ...`, pending release): managed post-training workspace
-  views and a local phase-timeline export. See [Post-training dashboards](docs/dashboards.md).
+- **W&B dashboards** (`cwtrain dashboard ...`, pending release): native post-training views,
+  run comparisons, interactive phase timelines, and local timeline export.
+  See [Post-training dashboards](docs/dashboards.md).
 
 The [CoreWeave Inference Cookbook](https://github.com/coreweave/inference-cookbook) has the recipes
 that use `cwtrain` with miles, slime, NeMo-RL and Axolotl, and examples that run them end to end.
@@ -139,7 +140,7 @@ cwtrain dashboard setup --entity ENTITY --project PROJECT --framework miles --dr
 ```
 
 The dry run previews the full metric catalogue offline. Authenticate with `wandb login` or
-`WANDB_API_KEY`, then omit `--dry-run` to create a managed **Post-training — Miles** view from the
+`WANDB_API_KEY`, then omit `--dry-run` to create a managed **Post-training** view from the
 project's recorded metrics. Dashboard commands need W&B credentials, not CoreWeave or storage
 credentials. The [dashboard guide](docs/dashboards.md) covers the other frameworks, safe reruns,
 metric semantics, and exporting an interactive run timeline to HTML.

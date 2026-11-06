@@ -66,8 +66,8 @@ def test_native_sdk_serializes_axes_filters_order_and_full_fidelity():
     model = workspace._to_model().model_dump(mode="json", by_alias=True, exclude_none=True)
     section = model["spec"]["section"]
     sections = section["panelBankConfig"]["sections"]
-    assert [item["name"] for item in sections] == ["Training", "Hot-load", "System"]
-    panels = [panel["config"] for item in sections for panel in item["panels"]]
+    assert [item["name"] for item in sections] == ["Overview", "Training", "Hot-load", "System"]
+    panels = [panel["config"] for item in sections[1:] for panel in item["panels"]]
     by_title = {panel["chartTitle"]: panel for panel in panels}
     assert by_title["Training loss"]["xAxis"] == "train/step"
     assert by_title["Policy reward"]["xAxis"] == "rollout/step"
@@ -130,7 +130,7 @@ class RemoteWorkspace:
 
     entity: str = "team"
     project: str = "project"
-    name: str = "Post-training — Miles"
+    name: str = "Post-training"
     sections: list = field(default_factory=lambda: ["original panels"])
     settings: dict = field(default_factory=lambda: {"smoothing": 0})
     runset_settings: dict = field(default_factory=lambda: {"filter": "train"})
@@ -165,6 +165,8 @@ def managed(tmp_path):
     RemoteWorkspace.reads = []
     RemoteWorkspace.fail_reload = False
     plan = definition("miles", metric_keys={"train/loss"})
+    # These lifecycle fixtures exercise the view independently of chart registration.
+    plan["native_panels"] = []
     options = {
         "path": tmp_path / "state" / "dashboards.json",
         "api_host": "https://api.wandb.example",
@@ -222,7 +224,7 @@ def test_native_settings_discarded_by_sdk_cannot_be_silently_overwritten(managed
     monkeypatch.setattr(ws.Workspace, "save", lambda self: pytest.fail("rewrote the saved view"))
     assert save_managed(desired, plan, **options)["url"] == created["url"]
     with pytest.raises(CWTrainError, match="cannot preserve all native UI settings"):
-        save_managed(desired, {**plan, "spec_version": 2}, **options)
+        save_managed(desired, {**plan, "spec_version": plan["spec_version"] + 1}, **options)
     assert options["path"].read_bytes() == original_state
 
 

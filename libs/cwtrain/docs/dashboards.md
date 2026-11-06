@@ -2,7 +2,8 @@
 
 `cwtrain dashboard setup` creates a managed W&B workspace view for a cookbook framework.
 The panels cover training, rollouts, hot-load, available validation metrics, and trainer system
-telemetry. `cwtrain dashboard timeline` separately exports one run's phase timeline to local HTML.
+telemetry. Miles and Slime also include a native run Overview and an interactive phase Timeline.
+`cwtrain dashboard timeline` remains available to export one run's timeline to local HTML.
 
 ## Install and authenticate
 
@@ -42,7 +43,7 @@ include the selected framework. It reads tags directly because newly tagged runs
 from W&B's tag index. Metric keys found in those runs determine which panels are available. Keep
 the recipes' default framework tags and job type: runs with those values overridden will not
 match this selection. The command prints the URL of the resulting managed view, such as
-**Post-training — Miles**.
+**Post-training**.
 
 The native filter includes the framework tag plus explicit IDs only for discovered runs missing
 from W&B's tag index. Ordinary new tagged runs are included automatically. If a new run needs an
@@ -71,14 +72,56 @@ unchanged. Edit an existing view directly in W&B. To deliberately create another
 different state file and retain the original view and state.
 
 If a save fails with an unknown outcome, setup keeps a pending record and stops subsequent
-attempts. The server may already have created the view even if its response was lost.
+attempts. The server may already have created a private chart preset or the view even if its
+response was lost. Pending state includes the preset names and completed preset IDs.
 Inspect W&B and the recorded state before recovering; keep the state file and do not switch to a
 different one to retry, since that can create a duplicate view.
+
+## Overview and interactive timeline
+
+For Miles and Slime, the section order is **Overview → Timeline → Training → Rollout → Hot-load
+→ System** (sections without available metrics are omitted). NeMo-RL and Axolotl retain their
+framework-specific line charts; their native metadata and reward/phase mappings are not yet
+validated.
+
+**Overview** has one field list and one named column per selected run, up to five runs. It shows
+creation time in the viewer's local timezone, model, framework/algorithm, inference engine,
+configured replicas, rollout/training batch sizes, reference-policy KL configuration, and the
+latest logged steps and policy reward. These are whole-run configuration and summary values;
+selecting a timeline range does not change them. Missing values are labeled **Not recorded**.
+Open a run from W&B's sidebar for status and full details.
+
+**Timeline** appears when setup discovers a recorded phase's start and end keys. The highlighted
+reward chart is labeled **Select rollout steps**, with a **Drag to select** hint. Drag across it
+to choose a step range; the phase spans below zoom to that selection. Click **Reset** or
+double-click the reward chart to return to all returned steps. The selected range survives panel
+resizing. The lower axis stays in elapsed seconds, so phase durations are not stretched into
+equal-width steps. First-replica and peer-replica lanes stay expanded, and short/zero-duration
+spans remain visible as markers. Repeated optimizer updates remain separate spans.
+
+The native query uses `historyFold` and reconstructs sparse rows by run and W&B history step.
+Reward rows and timing rows need not contain the same metrics. The selector aligns reward with
+`timeline/step` using the recorded relationship to `rollout/step`, including runs configured with
+`wandb_always_use_train_step`. A missing or ambiguous mapping is not guessed. Spans without a
+recorded timeline step have a separate **No step** selector. Missing or unaligned reward values
+remain absent; phase selection can still work when reward is unavailable.
+
+The chart specs are included in the Python wheel. Setup registers private presets under the
+target W&B entity and creates ordinary native workspace panels; there is no external dashboard
+server, browser extension, run-file upload, or extra pip install. Each new managed view gets its
+own presets, and unchanged reruns perform reads only. The installer marks panels as manual so
+native UI reorder/save operations retain them, and enables linked zoom for native line charts
+with matching x-axis keys.
+
+The timeline selection controls only its own phase detail. It is not a global filter for other
+workspace charts or the Overview. Native timelines currently render the history returned by W&B;
+10,000-step completeness and performance still need server/browser validation. Use the separate
+unsampled local export when you need to inspect the raw recorded history outside W&B.
 
 ## What the panels mean
 
 The versioned [metric catalogue](../cwtrain/dashboard/catalog.py) defines the panel titles, exact
-metric keys, native axes, and units. Its current specification version is 1. Values are not
+metric keys, native axes, and units. Its current specification version is 2. Values are not
 rescaled: bytes remain bytes, fractions remain fractions, and metrics already expressed as
 percentages remain percentages.
 
