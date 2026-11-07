@@ -58,7 +58,8 @@ assert.equal(timeline.data('reward_points').length, 6);
 assert.deepEqual(timeline.data('reward_points').filter(d => d.id === 'run-a')
   .map(d => [d.step, d.reward]), [[0, 0], [1, 0.25], [2, 0.9]]);
 assert.equal(timeline.data('unassigned_spans').length, 1);
-assert.equal(timeline.data('spans').filter(d => d.duration_ms === 0).length, 6);
+assert.equal(timeline.data('spans').filter(d => d.end === d.start).length, 6);
+assert.equal(timeline.data('spans').filter(d => d.duration_label === '0 s').length, 6);
 timeline.signal('selectionMode', 'steps').signal('brush', [1, 1]).run();
 assert.equal(timeline.data('selected_spans').length, 8);
 assert.ok(timeline.data('selected_spans').every(d => d.step === 1));

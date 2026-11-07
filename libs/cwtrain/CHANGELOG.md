@@ -5,6 +5,14 @@ GitHub. Versions follow [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+- **Readable dashboard timestamps:** timeline tooltips show local dates and times with
+  milliseconds and UTC offsets. Span durations use days, hours, minutes, and seconds.
+  System charts format their timestamp axes as dates and times.
+
+- **Top-k sampling:** Miles and Slime now forward `rollout_top_k` through group sampling.
+  Explicit disable values (`-1` and `0`) reach the completions API instead of inheriting the
+  served model's generation defaults, which could silently enable top-k filtering.
+
 - **Post-training dashboards:** `cwtrain dashboard setup` creates a native W&B saved view from
   recorded metrics, with framework-specific training, rollout, hot-load, evaluation, and system
   charts. Miles and Slime include a run comparison Overview and an interactive reward step

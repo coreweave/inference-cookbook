@@ -412,8 +412,13 @@
         },
         {
           "type": "formula",
-          "expr": "(datum.end-datum.start)*1000",
-          "as": "duration_ms"
+          "expr": "round((datum.end-datum.start)*1000)/1000",
+          "as": "duration_seconds_rounded"
+        },
+        {
+          "type": "formula",
+          "expr": "datum.end>datum.start && datum.duration_seconds_rounded<0.001 ? '<0.001 s' : (datum.duration_seconds_rounded>=86400?floor(datum.duration_seconds_rounded/86400)+' d ':'')+(datum.duration_seconds_rounded>=3600?floor(datum.duration_seconds_rounded%86400/3600)+' h ':'')+(datum.duration_seconds_rounded>=60?floor(datum.duration_seconds_rounded%3600/60)+' min ':'')+format(datum.duration_seconds_rounded%60,'.3~f')+' s'",
+          "as": "duration_label"
         },
         {
           "type": "formula",
@@ -1247,7 +1252,7 @@
                 "value": 2
               },
               "tooltip": {
-                "signal": "{'Run':datum.run_name,'Phase':phaseLabels[datum.phase],'Timeline step':datum.step,'History step':datum.history_step,'Start (Unix s)':datum.start,'End (Unix s)':datum.end,'Duration (ms)':datum.duration_ms}"
+                "signal": "{'Run':datum.run_name,'Phase':phaseLabels[datum.phase],'Timeline step':datum.step,'History step':datum.history_step,'Start (local time)':timeFormat(toDate(datum.start*1000),'%Y-%m-%d %H:%M:%S.%L %Z'),'End (local time)':timeFormat(toDate(datum.end*1000),'%Y-%m-%d %H:%M:%S.%L %Z'),'Duration':datum.duration_label}"
               }
             }
           }
@@ -1276,7 +1281,7 @@
                 "value": 2
               },
               "tooltip": {
-                "signal": "{'Run':datum.run_name,'Phase':phaseLabels[datum.phase],'Timeline step':datum.step,'History step':datum.history_step,'Start (Unix s)':datum.start,'End (Unix s)':datum.end,'Duration (ms)':datum.duration_ms}"
+                "signal": "{'Run':datum.run_name,'Phase':phaseLabels[datum.phase],'Timeline step':datum.step,'History step':datum.history_step,'Start (local time)':timeFormat(toDate(datum.start*1000),'%Y-%m-%d %H:%M:%S.%L %Z'),'End (local time)':timeFormat(toDate(datum.end*1000),'%Y-%m-%d %H:%M:%S.%L %Z'),'Duration':datum.duration_label}"
               }
             }
           }
