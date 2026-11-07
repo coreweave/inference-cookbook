@@ -10,7 +10,7 @@ the You.com Search and Contents APIs. So the harness's tools, page workspace and
 unchanged, in Gym v0.4.0 (bundled with NeMo-RL v0.7.0) and v0.7.0.
 
 Gym v0.4.0 has no contamination filter; v0.7.0 filters BrowseComp leaks. This shared adapter also
-drops ASearcher and legacy SimpleQA answer keys before shortening search or page text
+drops ASearcher answer keys before shortening search or page text
 (``contaminated``), and backports BrowseComp filtering to training. The judge sees only the final ``Exact Answer:`` line
 (``judged_answer``), not the explanation or earlier turns.
 
@@ -58,7 +58,7 @@ except ImportError:  # outside the harness venv, such as in the case study's tes
 
 # A result that quotes a benchmark (a dataset mirror, a leaderboard, the simple-evals repo or its
 # CSVs) hands the agent the answer key. These are Gym v0.7.0's CONTAMINATION_PATTERNS, plus
-# ASearcher's names for the training data and SimpleQA's for legacy answer keys.
+# ASearcher's names for the training data.
 # Case-insensitive, matched anywhere in the result, its URL included.
 CONTAMINATION_PATTERNS = (
     "browsecomp",
@@ -71,9 +71,6 @@ CONTAMINATION_PATTERNS = (
     "asearcher",
     "a_searcher",
     "a-searcher",
-    "simpleqa",
-    "simple_qa",
-    "simple-qa",
 )
 # Matched against the result's URL only. Dataset viewers serve mirrors whose names match no
 # pattern; a page that only links to one is kept.

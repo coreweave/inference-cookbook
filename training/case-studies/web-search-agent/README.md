@@ -427,21 +427,20 @@ score then measures the leak, not the model.
 
 Training uses Gym v0.4.0 (in NeMo-RL v0.7.0), which has no contamination filter. Evaluation now
 uses Gym v0.7.0, which filters BrowseComp leaks. The shared [`you_search.py`](eval/you_search.py)
-also filters ASearcher and legacy SimpleQA answer keys before shortening results, and backports
+also filters ASearcher answer keys before shortening results, and backports
 BrowseComp filtering to training. Both versions' judge prompts put `[correct_answer]` after the
 response; v0.4.0 also shows the judge every turn. The adapter applies three guards to both paths:
 
 - **Results that quote a benchmark are dropped.** A search result or page is dropped when its text
-  or URL names BrowseComp, ASearcher, SimpleQA or OpenAI's simple-evals (Gym v0.7.0's patterns
-  plus ASearcher's and SimpleQA's names), or when its URL is a HuggingFace dataset viewer. The
+  or URL names BrowseComp, ASearcher or OpenAI's simple-evals (Gym v0.7.0's patterns
+  plus ASearcher's names), or when its URL is a HuggingFace dataset viewer. The
   whole page is checked before `YOU_SEARCH_MAX_CHARS` shortens it. When every result of a call
   is dropped, the call looks like one that found nothing. This is deliberate: a message saying the results were blocked would tell
   the agent that the answer key is nearby. Each drop logs a `[browsecomp][contamination]` line, the
   same line that Gym v0.7.0's filter logs.
 - **Answer-key hosts are never fetched.** [`exclude_domains.json`](eval/exclude_domains.json) lists
   `huggingface.co`, which hosts the ASearcher training data, and
-  `openaipublic.blob.core.windows.net`, which serves the BrowseComp and legacy SimpleQA answer
-  CSVs. `prepare_search_data.py` downloads ASearcher for training and BrowseComp for evaluation;
+  `openaipublic.blob.core.windows.net`, which serves the BrowseComp answer CSV. `prepare_search_data.py` downloads ASearcher for training and BrowseComp for evaluation;
   the search agent cannot fetch these hosts through its tools. The harness drops these hosts' search
   results and does not browse them.
 - **The judge sees only the final answer.** The judge gets the response's last `Exact Answer:`

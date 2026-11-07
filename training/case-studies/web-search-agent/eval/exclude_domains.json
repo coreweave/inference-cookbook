@@ -7,7 +7,7 @@
       ]
     },
     {
-      "description": "OpenAI's simple-evals storage, which serves the SimpleQA and BrowseComp CSVs with their answers",
+      "description": "OpenAI's simple-evals storage, which serves the BrowseComp CSV with their answers",
       "properties": [
         {"type": "domain", "value": "openaipublic.blob.core.windows.net"}
       ]

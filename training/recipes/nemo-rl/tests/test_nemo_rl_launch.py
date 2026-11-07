@@ -209,9 +209,9 @@ def test_main_prepares_data_then_trains_with_the_example_config(tmp_path: Path, 
         {"MODEL_SLUG": "m", "WORK": str(tmp_path / "w"), "CWTRAIN_KIT_DIR": str(kit),
          "NEMO_RL_PYTHON": "/venv/bin/python", "GRPO_CONFIG": "grpo_search.yaml",
          # render.sh flattens the Job's block scalar to one line; shell quoting groups words
-         "PREPARE_DATA": "/kit/prepare.py --dataset simpleqa --note 'two words'"}
+         "PREPARE_DATA": "/kit/prepare.py --dataset browsecomp --note 'two words'"}
     )  # fmt: skip
-    assert runs == [["/venv/bin/python", "/kit/prepare.py", "--dataset", "simpleqa", "--note", "two words"]]
+    assert runs == [["/venv/bin/python", "/kit/prepare.py", "--dataset", "browsecomp", "--note", "two words"]]
     assert execs[0][2:4] == ["--config", str(kit / "grpo_search.yaml")]
 
 

@@ -182,9 +182,9 @@ def test_search_drops_results_that_quote_a_benchmark(capsys):
     assert "fn=search provider=you dropped=3 kept=1" in capsys.readouterr().out
 
 
-@pytest.mark.parametrize("name", ["ASearcher", "A_SEARCHER", "a-searcher", "SimpleQA"])
+@pytest.mark.parametrize("name", ["ASearcher", "A_SEARCHER", "a-searcher"])
 @pytest.mark.parametrize("field", ["url", "title", "snippets", "contents"])
-def test_search_drops_training_and_legacy_answer_keys_before_capping(name, field, monkeypatch):
+def test_search_drops_training_answer_keys_before_capping(name, field, monkeypatch):
     monkeypatch.setenv("YOU_SEARCH_MAX_CHARS", "3")
     item = {"url": "https://example.com/page", "title": "Ordinary page"}
     value = "x" * 50 + name
@@ -225,9 +225,7 @@ def test_the_exclude_list_blocks_the_answer_key_hosts():
     domains = [p["value"] for n in notices for p in n["properties"]]
     for url in (
         "https://huggingface.co/datasets/inclusionAI/ASearcher-train-data",
-        "https://huggingface.co/datasets/openai/simple-qa",
         "https://openaipublic.blob.core.windows.net/simple-evals/browse_comp_test_set.csv",
-        "https://openaipublic.blob.core.windows.net/simple-evals/simple_qa_test_set.csv",
     ):
         assert you_search.excluded(url, domains)
 
