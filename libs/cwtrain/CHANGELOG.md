@@ -5,6 +5,11 @@ GitHub. Versions follow [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+- **NeMo-RL v0.8.0:** the recipe pins the release container with Gym v0.7.0 and Ray 2.58.0,
+  ports its backend and Gym patches, and uses the renamed AutoModel config and worker.
+  Checkpoint export preserves stored tensor dtypes and phase timing supports the new Timer API.
+  Release-source and CPU checks pass; the GPU training results remain from v0.7.0.
+
 - **Readable dashboard timestamps:** timeline tooltips show local dates and times with
   milliseconds and UTC offsets. Span durations use days, hours, minutes, and seconds.
   System charts format their timestamp axes as dates and times.

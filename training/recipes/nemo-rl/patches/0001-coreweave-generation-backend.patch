@@ -1,8 +1,7 @@
 CoreWeave Inference Cookbook patch for NeMo-RL (https://github.com/NVIDIA-NeMo/RL)
-Base: tag v0.7.0
+Base: tag v0.8.0
 Purpose: add the `coreweave` generation backend to grpo.setup() (policy cluster only, the cwtrain
-  worker extension, the hot-load weight synchronizer), let refit_policy_generation hand
-  over to that synchronizer, log the synchronizer's hot-load metrics with each training step,
+  worker extension, the hot-load weight synchronizer), log hot-load metrics with each training step,
   time the training loop with cwtrain's SpanTimer and log when each phase ran (the W&B
   timeline), and keep print_performance_metrics working when generation owns no GPUs in the
   training cluster.
@@ -10,21 +9,21 @@ License: Apache-2.0. Upstream code by NVIDIA CORPORATION; changes by CoreWeave, 
 Applied by training/recipes/nemo-rl/launch.py with `git apply`, which skips this header.
 
 diff --git a/nemo_rl/algorithms/grpo.py b/nemo_rl/algorithms/grpo.py
-index 76d75c8..0d14cb7 100644
+index 2278427..38db265 100644
 --- a/nemo_rl/algorithms/grpo.py
 +++ b/nemo_rl/algorithms/grpo.py
-@@ -13,6 +13,7 @@
- # limitations under the License.
+@@ -14,6 +14,7 @@
  import gc
+ import json
  import os
 +from pathlib import Path
  import time
  import warnings
- from concurrent.futures import ThreadPoolExecutor
-@@ -602,6 +603,41 @@ def setup(
+ from concurrent.futures import Future, ThreadPoolExecutor
+@@ -1024,6 +1025,41 @@ def setup(
              flush=True,
          )
- 
+
 +    elif generation_config["backend"] == "coreweave":
 +        # External inference: a CoreWeave Dedicated Inference deployment serves the rollouts and
 +        # receives weights by checkpoint hot-load, so only the policy needs GPUs here.
@@ -63,10 +62,10 @@ index 76d75c8..0d14cb7 100644
      else:
          # train resources will be updated through overall and inference resources below
          train_gpus_per_node = cluster_config["gpus_per_node"]
-@@ -1125,6 +1161,68 @@ def setup(
-             f"  ✓ Using SGLang backend for generation with {policy_config['model_name']}",
+@@ -1825,6 +1861,75 @@ def setup(
              flush=True,
          )
+
 +    elif backend == "coreweave":
 +        # The deployment is the rollout engine; weights reach it by checkpoint hot-load.
 +        from cwtrain.integrations.nemo_rl import (
@@ -92,7 +91,7 @@ index 76d75c8..0d14cb7 100644
 +        stock_worker = (
 +            "nemo_rl.models.policy.workers.megatron_policy_worker.MegatronPolicyWorker"
 +            if use_megatron
-+            else "nemo_rl.models.policy.workers.dtensor_policy_worker_v2.DTensorPolicyWorkerV2"
++            else "nemo_rl.models.policy.workers.automodel_policy_worker.AutomodelPolicyWorker"
 +        )
 +        if worker_extension not in ACTOR_ENVIRONMENT_REGISTRY:
 +            prebuilt = (
@@ -115,7 +114,7 @@ index 76d75c8..0d14cb7 100644
 +            init_reference_model=init_reference_model,
 +            worker_extension_cls_fqn=worker_extension,
 +        )
-+        worker_init_timing_metrics["policy_init_time_s"] = time.perf_counter() - t0
++        setup_timing_metrics.policy_init_time_s = time.perf_counter() - t0
 +        t0 = time.perf_counter()
 +        policy_generation = CoreWeaveGeneration(generation_config, tokenizer)
 +        policy_generation.weight_synchronizer = HotLoadWeightSynchronizer(
@@ -124,56 +123,46 @@ index 76d75c8..0d14cb7 100644
 +            generation_config,
 +            hf_checkpoint=policy_config["model_name"],
 +        )
-+        worker_init_timing_metrics["coreweave_init_time_s"] = time.perf_counter() - t0
++        setup_timing_metrics.extras["coreweave_init_time_s"] = time.perf_counter() - t0
 +        print(
 +            f"  ✓ Using CoreWeave hot-load deployment for generation with {policy_config['model_name']}",
 +            flush=True,
 +        )
- 
++        if enable_nemo_gym:
++            nemo_gym_actor, gym_init_time = _spinup_nemo_gym(
++                [policy_generation.rollout_config.base_url],
++                policy_generation.rollout_config.model,
++            )
++            setup_timing_metrics.nemo_gym_init_time_s = gym_init_time
++
      # Record when worker initialization completes (for calculating other setup time)
      worker_init_complete_time = time.perf_counter() - setup_start_time
-@@ -1133,7 +1231,7 @@ def setup(
-     policy.print_node_ip_and_gpu_id()
- 
+
+@@ -1859,7 +1964,7 @@ def setup(
      # if it is not colocated inference, initialize collective communication for update weights
--    if not colocated_inference:
-+    if not colocated_inference and backend != "coreweave":
-         t0 = time.perf_counter()
-         ip, port = train_cluster.get_master_address_and_port()
-         print(f"Using ip: {ip}, port: {port} for collective communication", flush=True)
-@@ -1868,6 +1966,13 @@ def refit_policy_generation(
-         timer: Optional Timer used to time the prepare/transfer/update phase
-         kv_scales: Optional dictionary of KV cache scales for FP8 quantization.
-     """
-+    # A generation backend with an attached weight synchronizer owns the whole transfer
-+    # (e.g. checkpoint hot-load into an external deployment); nothing below applies to it.
-+    synchronizer = getattr(policy_generation, "weight_synchronizer", None)
-+    if synchronizer is not None:
-+        synchronizer.sync_weights(timer=timer, kv_scales=kv_scales)
-+        return
-+
-     # Megatron generation backend needs explicit suspend/resume around refits.
-     if isinstance(policy_generation, MegatronGeneration):
-         policy_generation.suspend_for_refit()
-@@ -2144,6 +2249,11 @@ def grpo_train(
+     elif (
+         not colocated_inference
+-        and backend != "sglang"
++        and backend not in ("sglang", "coreweave")
+         and remote_transport is None
+         and checkpoint_engine_config is None
+     ):
+@@ -3036,6 +3141,10 @@ def _grpo_train_impl(
  ) -> None:
      """Run GRPO training algorithm."""
-     timer = Timer()
+     timer = Timer(context={"worker": "driver"})
 +    if (master_config.policy.get("generation") or {}).get("backend") == "coreweave":
-+        # The same timer, which also records when each phase ran, for the run's W&B timeline.
 +        from cwtrain.integrations.nemo_rl import SpanTimer
 +
-+        timer = SpanTimer()
++        timer = SpanTimer(context={"worker": "driver"})
+     _telemetry = get_telemetry_handle()
+     _tracer = _telemetry.tracer if _telemetry is not None else None
      timeout = TimeoutChecker(
-         timeout=master_config.checkpointing["checkpoint_must_save_by"],
-         fit_last_save_time=True,
-@@ -2754,6 +2864,16 @@ def grpo_train(
+@@ -3806,6 +3915,14 @@ def _grpo_train_impl(
                          and (current_step + 1 == len(wrapped_dataloader))
                      )
- 
-+                # The hot-load of this step's refit and when each phase of the step ran (cwtrain),
-+                # taken before validation: its refit would replace them, and its hot-load goes
-+                # with the next step, whose rollout samples those weights.
+
++                # Snapshot this step's hot-load and phase spans before validation refits.
 +                synchronizer = getattr(policy_generation, "weight_synchronizer", None)
 +                _cw = (
 +                    synchronizer.pop_metrics(timer=timer, step=total_steps + 1)
@@ -181,12 +170,12 @@ index 76d75c8..0d14cb7 100644
 +                    else {}
 +                )
 +
-                 # Run validation if it's a validation step or last step with val_at_end
-                 if (val_period > 0 and (total_steps + 1) % val_period == 0) or (
-                     val_at_end and is_last_step
-@@ -2860,6 +2980,12 @@ def grpo_train(
+                 early_stop_message: Optional[str] = None
+                 should_run_validation = (
+                     val_period > 0
+@@ -3947,6 +4064,12 @@ def _grpo_train_impl(
                          print(f"Skipping aggregation for {k} ({type(v)})")
- 
+
                  metrics.update(rollout_metrics)
 +                # cwtrain's hot-load metrics, logged as train/hotload/* at this step, and its
 +                # timeline, logged unprefixed as timeline/*.
@@ -196,14 +185,14 @@ index 76d75c8..0d14cb7 100644
 +                    logger.log_metrics(timeline, total_steps + 1)
                  metrics["generation_logger_metrics"] = generation_logger_metrics
                  total_valid_tokens += metrics["global_valid_toks"]
- 
-@@ -3100,6 +3226,21 @@ def grpo_train(
+
+@@ -4211,6 +4334,21 @@ def _grpo_train_impl(
                  prefix="timing/train",
                  step_finished=True,
              )
 +            # A validation after the last step refit the weights, and no step follows to log
 +            # that hot-load with (cwtrain): log it at the step after this one, as the others.
-+            if is_last_step or should_save_by_timeout:
++            if is_last_step or should_save_by_timeout or early_stop_message is not None:
 +                synchronizer = getattr(policy_generation, "weight_synchronizer", None)
 +                _cw = (
 +                    synchronizer.pop_metrics(step=total_steps + 2)
@@ -216,14 +205,14 @@ index 76d75c8..0d14cb7 100644
 +                    logger.log_metrics(hotload, total_steps + 2, prefix="train")
 +                if timeline:
 +                    logger.log_metrics(timeline, total_steps + 2, step_finished=True)
- 
+
              # Reset the batch and set dynamic_sampling_num_gen_batches to 0
              batch_cache = None
 diff --git a/nemo_rl/algorithms/utils.py b/nemo_rl/algorithms/utils.py
-index 1aaaa45..17e3593 100644
+index 5d9572a..679f267 100644
 --- a/nemo_rl/algorithms/utils.py
 +++ b/nemo_rl/algorithms/utils.py
-@@ -778,12 +778,12 @@ def print_performance_metrics(
+@@ -861,12 +861,12 @@ def print_performance_metrics(
              master_config.policy["generation"]["colocated"]["resources"]["num_nodes"]
              or 1
          )
@@ -239,9 +228,9 @@ index 1aaaa45..17e3593 100644
          )
 +        generation_num_gpus = generation_gpus_per_node * generation_num_nodes
          training_num_gpus = total_num_gpus - generation_num_gpus
- 
+
      total_num_tokens = metrics.get("total_num_tokens", 0)
-@@ -817,7 +817,7 @@ def print_performance_metrics(
+@@ -900,7 +900,7 @@ def print_performance_metrics(
      )
      generation_tokens_per_sec_per_gpu = (
          total_num_tokens / generation_time / generation_num_gpus
@@ -249,4 +238,4 @@ index 1aaaa45..17e3593 100644
 +        if generation_time > 0 and generation_num_gpus > 0
          else 0
      )
- 
+

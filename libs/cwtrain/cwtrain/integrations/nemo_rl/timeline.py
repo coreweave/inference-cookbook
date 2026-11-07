@@ -38,17 +38,17 @@ class SpanTimer(Timer):
     start to its last end.
     """
 
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, context: dict[str, object] | None = None) -> None:
+        super().__init__(context=context)
         self._wall_starts: dict[str, float] = {}
         self._spans: dict[str, tuple[float, float]] = {}
 
-    def start(self, label: str) -> None:
-        super().start(label)
+    def start(self, label: str, should_log: bool = True) -> None:
+        super().start(label, should_log=should_log)
         self._wall_starts[label] = time.time()
 
-    def stop(self, label: str) -> float:
-        elapsed = super().stop(label)
+    def stop(self, label: str, should_log: bool = True) -> float:
+        elapsed = super().stop(label, should_log=should_log)
         started = self._wall_starts.pop(label, None)
         if started is not None:
             first = self._spans.get(label, (started, started))[0]

@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -337,6 +338,28 @@ def command(args: argparse.Namespace, environ: Mapping[str, str]) -> list[str]:
     ]
 
 
+def inline_browsecomp(path: Path) -> None:
+    """Keep Gym's selected tasks, using the training prompt and search/browse tools.
+
+    Gym v0.7.0 prepares shell-workspace instructions and a bash tool. The recipe uses inline
+    results instead, so reuse its training templates without changing task order or answers.
+    """
+    import importlib.util
+
+    source = RECIPE / "prepare_search_data.py"  # bundled eval kit
+    if not source.is_file():
+        source = RECIPE.parent / "prepare_search_data.py"  # repository checkout
+    spec = importlib.util.spec_from_file_location("search_data", source)
+    prepare = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(prepare)
+    rows = [json.loads(line) for line in path.read_text().splitlines() if line]
+    for row in rows:
+        row["responses_create_params"] = prepare.example(row["question"], row["ground_truth"])[
+            "responses_create_params"
+        ]
+    prepare.write(rows, path)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("prepare", "start", "collect", "report"))
@@ -410,6 +433,11 @@ def main() -> None:
         if benchmark.search:
             _you_search().install(gym_dir)
     cmd = command(args, env)
+    if args.action == "prepare":
+        subprocess.run(cmd, cwd=gym_dir, env=env, check=True)
+        if args.benchmark == "browsecomp":
+            inline_browsecomp(gym_dir / benchmark.input)
+        return
     os.chdir(gym_dir)
     os.execve(cmd[0], cmd, env)
 

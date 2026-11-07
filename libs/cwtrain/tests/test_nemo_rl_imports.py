@@ -46,4 +46,4 @@ def test_import_without_nemo_rl_environment_names_it(monkeypatch, module, missin
     with pytest.raises(ModuleNotFoundError, match="NeMo-RL's environment") as info:
         importlib.import_module(module)
     assert info.value.name == missing
-    assert "NeMo-RL v0.7.0" in str(info.value)
+    assert "NeMo-RL v0.8.0" in str(info.value)

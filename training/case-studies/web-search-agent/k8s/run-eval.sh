@@ -18,14 +18,14 @@ if [[ -n "${WANDB_PROJECT//[[:space:]]/}" && -z "${WANDB_API_KEY:-}" ]]; then
 fi
 apt-get update -qq && apt-get install -y -qq --no-install-recommends git ca-certificates >/dev/null
 pip install --quiet --no-cache-dir uv
-git clone --quiet --branch "${GYM_REF:-v0.6.0}" --depth 1 https://github.com/NVIDIA-NeMo/Gym.git "$GYM_DIR"
+git clone --quiet --branch "${GYM_REF:-v0.7.0}" --depth 1 https://github.com/NVIDIA-NeMo/Gym.git "$GYM_DIR"
 cd "$GYM_DIR"
 uv sync --quiet --frozen --python 3.13.14
 uv pip install --quiet --python "$GYM_DIR/.venv/bin/python" "$KIT"/cwtrain-*.whl
 PY="$GYM_DIR/.venv/bin/python"
 # The launcher reads its configs next to itself, so run a copy from one directory.
 mkdir -p /work/recipe "$OUT"
-cp "$KIT"/launch.py "$KIT"/you_search.py "$KIT"/*.yaml "$KIT"/exclude_domains.json /work/recipe/
+cp "$KIT"/launch.py "$KIT"/prepare_search_data.py "$KIT"/you_search.py "$KIT"/*.yaml "$KIT"/exclude_domains.json /work/recipe/
 args=(--gym-dir "$GYM_DIR" --benchmark "$BENCHMARK")
 [ "$BENCHMARK" != browsecomp ] || "$PY" /work/recipe/launch.py prepare "${args[@]}"
 start=("${args[@]}" --judge-model "${JUDGE_MODEL:-zai-org/GLM-5.3}"
