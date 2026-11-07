@@ -30,7 +30,7 @@ steps and the cleanup:
 - [`nemo-rl-grpo-nemotron-3.5-lightning-30b-a3b`](../../examples/nemo-rl-grpo-nemotron-3.5-lightning-30b-a3b/README.md):
   GRPO on Nemotron 3.5 Lightning with the DAPO-Math-17k prompts.
 - [`web-search-agent`](../../case-studies/web-search-agent/README.md) (case study): Nemotron 3.5
-  Lightning trained as a Gym search agent on SimpleQA, with You.com search and an LLM judge, and
+  Lightning trained as a Gym search agent on ASearcher questions, with You.com search and an LLM judge, and
   evaluated on BrowseComp.
 
 An example's `run.env` holds the settings that this README names. This recipe's `k8s/` directory
@@ -373,7 +373,7 @@ the optimizer state exists, after the first step. The config sets
 no memory unusable.
 
 The [web-search-agent case study](../../case-studies/web-search-agent/README.md#training-environment)
-trains Gym's BrowseComp agent this way, on SimpleQA, with You.com search and an LLM judge.
+trains Gym's BrowseComp agent this way, on ASearcher questions, with You.com search and an LLM judge.
 
 ### Exact tokens across turns
 

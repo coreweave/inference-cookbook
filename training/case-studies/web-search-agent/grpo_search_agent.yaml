@@ -3,7 +3,7 @@
 # SPDX-PackageName: inference-cookbook
 #
 # The search agent: Gym's BrowseComp agent answers questions with You.com search and browse tools,
-# and an LLM judge scores each answer. prepare_search_data.py writes the questions (SimpleQA by
+# and an LLM judge scores each answer. prepare_search_data.py writes the questions (ASearcher by
 # default). The recipe's grpo_coreweave.yaml supplies everything else; both are in the kit.
 defaults: "grpo_coreweave.yaml"
 
@@ -50,7 +50,7 @@ env:
           entrypoint: app.py
           base_url: https://api.inference.wandb.ai/v1
           api_key: unused
-          model: zai-org/GLM-5.2
+          model: zai-org/GLM-5.3
           return_token_id_information: false
           uses_reasoning_parser: true
           # A reasoning judge needs room for its answer after the reasoning.
@@ -91,5 +91,6 @@ env:
     coreweave_files:
       resources_servers/browsecomp_advanced_harness/you_search.py: /opt/cwtrain/you_search.py
     coreweave_env:
-      # Characters kept of each search or browse result, so that ~10 tool calls fit a trajectory.
-      YOU_SEARCH_MAX_CHARS: "2000"
+      # Characters kept of each search or browse result, so that all 12 turns fit a trajectory. At
+      # 2000, the 16,384-token context filled by about the fourth turn.
+      YOU_SEARCH_MAX_CHARS: "500"

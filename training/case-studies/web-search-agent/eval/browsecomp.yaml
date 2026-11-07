@@ -12,7 +12,7 @@ policy_model:
         # Per turn. The agent's whole trajectory is limited by max_context_tokens below.
         max_tokens: 4096
 
-# The LLM judge that grades the final answers: GLM-5.2 on W&B Inference by default
+# The LLM judge that grades the final answers: GLM-5.3 on W&B Inference by default
 # (--judge-model, --judge-base-url).
 judge_model:
   responses_api_models:

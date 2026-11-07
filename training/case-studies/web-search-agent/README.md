@@ -19,16 +19,16 @@ engine of its own.
 
 ## Data
 
-- **Training**: OpenAI's [SimpleQA](https://openai.com/index/introducing-simpleqa/) (4,326 short
-  fact-seeking questions), which [`prepare_search_data.py`](prepare_search_data.py) downloads
-  before training. The agent answers many of them in a few tool calls, so a GRPO group gets mixed
-  rewards, which GRPO needs to learn.
+- **Training**: a random sample of
+  [ASearcher-Base-35k](https://huggingface.co/datasets/inclusionAI/ASearcher-train-data)
+  (Apache-2.0, 29,853 usable English questions that take 2 to 4 hops over Wikipedia), which
+  [`prepare_search_data.py`](prepare_search_data.py) downloads before training.
 - **Evaluation**: OpenAI's [BrowseComp](https://openai.com/index/browsecomp/) (1,266 questions
   that take tens to hundreds of tool calls). It is too hard to train on at this trajectory length:
   every reward is 0, so a step learns nothing.
 
-Both are public test sets with no train split, so a model trained on one can no longer be evaluated
-on it.
+No ASearcher-Base question is a BrowseComp question, so the trained model can still be evaluated on
+BrowseComp. BrowseComp is a public test set with no train split.
 
 ## Setup
 
@@ -42,7 +42,7 @@ flowchart LR
     bucket[("Object storage<br/>full and delta snapshots")]
     deploy["Inference deployment<br/>gateway, 4 x 2 H100 replicas"]
   end
-  apis["External APIs<br/>You.com search, GLM-5.2 judge on W&B"]
+  apis["External APIs<br/>You.com search, GLM-5.3 judge on W&B"]
   trainer -- "weights after each step" --> bucket
   bucket -- "hot-load" --> deploy
   trainer -- "rollouts" --> deploy
@@ -59,44 +59,40 @@ sample from the same deployment and call the same search and judge APIs.
 | --- | --- |
 | Training recipe | [NeMo-RL](../../recipes/nemo-rl/README.md): synchronous GRPO with the DTensor (Automodel) policy backend |
 | Model | [`nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16`](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16), at the commit that `HF_REVISION` pins, without its MTP heads ([`prepare_model.py`](../../recipes/nemo-rl/prepare_model.py), which the staging Job runs) |
-| Data | OpenAI's [SimpleQA](https://openai.com/index/introducing-simpleqa/) questions, which [`prepare_search_data.py`](prepare_search_data.py) downloads before training |
-| Environment and reward | Gym's BrowseComp agent with You.com `search` and `browse` tools; an LLM judge (`zai-org/GLM-5.2` on W&B Inference) grades each final answer |
+| Data | [ASearcher-Base-35k](https://huggingface.co/datasets/inclusionAI/ASearcher-train-data) questions, sampled at random by [`prepare_search_data.py`](prepare_search_data.py) before training |
+| Environment and reward | Gym's BrowseComp agent with You.com `search` and `browse` tools; an LLM judge (`zai-org/GLM-5.3` on W&B Inference) grades each final answer |
 | Trainer | 8 GPUs of a `gd-8xh100ib-i128` node, eight-way expert parallelism; 30 GRPO steps (`NUM_STEPS`) of 8 prompts × 4 generations |
 | Evaluation | [NeMo Gym](https://github.com/NVIDIA-NeMo/Gym) v0.6.0's BrowseComp benchmark on a CPU node, against the same deployment ([Evaluation](#evaluation)) |
 | Deployment | [`deployment.example.json`](deployment.example.json): `dynamo-vllm`, 4 replicas of 2 H100 GPUs each, `autoscaling.concurrency` 8, `max-model-len` 32,768 |
 
 ## Results
 
-One run (n = 1, so no spread yet), on 2026-10-16: three GRPO steps of 8 SimpleQA questions × 4
-trajectories each, from the first 24 questions (`--max-samples 24`, `NUM_STEPS=3`). The trainer
-was one 8×H100 node in a CoreWeave Kubernetes cluster in US-EAST-01A, and the deployment was 4
+One run (n = 1, so no spread yet), on 2026-11-04: three GRPO steps of 8 ASearcher-Base questions
+× 4 trajectories each, from 256 sampled at random (`--sample 256`, `NUM_STEPS=3`). The trainer was
+one 8×H100 node in a CoreWeave Kubernetes cluster in US-EAST-06A, and the deployment was 4
 replicas of 2 H100s in US-WEST-04A.
 
 | Step | Avg reward | Loss | Step time | Hot-load before the step |
 | --- | --- | --- | --- | --- |
-| 1 | 0.78 | −0.075 | 579 s | v0 full snapshot: 131.5 s to 4/4 replicas |
-| 2 | 0.78 | −0.022 | 310 s | v1 delta (0.5 s upload): 89.3 s to 4/4 replicas |
-| 3 | 0.56 | −0.059 | 188 s | v2 delta (0.5 s upload): 68.2 s to 4/4 replicas |
+| 1 | 0.25 | −0.033 | 407 s | v0 full snapshot (58.3 s upload): 81.2 s to 4/4 replicas |
+| 2 | 0.28 | 0.012 | 274 s | v1 delta (1.3 s upload): 89.5 s to 4/4 replicas |
+| 3 | 0.19 | −0.046 | 242 s | v2 delta (1.3 s upload): 65.2 s to 4/4 replicas |
 
 Every step had a non-zero loss, so groups had mixed rewards and GRPO had something to learn from.
-The rewards over three steps measure nothing about learning; they show the loop works. The
-trainer exited 0.
-
-The [evaluation](#evaluation) then scored the trained
-policy on 5 BrowseComp tasks with at most 50 tool turns each (`LIMIT=5`, `MAX_STEPS=50`): 1
-correct (mean reward 0.20), in 3 minutes 40 seconds on a CPU node. Three tasks reached the
-50-turn cap.
+In step 1, 2 of the 8 groups were mixed, 1 was all correct and 5 were all wrong. Of the 96
+trajectories, 49 used all 12 turns, most of them without a final answer. The rewards over three
+steps measure nothing about learning; they show the loop works. The trainer exited 0. This run's
+policy was not evaluated.
 
 ## Cost
 
 The run above used:
 
-- Trainer: 8 H100s for 21 minutes (model download, setup and three steps), about 2.8 GPU-hours.
-- Deployment: 8 H100s for about 56 minutes from creation to deletion, about 7.5 GPU-hours. Most of
-  it waited for the trainer's node to be provisioned; the three steps took 18 minutes.
-- Evaluation: one CPU node (8 CPUs) for 4 minutes.
-- APIs: about 100 judge calls to `zai-org/GLM-5.2` on W&B Inference, and the agent's You.com search
-  and contents calls (at most 12 per training trajectory and 50 per eval task).
+- Trainer: 8 H100s for 41 minutes (model download, setup and three steps), about 5.5 GPU-hours.
+- Deployment: 8 H100s from creation until deletion. Most of that waits for the trainer's node to
+  be provisioned and set up; the three steps took 15 minutes.
+- APIs: 100 judge calls to `zai-org/GLM-5.3` on W&B Inference (96 verdicts and 4 retries), and
+  1,143 You.com search and contents calls (at most 12 per trajectory).
 
 ## Limitations
 
@@ -104,8 +100,8 @@ The run above used:
   a better model. Measure an improvement with more steps, more eval tasks and several runs.
 - The 16,384-token trajectory and 12 tool turns fit the 8×H100 trainer, but most BrowseComp
   questions need more, so BrowseComp is the evaluation, not the training set.
-- SimpleQA and BrowseComp are public test sets. A model trained on SimpleQA can no longer be
-  evaluated on it.
+- ASearcher-Base records no difficulty, so the reward level depends on the sample. Check the first
+  steps' rewards before a long run.
 - Web search results change over time, so runs are not exactly repeatable.
 
 ## What you need
@@ -385,13 +381,15 @@ The study's settings for the recipe's
 [own environments](../../recipes/nemo-rl/README.md#an-examples-own-environment) are in
 `run.env.example`: `KIT_EXTRA_FILES`, `GRPO_CONFIG`, `EXTRA_PREPARE_DATA` and `GYM_SECRET`.
 
-- [`prepare_search_data.py`](prepare_search_data.py) downloads OpenAI's published question set and
-  writes it as a `NemoGymDataset` at `/work/hotload/nemo-gym/search.jsonl`: SimpleQA's 4,326 short
-  fact-seeking questions, or with `--dataset browsecomp` BrowseComp's 1,266 (decrypted). The prompts
-  and tools are the same as Gym's `benchmarks/browsecomp` benchmark. `--max-samples <n>` keeps the
-  first `n`.
+- [`prepare_search_data.py`](prepare_search_data.py) downloads the questions (14 MB, under a
+  second) and writes them as a `NemoGymDataset` at `/work/hotload/nemo-gym/search.jsonl`:
+  ASearcher-Base-35k's 29,853 English questions with one answer that is not yes or no (it drops
+  the rows whose answer is "the question is invalid."), or with `--dataset browsecomp`
+  BrowseComp's 1,266 (decrypted). The prompts and tools are the same as Gym's
+  `benchmarks/browsecomp` benchmark. `--sample <n>` keeps `n` at random (`--seed`, default 0);
+  `--max-samples <n>` keeps the first `n`.
 - [`grpo_search_agent.yaml`](grpo_search_agent.yaml) inherits the recipe's config. It adds Gym's
-  BrowseComp agent and harness, and the judge (`zai-org/GLM-5.2` on W&B Inference; change
+  BrowseComp agent and harness, and the judge (`zai-org/GLM-5.3` on W&B Inference; change
   `judge_model` for another OpenAI-compatible endpoint). Its `coreweave_secrets` read the judge and
   You.com keys from `GYM_SECRET`.
 - Gym's BrowseComp harness calls Tavily. The kit carries the evaluation's
@@ -403,17 +401,18 @@ The study's settings for the recipe's
   [`exclude_domains.json`](eval/exclude_domains.json)
   (`huggingface.co`, which publishes the questions with their answers).
 
-SimpleQA is the default because GRPO learns only from a group of trajectories whose rewards differ.
-The agent answers many SimpleQA questions in a few tool calls, so groups get mixed rewards. A
-BrowseComp question takes tens to hundreds of tool calls, more than a 16,384-token trajectory holds,
-so its rewards stay at 0 and the step learns nothing. BrowseComp stays the evaluation. Both sets
-have only a test split, so a model trained on one can no longer be evaluated on it.
+ASearcher-Base is the default because GRPO learns only from a group of trajectories whose rewards
+differ. A BrowseComp question takes tens to hundreds of tool calls, more than a 16,384-token
+trajectory holds, so its rewards stay at 0 and the step learns nothing. ASearcher-Base's 2- to 4-hop
+questions (median 144 characters) make the agent chain searches, yet this model answers about a
+quarter of them in 12 turns, so a GRPO group often has mixed rewards.
 
 The agent's `max_steps` limits the tool-calling turns per trajectory (12). `coreweave_env` sets
-`YOU_SEARCH_MAX_CHARS` (2,000), the characters kept of each search or browse result, so that about
-ten tool calls fit in a trajectory. A trajectory runs in one context: the agent's context resets
-are off, because a reset drops earlier turns and so changes the trajectory's tokens. A trajectory
-that reaches `policy.max_total_sequence_length` ends there.
+`YOU_SEARCH_MAX_CHARS` (500), the characters kept of each search or browse result, so that all 12
+turns fit in a trajectory. At 2,000, the 16,384-token context was full by about the fourth turn.
+A trajectory runs in one context: the agent's context resets are off, because a reset drops
+earlier turns and so changes the trajectory's tokens. A trajectory that reaches
+`policy.max_total_sequence_length` ends there.
 
 ## Evaluation
 
@@ -426,7 +425,7 @@ the collector, and sends model requests to the deployment's gateway.
 - Gym's BrowseComp agent searches and reads the web through You.com, with the same
   [`you_search.py`](eval/you_search.py) as training. `YOU_SEARCH_MAX_CHARS`, when set, caps each
   result; the evaluation keeps results whole.
-- The judge, `zai-org/GLM-5.2` on W&B Inference by default, compares each final answer with the
+- The judge, `zai-org/GLM-5.3` on W&B Inference by default, compares each final answer with the
   ground truth.
 - [`eval/launch.py`](eval/launch.py) uses cwtrain's `RolloutConfig` for the endpoint, model, key
   file and collection concurrency. [`eval/browsecomp.yaml`](eval/browsecomp.yaml) overrides Gym's
@@ -440,13 +439,13 @@ Three settings in `k8s/eval.env` (or flags of `eval/launch.py`) change what runs
 | --- | --- | --- | --- |
 | `BENCHMARK` | `--benchmark` | `browsecomp` | The evaluation. BrowseComp is the only one; `launch.py`'s `BENCHMARKS` registry is where another Gym benchmark would go. |
 | `ROLLOUT_MODEL` | `--model` | `nemotron-lightning-hotload` | The target model: the deployment's served model name. |
-| `JUDGE_MODEL`, `JUDGE_BASE_URL` | `--judge-model`, `--judge-base-url` | `zai-org/GLM-5.2`, `https://api.inference.wandb.ai/v1` | The judge: any OpenAI-compatible endpoint and model. |
+| `JUDGE_MODEL`, `JUDGE_BASE_URL` | `--judge-model`, `--judge-base-url` | `zai-org/GLM-5.3`, `https://api.inference.wandb.ai/v1` | The judge: any OpenAI-compatible endpoint and model. |
 
 | Component | Version |
 | --- | --- |
 | NeMo Gym | [`v0.6.0`](https://github.com/NVIDIA-NeMo/Gym/releases/tag/v0.6.0) (`GYM_REF`) |
 | Search | You.com Search and Contents APIs (`https://ydc-index.io/v1`) |
-| Judge | `zai-org/GLM-5.2` on [W&B Inference](https://docs.wandb.ai/inference/), CoreWeave's serverless inference |
+| Judge | `zai-org/GLM-5.3` on [W&B Inference](https://docs.wandb.ai/inference/), CoreWeave's serverless inference |
 
 ### Running the evaluation
 

@@ -28,7 +28,7 @@ mkdir -p /work/recipe "$OUT"
 cp "$KIT"/launch.py "$KIT"/you_search.py "$KIT"/*.yaml "$KIT"/exclude_domains.json /work/recipe/
 args=(--gym-dir "$GYM_DIR" --benchmark "$BENCHMARK")
 [ "$BENCHMARK" != browsecomp ] || "$PY" /work/recipe/launch.py prepare "${args[@]}"
-start=("${args[@]}" --judge-model "${JUDGE_MODEL:-zai-org/GLM-5.2}"
+start=("${args[@]}" --judge-model "${JUDGE_MODEL:-zai-org/GLM-5.3}"
        --judge-base-url "${JUDGE_BASE_URL:-https://api.inference.wandb.ai/v1}"
        --max-context-tokens "${MAX_CONTEXT_TOKENS:-32768}" --max-steps "${MAX_STEPS:-50}")
 [ ! -s /secrets/gym/judge_api_key ] || start+=(--judge-api-key-file /secrets/gym/judge_api_key)
@@ -77,4 +77,4 @@ echo "== scores"
 # Prints each task's reward and tool calls; with WANDB_PROJECT set, also logs them to W&B.
 "$PY" /work/recipe/launch.py report --benchmark "$BENCHMARK" --limit "${LIMIT:-5}" \
   --max-steps "${MAX_STEPS:-50}" --max-context-tokens "${MAX_CONTEXT_TOKENS:-32768}" \
-  --judge-model "${JUDGE_MODEL:-zai-org/GLM-5.2}" --output "$OUT/coreweave_$BENCHMARK.jsonl"
+  --judge-model "${JUDGE_MODEL:-zai-org/GLM-5.3}" --output "$OUT/coreweave_$BENCHMARK.jsonl"
