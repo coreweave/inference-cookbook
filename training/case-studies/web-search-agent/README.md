@@ -62,7 +62,7 @@ sample from the same deployment and call the same search and judge APIs.
 | Data | [ASearcher-Base-35k](https://huggingface.co/datasets/inclusionAI/ASearcher-train-data) questions, sampled at random by [`prepare_search_data.py`](prepare_search_data.py) before training |
 | Environment and reward | Gym's BrowseComp agent with You.com `search` and `browse` tools; an LLM judge (`zai-org/GLM-5.3` on W&B Inference) grades each final answer |
 | Trainer | 8 GPUs of a `gd-8xh100ib-i128` node, eight-way expert parallelism; 30 GRPO steps (`NUM_STEPS`) of 8 prompts × 4 generations |
-| Evaluation | [NeMo Gym](https://github.com/NVIDIA-NeMo/Gym) v0.6.0's BrowseComp benchmark on a CPU node, against the same deployment ([Evaluation](#evaluation)) |
+| Evaluation | [NeMo Gym](https://github.com/NVIDIA-NeMo/Gym) v0.7.0's BrowseComp benchmark on a CPU node, against the same deployment ([Evaluation](#evaluation)) |
 | Deployment | [`deployment.example.json`](deployment.example.json): `dynamo-vllm`, 4 replicas of 2 H100 GPUs each, `autoscaling.concurrency` 8, `max-model-len` 32,768 |
 
 ## Results
@@ -421,20 +421,21 @@ earlier turns and so changes the trajectory's tokens. A trajectory that reaches
 A search agent can earn the reward without doing the research. It can find a page that publishes
 the question with its answer, or it can write an answer that talks the judge into a yes. ASearcher's
 and BrowseComp's answers are on the open web, in dataset mirrors, in ASearcher's published
-training data, in the simple-evals CSVs and in papers that quote the questions. A policy that reaches them learns to look up the answer key
-instead of learning to search, and its BrowseComp score then measures the leak, not the model.
+training data, in the simple-evals CSVs and in papers that quote the questions. A policy that
+reaches them learns to look up the answer key instead of learning to search, and its BrowseComp
+score then measures the leak, not the model.
 
-The Gym versions this study runs have no guard against this. Training uses v0.4.0 (in NeMo-RL
-v0.7.0) and the evaluation uses v0.6.0. Neither filters search results; Gym's filter first ships in
-v0.7.0. Both judge prompts put `[correct_answer]` after the response. In v0.4.0 the judge also
-reads the text of every turn, not only the last one. So [`you_search.py`](eval/you_search.py) adds
-three guards, the same in training and in the evaluation:
+Training uses Gym v0.4.0 (in NeMo-RL v0.7.0), which has no contamination filter. Evaluation now
+uses Gym v0.7.0, which filters BrowseComp leaks. The shared [`you_search.py`](eval/you_search.py)
+also filters ASearcher and legacy SimpleQA answer keys before shortening results, and backports
+BrowseComp filtering to training. Both versions' judge prompts put `[correct_answer]` after the
+response; v0.4.0 also shows the judge every turn. The adapter applies three guards to both paths:
 
 - **Results that quote a benchmark are dropped.** A search result or page is dropped when its text
   or URL names BrowseComp, ASearcher, SimpleQA or OpenAI's simple-evals (Gym v0.7.0's patterns
-  plus ASearcher's and SimpleQA's names), or when its URL is a HuggingFace dataset viewer. The whole page is checked before
-  `YOU_SEARCH_MAX_CHARS` shortens it. When every result of a call is dropped, the call looks like
-  one that found nothing. This is deliberate: a message saying the results were blocked would tell
+  plus ASearcher's and SimpleQA's names), or when its URL is a HuggingFace dataset viewer. The
+  whole page is checked before `YOU_SEARCH_MAX_CHARS` shortens it. When every result of a call
+  is dropped, the call looks like one that found nothing. This is deliberate: a message saying the results were blocked would tell
   the agent that the answer key is nearby. Each drop logs a `[browsecomp][contamination]` line, the
   same line that Gym v0.7.0's filter logs.
 - **Answer-key hosts are never fetched.** [`exclude_domains.json`](eval/exclude_domains.json) lists
@@ -496,9 +497,29 @@ Three settings in `k8s/eval.env` (or flags of `eval/launch.py`) change what runs
 
 | Component | Version |
 | --- | --- |
-| NeMo Gym | [`v0.6.0`](https://github.com/NVIDIA-NeMo/Gym/releases/tag/v0.6.0) (`GYM_REF`) |
+| NeMo Gym | [`v0.7.0`](https://github.com/NVIDIA-NeMo/Gym/releases/tag/v0.7.0) (`GYM_REF`) |
 | Search | You.com Search and Contents APIs (`https://ydc-index.io/v1`) |
 | Judge | `zai-org/GLM-5.3` on [W&B Inference](https://docs.wandb.ai/inference/), CoreWeave's serverless inference |
+
+Gym v0.7.0's upstream benchmark enables a shell workspace. This recipe sets `workspace: none`
+and keeps five search results per query. After Gym downloads and decrypts its selected tasks,
+`launch.py prepare` replaces their prompts and tools with the training templates from
+`prepare_search_data.py`: `search` and `browse`, with inline results. Task order, questions and
+answers stay unchanged. The eval kit includes that script.
+
+The reported run above used Gym v0.6.0 for evaluation; its scores have not been rerun with
+v0.7.0. Local v0.7.0 integration checks cover config resolution, the actual harness's search and
+browse routes with mocked You.com responses, contamination filtering, and the judge adapter.
+A local smoke test also started the actual Gym servers and collected one task against mock
+policy and judge endpoints (reward 1; the judge received only the final answer).
+The integration checks run with `pytest training/case-studies/web-search-agent/tests/test_gym_v070.py` in a Gym
+v0.7.0 environment with the BrowseComp harness dependencies installed; otherwise they skip.
+
+Training still uses the container's Gym v0.4.0. A dependency dry run of Gym v0.7.0 against its
+Ray 2.55.1 fails: Gym requires Ray >=2.58.0. Upgrading only the Gym actor would give it a different
+Ray version from the trainer's cluster. A training upgrade needs a consistent Ray upgrade in the
+driver and worker environments and a new GPU training check; the shared adapter retains the
+filter for the current training setup.
 
 ### Running the evaluation
 
@@ -522,11 +543,12 @@ kubectl -n "$NAMESPACE" logs -f --pod-running-timeout=10m "job/cwtrain-gym-$EVAL
 
 The Job runs [`k8s/run-eval.sh`](k8s/run-eval.sh) on a node without GPUs. The script:
 
-1. installs Gym `GYM_REF` (v0.6.0) and the cwtrain wheel in the pod,
-2. downloads and decrypts the benchmark data: Gym v0.6.0's fixed 400-question subset of
+1. installs Gym `GYM_REF` (v0.7.0) and the cwtrain wheel in the pod,
+2. downloads and decrypts the benchmark data: Gym's fixed 400-question subset of
    BrowseComp's 1,266 (seed 42),
 3. starts the Gym servers with `launch.py start`: `policy_model`, `judge_model`,
-   `browsecomp_benchmark_resources_server` and `browsecomp_benchmark_agent`,
+   `browsecomp_benchmark_resources_server`, `browsecomp_benchmark_agent`, and Gym v0.7.0's
+   `browsecomp_benchmark_environment_server`,
 4. collects `LIMIT` tasks (five by default) with `launch.py collect`, at `EVAL_CONCURRENCY` tasks in
    flight,
 5. prints each task's reward and tool calls, and the mean reward, with `launch.py report`. With

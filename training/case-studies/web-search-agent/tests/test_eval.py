@@ -129,12 +129,40 @@ def test_prepare_downloads_the_benchmark_data():
     assert cmd[1:] == ["eval", "prepare", "--config", "benchmarks/browsecomp/config.yaml"]
 
 
+def test_prepared_eval_keeps_tasks_but_uses_the_training_tools(tmp_path, monkeypatch):
+    import copy
+
+    # The eval kit carries this module next to launch.py.
+    recipe = Path(launch.RECIPE)
+    monkeypatch.setattr(launch, "RECIPE", recipe.parent)
+    rows = [
+        {"question": "q1", "ground_truth": "a1", "extra": 7,
+         "responses_create_params": {"input": [{"role": "system", "content": "Use bash"}],
+                                     "tools": [{"name": "bash_command"}]}},
+        {"question": "q2", "ground_truth": "a2", "responses_create_params": {}},
+    ]
+    original = copy.deepcopy(rows)
+    path = tmp_path / "tasks.jsonl"
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    launch.inline_browsecomp(path)
+    actual = [json.loads(line) for line in path.read_text().splitlines()]
+    for before, after in zip(original, actual, strict=True):
+        params = after.pop("responses_create_params")
+        before.pop("responses_create_params")
+        assert after == before
+        assert [tool["name"] for tool in params["tools"]] == ["search", "browse"]
+        assert "workspace" not in params["input"][0]["content"]
+        assert params["input"][1]["content"].startswith(after["question"])
+
+
 def test_recipe_configs_override_the_gym_benchmark():
     OmegaConf = pytest.importorskip("omegaconf").OmegaConf
 
     config = OmegaConf.load(Path(launch.RECIPE) / "browsecomp.yaml")
     harness = config.browsecomp_benchmark_resources_server.resources_servers
     assert harness.browsecomp_advanced_harness.entrypoint == "you_search.py"
+    assert harness.browsecomp_advanced_harness.workspace == "none"
+    assert harness.browsecomp_advanced_harness.max_results == 5
     policy = OmegaConf.load(Path(launch.RECIPE) / "coreweave.yaml").policy_model
     assert policy.responses_api_models.vllm_model.entrypoint == "cwtrain_tool_app.py"
     agent = config.browsecomp_benchmark_agent.responses_api_agents.browsecomp_agent
@@ -165,7 +193,7 @@ K8S = Path(launch.RECIPE).parent / "k8s"
 
 def test_the_kit_carries_every_file_the_launcher_reads():
     kit = (K8S / "make-eval-kit.sh").read_text()
-    for name in ("launch.py", "you_search.py", "coreweave.yaml", "browsecomp.yaml",
+    for name in ("launch.py", "prepare_search_data.py", "you_search.py", "coreweave.yaml", "browsecomp.yaml",
                  "exclude_domains.json", "run-eval.sh"):  # fmt: skip
         assert f"--from-file={name}=" in kit, name
     assert (Path(launch.RECIPE) / "browsecomp.yaml").is_file()

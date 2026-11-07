@@ -20,6 +20,7 @@ kubectl --context "$CTX" -n "$NS" create configmap "$KIT" \
   --from-file="$(basename "$WHEEL")=$WHEEL" \
   --from-file=run-eval.sh="$HERE/run-eval.sh" \
   --from-file=launch.py="$RECIPE/launch.py" \
+  --from-file=prepare_search_data.py="$RECIPE/../prepare_search_data.py" \
   --from-file=you_search.py="$RECIPE/you_search.py" \
   --from-file=coreweave.yaml="$RECIPE/coreweave.yaml" \
   --from-file=browsecomp.yaml="$RECIPE/browsecomp.yaml" \

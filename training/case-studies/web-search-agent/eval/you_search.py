@@ -7,11 +7,11 @@
 Gym's ``browsecomp_advanced_harness`` resources server calls a Tavily client's ``search`` and
 ``extract``. ``YouSearchClient`` has the same two methods and returns Tavily-shaped results from
 the You.com Search and Contents APIs. So the harness's tools, page workspace and judge prompt run
-unchanged, in Gym v0.4.0 (bundled with NeMo-RL v0.7.0) and v0.6.0.
+unchanged, in Gym v0.4.0 (bundled with NeMo-RL v0.7.0) and v0.7.0.
 
-Neither of those Gym versions guards against reward hacking, so this module adds two guards in
-front of the harness. Search and page results that quote a benchmark are dropped (``contaminated``),
-as Gym's own filter does from v0.7.0. The judge sees only the final ``Exact Answer:`` line
+Gym v0.4.0 has no contamination filter; v0.7.0 filters BrowseComp leaks. This shared adapter also
+drops ASearcher and legacy SimpleQA answer keys before shortening search or page text
+(``contaminated``), and backports BrowseComp filtering to training. The judge sees only the final ``Exact Answer:`` line
 (``judged_answer``), not the explanation or earlier turns.
 
 ``install`` copies this file into the harness directory. A server whose ``entrypoint`` is
