@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-PackageName: inference-cookbook
 
-"""The importance-sampling settings in every config the cookbook ships, as NeMo-RL v0.7.0 reads them.
+"""The importance-sampling settings in every config the cookbook ships, as NeMo-RL v0.8.0 reads them.
 
 ``ClippedPGLossFn`` refuses a truncation type without the correction. It also applies a truncation
 ratio whenever one is set, correction or not, and raises at the first training step if the ratio

@@ -7,11 +7,10 @@
 Gym's ``browsecomp_advanced_harness`` resources server calls a Tavily client's ``search`` and
 ``extract``. ``YouSearchClient`` has the same two methods and returns Tavily-shaped results from
 the You.com Search and Contents APIs. So the harness's tools, page workspace and judge prompt run
-unchanged, in Gym v0.4.0 (bundled with NeMo-RL v0.7.0) and v0.7.0.
+unchanged, in Gym v0.7.0 (bundled with NeMo-RL v0.8.0 for training).
 
-Gym v0.4.0 has no contamination filter; v0.7.0 filters BrowseComp leaks. This shared adapter also
-drops ASearcher answer keys before shortening search or page text
-(``contaminated``), and backports BrowseComp filtering to training. The judge sees only the final ``Exact Answer:`` line
+Gym v0.7.0 filters BrowseComp leaks. This shared adapter also drops ASearcher answer keys and
+checks complete provider results before shortening search or page text (``contaminated``). The judge sees only the final ``Exact Answer:`` line
 (``judged_answer``), not the explanation or earlier turns.
 
 ``install`` copies this file into the harness directory. A server whose ``entrypoint`` is
@@ -80,7 +79,7 @@ JUDGE_ANSWER_CHARS = 200
 _THINK = re.compile(r"<think>.*?</think>", re.DOTALL)
 _EXACT_ANSWER = re.compile(r"exact answer\W*:\s*(.*)", re.IGNORECASE)
 _CONFIDENCE = re.compile(r"\bconfidence\s*:", re.IGNORECASE)
-# The judge prompt's own fields. In Gym v0.4.0 and v0.6.0 [correct_answer] follows the
+# The judge prompt's own fields. In Gym v0.7.0 [correct_answer] follows the
 # response, so a response could otherwise supply one.
 _JUDGE_FIELDS = re.compile(
     r"\[(?:question|response|correct_answer)\]\s*:?"
@@ -109,7 +108,7 @@ def contaminated(item: Mapping[str, Any]) -> bool:
 
 
 def _report_drops(function: str, dropped: int, kept: int) -> None:
-    # The same line as Gym v0.7.0's filter, so one grep counts drops in either version.
+    # The same line as Gym v0.7.0's filter, so one grep counts all drops.
     if dropped:
         print(
             f"[browsecomp][contamination] fn={function} provider=you dropped={dropped} kept={kept}",
@@ -120,8 +119,8 @@ def _report_drops(function: str, dropped: int, kept: int) -> None:
 def judged_answer(response: str) -> str:
     """The part of a final response that the judge grades: its last ``Exact Answer:``, capped.
 
-    The judge never sees the explanation or earlier turns (Gym v0.4.0 passes the text of every
-    turn), so text that argues for an answer, lists other candidates or imitates the judge's
+    The judge never sees the explanation or earlier turns, so text that argues for an answer,
+    lists other candidates or imitates the judge's
     fields does not reach it. A response with no ``Exact Answer:`` is graded as no answer.
     """
     matches = _EXACT_ANSWER.findall(_THINK.sub("", response or ""))
@@ -300,7 +299,7 @@ def server_class(harness: Any) -> type:
         async def _verify_answer_with_judge(
             self, question: str, ground_truth: str, response: str
         ) -> Any:
-            # Same signature in Gym v0.4.0 to v0.7.0; the return value passes through unchanged.
+            # The upstream return value passes through unchanged.
             return await super()._verify_answer_with_judge(
                 question, ground_truth, judged_answer(response)
             )

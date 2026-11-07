@@ -178,7 +178,7 @@ account prerequisites, the gateway and the bucket policy. Then get these:
   Federation, it holds no key; otherwise, the trainer's key. The Jobs that create the bucket and
   stage the base model mount the admin's key from `ADMIN_STORAGE_SECRET`. The trainer also needs
   the API token in its environment.
-- **The NeMo-RL container**, `nvcr.io/nvidia/nemo-rl:v0.7.0` (amd64 and arm64 on NGC). The
+- **The NeMo-RL container**, `nvcr.io/nvidia/nemo-rl:v0.8.0` (amd64 and arm64 on NGC). The
   recipe's launch script patches `/opt/nemo-rl` in place and installs the `cwtrain` wheel into the
   project venv.
 - **The base model, staged separately for each deployment.** Stage it into the bucket with the
@@ -425,11 +425,11 @@ training data, in the simple-evals CSVs and in papers that quote the questions. 
 reaches them learns to look up the answer key instead of learning to search, and its BrowseComp
 score then measures the leak, not the model.
 
-Training uses Gym v0.4.0 (in NeMo-RL v0.7.0), which has no contamination filter. Evaluation now
-uses Gym v0.7.0, which filters BrowseComp leaks. The shared [`you_search.py`](eval/you_search.py)
-also filters ASearcher answer keys before shortening results, and backports
-BrowseComp filtering to training. Both versions' judge prompts put `[correct_answer]` after the
-response; v0.4.0 also shows the judge every turn. The adapter applies three guards to both paths:
+Training now uses Gym v0.7.0 bundled with NeMo-RL v0.8.0, and evaluation also uses Gym v0.7.0.
+Both have upstream BrowseComp contamination filtering. The shared [`you_search.py`](eval/you_search.py)
+also filters ASearcher answer keys before shortening results. The judge prompt still puts
+`[correct_answer]` after the response, so the adapter sends only the final answer. It applies
+three guards to both paths:
 
 - **Results that quote a benchmark are dropped.** A search result or page is dropped when its text
   or URL names BrowseComp, ASearcher or OpenAI's simple-evals (Gym v0.7.0's patterns
@@ -514,11 +514,11 @@ policy and judge endpoints (reward 1; the judge received only the final answer).
 The integration checks run with `pytest training/case-studies/web-search-agent/tests/test_gym_v070.py` in a Gym
 v0.7.0 environment with the BrowseComp harness dependencies installed; otherwise they skip.
 
-Training still uses the container's Gym v0.4.0. A dependency dry run of Gym v0.7.0 against its
-Ray 2.55.1 fails: Gym requires Ray >=2.58.0. Upgrading only the Gym actor would give it a different
-Ray version from the trainer's cluster. A training upgrade needs a consistent Ray upgrade in the
-driver and worker environments and a new GPU training check; the shared adapter retains the
-filter for the current training setup.
+The trainer now pins NeMo-RL v0.8.0, whose container bundles Gym v0.7.0 and Ray 2.58.0 for the
+driver and workers. The recipe uses the renamed `automodel_cfg` and AutoModel worker implementation.
+The reported training run used NeMo-RL v0.7.0 with Gym v0.4.0; it has not been rerun on the new
+container. See the recipe's [validation notes](../../recipes/nemo-rl/README.md#validation) for the
+CPU/source checks and the remaining GPU validation.
 
 ### Running the evaluation
 

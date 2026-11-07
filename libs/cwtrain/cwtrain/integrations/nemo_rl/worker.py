@@ -6,7 +6,7 @@
 
 Register a class with ``policy.worker_extension_cls_fqn``. (The recipe's NeMo-RL patch defaults
 to these classes.) NeMo-RL instantiates it instead of the stock worker. So each class derives from
-the worker implementation the policy would otherwise use (DTensor v2 or Megatron), with the same
+the worker implementation the policy would otherwise use (Automodel or Megatron), with the same
 ``ray.remote`` decoration.
 
 ``export_hf_checkpoint`` is a collective. Every rank iterates the HF-layout weights, with the same
@@ -230,33 +230,30 @@ def _export(
 # undecorated *Impl classes and apply the same ``ray.remote`` runtime env as the stock workers.
 # NeMo-RL's own quantized workers do the same.
 
-try:  # DTensor v2 (Automodel) policy
+try:  # Automodel policy
     import ray
     from nemo_rl.models.policy.utils import get_runtime_env_for_policy_worker
-    from nemo_rl.models.policy.workers.dtensor_policy_worker_v2 import (
-        DTensorPolicyWorkerV2Impl,
-        dtensor_params_generator,
+    from nemo_rl.models.policy.workers.automodel_policy_worker import (
+        AutomodelPolicyWorkerImpl,
+        automodel_params_generator,
     )
 except Exception:  # pragma: no cover - depends on the NeMo-RL install
-    DTensorPolicyWorkerV2Impl = None  # type: ignore[assignment,misc]
-    dtensor_params_generator = None  # type: ignore[assignment]
+    AutomodelPolicyWorkerImpl = None  # type: ignore[assignment,misc]
+    automodel_params_generator = None  # type: ignore[assignment]
 
 
-def _dtensor_hf_params(model: Any, policy_dtype: Any, dtypes: dict[str, str] | None) -> Any:
+def _automodel_hf_params(model: Any, policy_dtype: Any, dtypes: dict[str, str] | None) -> Any:
     """NeMo-RL's HF-layout weights, uncast when ``dtypes`` names the checkpoint's dtypes.
 
-    ``dtensor_params_generator`` converts every tensor to the one dtype it is given. That turns a
-    checkpoint's FP32 tensors (for example, MoE router biases) into bf16 and rounds their values.
-    ``tensor.to(None)`` changes nothing. So with ``dtypes``, the tensors keep the policy's dtype,
-    and :func:`_export` casts each tensor once, to the dtype of the deployment's checkpoint.
-
-    This relies on how NeMo-RL applies the cast: ``tensor.to(target_dtype, non_blocking=True)`` in
-    v0.7.0, the version the recipe pins. :func:`_check_keeps_tensors` checks it first.
+    ``automodel_params_generator`` casts ordinary tensors to its target dtype; v0.8.0 makes an
+    exception for FP32 router correction biases. Passing None preserves every tensor's dtype,
+    so :func:`_export` can cast each tensor once to the deployment checkpoint's stored dtype.
+    :func:`_check_keeps_tensors` checks that behavior before exporting.
     """
     if not dtypes:
-        return dtensor_params_generator(model, policy_dtype)
-    _check_keeps_tensors(dtensor_params_generator)
-    return dtensor_params_generator(model, None)
+        return automodel_params_generator(model, policy_dtype)
+    _check_keeps_tensors(automodel_params_generator)
+    return automodel_params_generator(model, None)
 
 
 @functools.cache
@@ -290,7 +287,7 @@ def _check_keeps_tensors(generator: Any) -> None:
     yielded = dict(generator(probe, None))
     if set(yielded) != set(expected):
         raise RuntimeError(
-            f"NeMo-RL's dtensor_params_generator returned {sorted(yielded)} for a plain module "
+            f"NeMo-RL's automodel_params_generator returned {sorted(yielded)} for a plain module "
             f"holding {sorted(expected)}, so cwtrain cannot check that it keeps each tensor's "
             "dtype; check cwtrain against this NeMo-RL version"
         )
@@ -303,7 +300,7 @@ def _check_keeps_tensors(generator: Any) -> None:
     ]
     if changed:
         raise RuntimeError(
-            "NeMo-RL's dtensor_params_generator no longer keeps each tensor's dtype and values "
+            "NeMo-RL's automodel_params_generator no longer keeps each tensor's dtype and values "
             f"when given None ({', '.join(changed)}), so the export would round the checkpoint's "
             "FP32 tensors; check cwtrain against this NeMo-RL version"
         )
@@ -329,13 +326,13 @@ def _megatron_export(
     return _export(params, path, allowed_names, config_dir, shard_bytes)
 
 
-if DTensorPolicyWorkerV2Impl is not None:
+if AutomodelPolicyWorkerImpl is not None:
 
     @ray.remote(
-        runtime_env=get_runtime_env_for_policy_worker("dtensor_policy_worker_v2")
+        runtime_env=get_runtime_env_for_policy_worker("automodel_policy_worker")
     )  # pragma: no cover
-    class CoreWeaveDTensorPolicyWorker(DTensorPolicyWorkerV2Impl):  # type: ignore[misc,valid-type]
-        """DTensor v2 policy worker with an HF-layout checkpoint export."""
+    class CoreWeaveDTensorPolicyWorker(AutomodelPolicyWorkerImpl):  # type: ignore[misc,valid-type]
+        """AutoModel worker with HF-layout export; keeps the public DTensor class name."""
 
         @torch.no_grad()
         def export_hf_checkpoint(
@@ -366,7 +363,7 @@ if DTensorPolicyWorkerV2Impl is not None:
                 self.model = self.move_to_cuda(self.model)
             try:
                 return _export(
-                    _dtensor_hf_params(self.model, self.dtype, dtypes),
+                    _automodel_hf_params(self.model, self.dtype, dtypes),
                     path,
                     allowed_names,
                     config_dir,

@@ -33,7 +33,7 @@ __all__ = [
 ]
 
 #: The NeMo-RL release that the integration and the recipe's patches are tested with.
-_TESTED_NEMO_RL = "v0.7.0"
+_TESTED_NEMO_RL = "v0.8.0"
 
 
 def _missing_dependency(exc: ModuleNotFoundError) -> ModuleNotFoundError:

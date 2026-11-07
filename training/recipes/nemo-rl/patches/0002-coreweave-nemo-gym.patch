@@ -1,49 +1,15 @@
---- a/nemo_rl/algorithms/grpo.py
-+++ b/nemo_rl/algorithms/grpo.py
-@@ -506,10 +506,15 @@
-                 node_id=ray_cur_node_id,
-                 soft=True,
-             )
-+        actor_env = dict(os.environ)
-+        if generation_config["backend"] == "coreweave":
-+            from cwtrain.integrations.launch import is_secret_env_var
-+
-+            actor_env = {k: v for k, v in actor_env.items() if not is_secret_env_var(k)}
-         nemo_gym_opts["runtime_env"] = {
-             "py_executable": nemo_gym_py_exec,
-             "env_vars": {
--                **os.environ,
-+                **actor_env,
-                 "VIRTUAL_ENV": nemo_gym_py_exec,
-                 "UV_PROJECT_ENVIRONMENT": nemo_gym_py_exec,
-             },
-@@ -1219,6 +1224,12 @@
-             hf_checkpoint=policy_config["model_name"],
-         )
-         worker_init_timing_metrics["coreweave_init_time_s"] = time.perf_counter() - t0
-+        if enable_nemo_gym:
-+            nemo_gym_actor, gym_init_time = _spinup_nemo_gym(
-+                [policy_generation.rollout_config.base_url],
-+                policy_generation.rollout_config.model,
-+            )
-+            worker_init_timing_metrics["nemo_gym_init_time_s"] = gym_init_time
-         print(
-             f"  ✓ Using CoreWeave hot-load deployment for generation with {policy_config['model_name']}",
-             flush=True,
-@@ -1802,6 +1813,10 @@
-     should_use_nemo_gym = bool(env_config.get("should_use_nemo_gym"))
-     if not should_use_nemo_gym:
-         return should_use_nemo_gym
-+
-+    if master_config.policy["generation"]["backend"] == "coreweave":
-+        # Gym makes async HTTP requests to the external generation service.
-+        return True
- 
-     # Validate the setup for training with NeMo-Gym
-     assert _should_use_async_rollouts(master_config), (
 --- a/nemo_rl/environments/nemo_gym.py
 +++ b/nemo_rl/environments/nemo_gym.py
-@@ -183,6 +183,10 @@
+@@ -208,6 +208,8 @@
+         return False
+
+     generation_config = master_config.policy["generation"]
++    if generation_config["backend"] == "coreweave":
++        return True  # Async HTTP to the existing hot-load deployment.
+     assert should_use_async_rollouts(generation_config), (
+         "❌ Error: In order to use NeMo-Gym, you must use a generation "
+         "backend with `async_engine: true`!"
+@@ -560,6 +562,10 @@
              "dummy_key"  # No key necessary for training.
          )
          initial_global_config_dict["policy_base_url"] = self.cfg["base_urls"]
@@ -54,9 +20,9 @@
          # In multinode runs, Gym-managed service configs must advertise a real node IP
          # rather than falling back to localhost, or remote workers will connect to
          # their own loopback interface instead of the actor-hosted service.
-@@ -324,6 +328,10 @@
-         )
- 
+@@ -1210,6 +1216,10 @@
+         turn_idx = 0
+
          nemo_rl_message_log = []
 +        if (self.cfg.get("initial_global_config_dict") or {}).get("coreweave_training"):
 +            from cwtrain.integrations.nemo_rl.gym import validate_training_output
@@ -65,21 +31,59 @@
          seen_token_ids: List[int] = []
          batch_decode_items = []
          for output_item_dict in nemo_gym_result["response"]["output"]:
-@@ -478,8 +486,9 @@
-     generation_config = config.policy["generation"]
+@@ -1524,9 +1534,11 @@
+         # Megatron Inference is always async; should_use_async_rollouts rejects
+         # an explicit mcore_generation_config.async_engine key.
+         generation_config["mcore_generation_config"]["expose_http_server"] = True
++    elif generation_config["backend"] == "coreweave":
++        pass  # The HTTP server is the existing Dedicated Inference deployment.
+     else:
+         raise ValueError(
+-            "NeMo-Gym setup supports vllm, dynamo, or megatron generation; got "
++            "NeMo-Gym setup supports vllm, dynamo, megatron, or coreweave generation; got "
+             f"{generation_config['backend']!r}"
+         )
+
+@@ -1916,6 +1928,18 @@
+     )
+
  
-     # Enable the http server. Requires both async engine and the expose_http_server flag
--    generation_config["vllm_cfg"]["async_engine"] = True
--    generation_config["vllm_cfg"]["expose_http_server"] = True
-+    if generation_config["backend"] != "coreweave":
-+        generation_config["vllm_cfg"]["async_engine"] = True
-+        generation_config["vllm_cfg"]["expose_http_server"] = True
- 
-     # Stop strings or token ids are not supported
-     generation_config["stop_strings"] = None
++def _gym_actor_runtime_env(nemo_gym_dict: dict[str, Any]) -> dict:
++    runtime_env = make_actor_runtime_env(NEMO_GYM_ACTOR_FQN)
++    if nemo_gym_dict.get("coreweave_training"):
++        from cwtrain.integrations.launch import is_secret_env_var
++
++        runtime_env["env_vars"] = {
++            key: value for key, value in runtime_env["env_vars"].items()
++            if not is_secret_env_var(key)
++        }
++    return runtime_env
++
++
+ def _build_single_gym_actor(
+     nemo_gym_dict: dict[str, Any],
+     *,
+@@ -1941,7 +1965,7 @@
+     )
+
+     actor_options: dict[str, Any] = {
+-        "runtime_env": make_actor_runtime_env(NEMO_GYM_ACTOR_FQN)
++        "runtime_env": _gym_actor_runtime_env(nemo_gym_dict)
+     }
+     if nemo_gym_dict.get("num_gpu_nodes", 0):
+         actor_options["scheduling_strategy"] = NodeAffinitySchedulingStrategy(
+@@ -2007,7 +2031,7 @@
+
+     # This may create a temporary all-node placement group while materializing
+     # the actor venv. Finish it before the shard group reserves those CPUs.
+-    actor_runtime_env = make_actor_runtime_env(NEMO_GYM_ACTOR_FQN)
++    actor_runtime_env = _gym_actor_runtime_env(nemo_gym_dict)
+
+     pg = placement_group(
+         bundles=[
 --- a/nemo_rl/experience/rollouts.py
 +++ b/nemo_rl/experience/rollouts.py
-@@ -1346,7 +1346,9 @@
+@@ -2712,7 +2712,9 @@
      assert max_rollout_turns is None, (
          "`max_rollout_turns` is not supported in NeMo-Gym path!"
      )
@@ -90,7 +94,7 @@
          engine_max_model_len = policy_generation.cfg["vllm_cfg"]["max_model_len"]
      elif "mcore_generation_config" in policy_generation.cfg:
          engine_max_model_len = policy_generation.cfg["mcore_generation_config"][
-@@ -1422,7 +1424,9 @@
+@@ -3006,7 +3008,9 @@
      # Prepare for the rollout metrics calculation below. Not strictly necessary here, but good to have parity with `run_async_multi_turn_rollout`
      with timer.time(f"{timer_prefix}/prepare_for_metrics_calculation"):
          batch_size = len(nemo_gym_rows)
@@ -103,31 +107,31 @@
              ]
 --- a/examples/run_grpo.py
 +++ b/examples/run_grpo.py
-@@ -79,6 +79,14 @@
-         config = parse_hydra_overrides(config, overrides)
- 
-     config = OmegaConf.to_container(config, resolve=True)
-+    if config["policy"]["generation"]["backend"] == "coreweave" and config["env"].get("should_use_nemo_gym"):
-+        import runpy
+@@ -85,6 +85,14 @@
+             config = parse_hydra_overrides(config, overrides)
+
+         config = OmegaConf.to_container(config, resolve=True)
++        if config["policy"]["generation"]["backend"] == "coreweave" and config["env"].get("should_use_nemo_gym"):
++            import runpy
 +
-+        runpy.run_path(
-+            os.path.join(os.path.dirname(__file__), "nemo_gym", "run_grpo_nemo_gym.py"),
-+            run_name="__main__",
-+        )
-+        return
-     config = MasterConfig(**config)
-     print("Applied CLI overrides")
- 
++            runpy.run_path(
++                os.path.join(os.path.dirname(__file__), "nemo_gym", "run_grpo_nemo_gym.py"),
++                run_name="__main__",
++            )
++            return
+         check_outdated_config(config)
+         config = MasterConfig(**config)
+         print("Applied CLI overrides")
 --- a/examples/nemo_gym/run_grpo_nemo_gym.py
 +++ b/examples/nemo_gym/run_grpo_nemo_gym.py
-@@ -134,6 +134,10 @@
-         config = parse_hydra_overrides(config, overrides)
- 
-     config = OmegaConf.to_container(config, resolve=True)
-+    if config["policy"]["generation"]["backend"] == "coreweave":
-+        from cwtrain.integrations.nemo_rl.gym import prepare_config
+@@ -148,6 +148,10 @@
+             config = parse_hydra_overrides(config, overrides)
+
+         config = OmegaConf.to_container(config, resolve=True)
++        if config["policy"]["generation"]["backend"] == "coreweave":
++            from cwtrain.integrations.nemo_rl.gym import prepare_config
 +
-+        config = prepare_config(config)
-     config = MasterConfig(**config)
-     print("Applied CLI overrides")
- 
++            config = prepare_config(config)
+         check_outdated_config(config)
+         config = MasterConfig(**config)
+         materialize_vllm_video_config(config.policy, config.data)
