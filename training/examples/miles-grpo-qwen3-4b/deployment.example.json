@@ -3,7 +3,7 @@
   "gatewayIds": ["<gateway uuid in one zone>"],
   "runtime": {
     "engine": "dynamo-vllm",
-    "version": "0.30.0+crwv.5",
+    "version": "0.32.0+crwv.5",
     "engineConfig": {
       "gpu-memory-utilization": "0.50",
       "max-model-len": "8192"

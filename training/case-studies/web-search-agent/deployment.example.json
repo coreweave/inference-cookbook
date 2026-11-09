@@ -1,7 +1,7 @@
 {
   "runtime": {
     "engine": "dynamo-vllm",
-    "version": "0.30.0+crwv.5",
+    "version": "0.32.0+crwv.5",
     "engineConfig": {
       "max-model-len": "32768",
       "gpu-memory-utilization": "0.85",

@@ -100,7 +100,7 @@ jobs:
           COREWEAVE_API_TOKEN: ${{ secrets.CWTRAIN_E2E_API_TOKEN }}
           CWTRAIN_E2E_ZONE: ${{ vars.CWTRAIN_E2E_ZONE || 'us-west-04a' }}
           CWTRAIN_E2E_DEPLOYMENT_JSON: ${{ secrets.CWTRAIN_E2E_DEPLOYMENT_JSON }}
-          CWTRAIN_E2E_RUNTIME_VERSION: ${{ vars.CWTRAIN_E2E_RUNTIME_VERSION || '0.32.0+crwv.1' }}
+          CWTRAIN_E2E_RUNTIME_VERSION: ${{ vars.CWTRAIN_E2E_RUNTIME_VERSION || '0.32.0+crwv.5' }}
           CWTRAIN_E2E_HF_MODEL: ${{ vars.CWTRAIN_E2E_HF_MODEL || 'Qwen/Qwen3-0.6B' }}
           CWTRAIN_E2E_HF_REVISION: ${{ vars.CWTRAIN_E2E_HF_REVISION }}
           HF_TOKEN: ${{ secrets.CWTRAIN_E2E_HF_TOKEN }}
