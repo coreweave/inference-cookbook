@@ -96,55 +96,15 @@ cwtrain deployment parameters --gateway <gateway id>
 cwtrain deployment create --file deployment.json --wait
 ```
 
-A request with a `hotLoad` section needs `dynamo-vllm` `0.32.0+crwv.5` or later: `create` uses
-that version when `runtime.version` is unset and refuses an older one. It also turns on the
-ModelExpress refit options in `runtime.engineEnv`, described below. A value in the request
-overrides each one.
-`InferenceClient.create_deployment` does the same.
+`cwtrain deployment create` and `InferenceClient.create_deployment` pass runtime versions and
+engine configuration through unchanged. The Dedicated Inference API validates them and supplies
+server defaults. To configure the hot-load engine options, see the
+[RL Rollouts user guide](https://docs.coreweave.com/products/inference/rl-rollouts#configure-hot-load-engine-options).
 
 `create` prints the deployment as JSON, with its `id` and its `rollout_base_url` for rollouts.
 With `--wait`, it returns when the deployment is READY. This takes minutes, and longer for large
 models. If the deployment fails, or is not READY within `--timeout` (an hour by default), `create`
 still prints it and exits with status 1.
-
-### Hot-load engine options
-
-For a deployment with a `hotLoad` section, `cwtrain deployment create` and
-`InferenceClient.create_deployment` set all six options below to the string `"true"` unless the
-request explicitly sets a value. These are inference worker settings: put them in the deployment
-request's `runtime.engineEnv`, rather than exporting them in the trainer's shell. They require
-`dynamo-vllm` `0.32.0+crwv.5` or later when creating a deployment through cwtrain.
-
-| Option | Behavior when `"true"` |
-| --- | --- |
-| `MX_REFIT_DELTA_SURGICAL` | Reload only the destination modules touched by a delta chain. Fall back to a full reload when the live version or lineage is unknown, or a module is incomplete. |
-| `MX_REFIT_FULL_STREAMING` | Stream a full checkpoint into vLLM while writing a local copy in the background. |
-| `MX_REFIT_INPLACE` | Stage a prepared delta's nonzero XOR bytes and apply them directly to live vLLM weights, avoiding a checkpoint reload. |
-| `MX_REFIT_PREFER_PREPARED` | Prefer a locally prepared checkpoint from object storage over fetching weights from a generator peer. |
-| `MX_REFIT_PREFETCH` | Prepare upcoming checkpoint versions in the background before they are requested for installation. |
-| `MX_REFIT_PREFETCH_S3_WATCH` | Also prepare deltas discovered under the snapshot prefix in object storage before their versions are registered. Requires `MX_REFIT_PREFETCH`. |
-
-To disable an option, set it to the string `"false"` in the request. For example, merge this
-`runtime` block into your deployment request to disable background preparation and its S3 watcher
-while keeping the other four defaults:
-
-```json
-{
-  "runtime": {
-    "engine": "dynamo-vllm",
-    "version": "0.32.0+crwv.5",
-    "engineEnv": {
-      "MX_REFIT_PREFETCH": "false",
-      "MX_REFIT_PREFETCH_S3_WATCH": "false"
-    }
-  }
-}
-```
-
-Omitting a key lets cwtrain supply `"true"`; it does not disable the option. The same six
-defaults are also implemented in the Dedicated Inference service for hot-load deployments.
-An explicit value takes precedence there too. Requests without a `hotLoad` section pass through
-cwtrain unchanged.
 
 ### Publish weights
 

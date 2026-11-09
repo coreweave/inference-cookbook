@@ -5,12 +5,6 @@ GitHub. Versions follow [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
-- **Hot-load deployments:** `cwtrain deployment create` and `InferenceClient.create_deployment`
-  require `dynamo-vllm` `0.32.0+crwv.5` or later for a deployment with a `hotLoad` section, and use
-  it when `runtime.version` is unset. They turn on the six ModelExpress refit options
-  (`MX_REFIT_*`) in `runtime.engineEnv` unless the request sets them. An older version is refused
-  before any request is sent.
-
 - **NeMo-RL v0.8.0:** the recipe pins the release container with Gym v0.7.0 and Ray 2.58.0,
   ports its backend and Gym patches, and uses the renamed AutoModel config and worker.
   Checkpoint export preserves stored tensor dtypes and phase timing supports the new Timer API.

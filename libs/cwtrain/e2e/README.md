@@ -56,9 +56,10 @@ sections of `training/examples/miles-grpo-qwen3-4b/deployment.example.json`. Use
 instance type that is available in the zone. The runner sets `runtime.version` from
 `CWTRAIN_E2E_RUNTIME_VERSION`. The ModelExpress (MX) client that performs hot-loads is built into
 the engine, so the `+crwv.N` suffix of the runtime version also selects the MX client version;
-there is no separate client version to set. `InferenceClient.create_deployment` refuses a version
-before `0.32.0+crwv.5` and turns on the ModelExpress refit options in `runtime.engineEnv`
-(`MX_REFIT_*`, set to `"true"`); a value in the deployment configuration overrides each one. At least one replica is required. Where supported, set `min` and `max` to 1
+there is no separate client version to set. `InferenceClient.create_deployment` passes the runtime
+version and engine configuration through unchanged; the service validates them and supplies
+defaults. Set `runtime.engineEnv` in the deployment configuration to override the service's
+hot-load engine options. At least one replica is required. Where supported, set `min` and `max` to 1
 for a smaller smoke test. The runner supplies `id`, `name`, `gatewayIds`, `model` and `hotLoad`,
 with fresh resource IDs and the run's paths in the bucket. It keeps the other settings. It creates
 no capacity claim, so GPU capacity and a compatible runtime must be available.
