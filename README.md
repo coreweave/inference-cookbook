@@ -92,7 +92,9 @@ does.
   bucket and path prefix for snapshots ([example request](training/examples/miles-grpo-qwen3-4b/deployment.example.json)).
   The recipes use `cwtrain deployment create` to create it from such a request; it requires
   `dynamo-vllm` `0.32.0+crwv.5` or later and turns on the ModelExpress refit options
-  (`MX_REFIT_*`) unless the request sets them. You can also use
+  (`MX_REFIT_*`) unless the request sets them. See the
+  [hot-load engine options](libs/cwtrain/README.md#hot-load-engine-options) for each option's
+  behavior and how to disable it. You can also use
   the API, or the **Hot loading** section of the Cloud Console's create drawer. You can enable
   hot-load only when you create a deployment; you cannot add it later. All of the deployment's
   gateways must be in one zone.
@@ -105,7 +107,7 @@ does.
 Install the library and its CLI from [PyPI](https://pypi.org/project/cwtrain/):
 
 ```bash
-pip install cwtrain
+python -m pip install --upgrade cwtrain
 ```
 
 Point it at your account and bucket:
@@ -186,6 +188,10 @@ cwtrain deployment delete <deployment-uuid> --wait
 - With W&B turned on, the recipes log each hot-load's upload and install times, the rollout
   requests' latency, and when each phase of a step ran, next to the trainer's own metrics. Each
   recipe's README says how, under "Watching in W&B".
+  The [post-training dashboard commands](libs/cwtrain/docs/dashboards.md) create
+  framework-specific W&B views and export an interactive phase timeline from an existing run.
+  These commands are planned for the next release and are not in `cwtrain 1.0.2`; once
+  released, they are included with `python -m pip install --upgrade cwtrain`.
 
 ## How it works
 

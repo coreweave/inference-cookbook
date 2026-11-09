@@ -75,7 +75,7 @@ def test_browsecomp_is_the_default_with_glm_judge_and_nemotron_target():
     assert env["CWTRAIN_MAX_CONTEXT_TOKENS"] == "32768"
     assert env["CWTRAIN_CONTEXT_RESET_TOKENS"] == "16384"
     assert env["CWTRAIN_MAX_STEPS"] == "50"  # bounds each task, not Gym's 400
-    assert env["CWTRAIN_JUDGE_MODEL"] == "zai-org/GLM-5.2"
+    assert env["CWTRAIN_JUDGE_MODEL"] == "zai-org/GLM-5.3"
     assert env["CWTRAIN_JUDGE_BASE_URL"] == "https://api.inference.wandb.ai/v1"
     assert env["CWTRAIN_JUDGE_API_KEY"] == "judge-key"
     assert env["CWTRAIN_SEARCH_API_KEY"] == "you-key"
@@ -129,12 +129,40 @@ def test_prepare_downloads_the_benchmark_data():
     assert cmd[1:] == ["eval", "prepare", "--config", "benchmarks/browsecomp/config.yaml"]
 
 
+def test_prepared_eval_keeps_tasks_but_uses_the_training_tools(tmp_path, monkeypatch):
+    import copy
+
+    # The eval kit carries this module next to launch.py.
+    recipe = Path(launch.RECIPE)
+    monkeypatch.setattr(launch, "RECIPE", recipe.parent)
+    rows = [
+        {"question": "q1", "ground_truth": "a1", "extra": 7,
+         "responses_create_params": {"input": [{"role": "system", "content": "Use bash"}],
+                                     "tools": [{"name": "bash_command"}]}},
+        {"question": "q2", "ground_truth": "a2", "responses_create_params": {}},
+    ]
+    original = copy.deepcopy(rows)
+    path = tmp_path / "tasks.jsonl"
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    launch.inline_browsecomp(path)
+    actual = [json.loads(line) for line in path.read_text().splitlines()]
+    for before, after in zip(original, actual, strict=True):
+        params = after.pop("responses_create_params")
+        before.pop("responses_create_params")
+        assert after == before
+        assert [tool["name"] for tool in params["tools"]] == ["search", "browse"]
+        assert "workspace" not in params["input"][0]["content"]
+        assert params["input"][1]["content"].startswith(after["question"])
+
+
 def test_recipe_configs_override_the_gym_benchmark():
     OmegaConf = pytest.importorskip("omegaconf").OmegaConf
 
     config = OmegaConf.load(Path(launch.RECIPE) / "browsecomp.yaml")
     harness = config.browsecomp_benchmark_resources_server.resources_servers
     assert harness.browsecomp_advanced_harness.entrypoint == "you_search.py"
+    assert harness.browsecomp_advanced_harness.workspace == "none"
+    assert harness.browsecomp_advanced_harness.max_results == 5
     policy = OmegaConf.load(Path(launch.RECIPE) / "coreweave.yaml").policy_model
     assert policy.responses_api_models.vllm_model.entrypoint == "cwtrain_tool_app.py"
     agent = config.browsecomp_benchmark_agent.responses_api_agents.browsecomp_agent
@@ -165,7 +193,7 @@ K8S = Path(launch.RECIPE).parent / "k8s"
 
 def test_the_kit_carries_every_file_the_launcher_reads():
     kit = (K8S / "make-eval-kit.sh").read_text()
-    for name in ("launch.py", "you_search.py", "coreweave.yaml", "browsecomp.yaml",
+    for name in ("launch.py", "prepare_search_data.py", "you_search.py", "coreweave.yaml", "browsecomp.yaml",
                  "exclude_domains.json", "run-eval.sh"):  # fmt: skip
         assert f"--from-file={name}=" in kit, name
     assert (Path(launch.RECIPE) / "browsecomp.yaml").is_file()
@@ -186,7 +214,7 @@ def test_the_eval_job_runs_on_cpu_and_reuses_the_trainer_secrets():
     for secret in ("INFERENCE_KEY_SECRET", "GYM_SECRET"):
         assert "${" + secret + "}" in job
     example = (K8S / "eval.env.example").read_text()
-    assert "BENCHMARK=browsecomp" in example and "JUDGE_MODEL=zai-org/GLM-5.2" in example
+    assert "BENCHMARK=browsecomp" in example and "JUDGE_MODEL=zai-org/GLM-5.3" in example
     assert "ROLLOUT_MODEL=nemotron-lightning-hotload" in example
 
 
@@ -274,8 +302,8 @@ def test_the_report_prints_the_scores_and_leaves_wandb_alone(monkeypatch, capsys
     assert summary["mean_reward"] == 0.5
     out = capsys.readouterr().out.splitlines()
     assert out == [
-        "reward=1.0 tool_calls=1",
-        "reward=0.0 tool_calls=3",
+        "task=7 reward=1.0 tool_calls=1",
+        "task=9 reward=0.0 tool_calls=3",
         "tasks=2 mean_reward=0.500",
     ]
 

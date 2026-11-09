@@ -8,7 +8,7 @@ shared settings.
 It creates no inference resources: Gym runs on CPU and sends every request to the existing
 hot-load deployment that ``CWTRAIN_ROLLOUT_BASE_URL`` names. ``--benchmark`` picks the evaluation
 (BrowseComp by default), ``--model`` the deployment's served model (Nemotron 3.5 Lightning, as
-``nemotron-lightning-hotload``), and ``--judge-model`` / ``--judge-base-url`` the LLM judge (GLM-5.2
+``nemotron-lightning-hotload``), and ``--judge-model`` / ``--judge-base-url`` the LLM judge (GLM-5.3
 on W&B Inference by default). BrowseComp's search and browse tools use You.com.
 
 ``report`` prints each task's reward and tool calls and the mean reward. With ``WANDB_PROJECT``
@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -53,7 +54,7 @@ DEFAULT_MAX_CONTEXT_TOKENS = 32768
 DEFAULT_MAX_STEPS = 50
 # Generated tokens per BrowseComp turn (browsecomp.yaml's max_tokens).
 TURN_TOKENS = 4096
-DEFAULT_JUDGE_MODEL = "zai-org/GLM-5.2"
+DEFAULT_JUDGE_MODEL = "zai-org/GLM-5.3"
 DEFAULT_JUDGE_BASE_URL = "https://api.inference.wandb.ai/v1"
 # Characters of each task's final answer that the W&B table keeps.
 ANSWER_CHARS = 500
@@ -263,7 +264,8 @@ def report(
     out = out or sys.stdout
     tasks, summary = scores(rows, args.max_steps)
     for task in tasks:
-        print(f"reward={task['reward']} tool_calls={task['tool_calls']}", file=out)
+        # The task's index in the benchmark's input, so that runs compare task by task.
+        print(f"task={task['task']} reward={task['reward']} tool_calls={task['tool_calls']}", file=out)
     print(f"tasks={summary['tasks']} mean_reward={summary['mean_reward']:.3f}", file=out)
     settings = wandb_settings(environ)
     if settings is None:
@@ -334,6 +336,28 @@ def command(args: argparse.Namespace, environ: Mapping[str, str]) -> list[str]:
         "--concurrency",
         str(config.concurrency),
     ]
+
+
+def inline_browsecomp(path: Path) -> None:
+    """Keep Gym's selected tasks, using the training prompt and search/browse tools.
+
+    Gym v0.7.0 prepares shell-workspace instructions and a bash tool. The recipe uses inline
+    results instead, so reuse its training templates without changing task order or answers.
+    """
+    import importlib.util
+
+    source = RECIPE / "prepare_search_data.py"  # bundled eval kit
+    if not source.is_file():
+        source = RECIPE.parent / "prepare_search_data.py"  # repository checkout
+    spec = importlib.util.spec_from_file_location("search_data", source)
+    prepare = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(prepare)
+    rows = [json.loads(line) for line in path.read_text().splitlines() if line]
+    for row in rows:
+        row["responses_create_params"] = prepare.example(row["question"], row["ground_truth"])[
+            "responses_create_params"
+        ]
+    prepare.write(rows, path)
 
 
 def main() -> None:
@@ -409,6 +433,11 @@ def main() -> None:
         if benchmark.search:
             _you_search().install(gym_dir)
     cmd = command(args, env)
+    if args.action == "prepare":
+        subprocess.run(cmd, cwd=gym_dir, env=env, check=True)
+        if args.benchmark == "browsecomp":
+            inline_browsecomp(gym_dir / benchmark.input)
+        return
     os.chdir(gym_dir)
     os.execve(cmd[0], cmd, env)
 

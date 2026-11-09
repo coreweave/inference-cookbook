@@ -30,7 +30,7 @@ steps and the cleanup:
 - [`nemo-rl-grpo-nemotron-3.5-lightning-30b-a3b`](../../examples/nemo-rl-grpo-nemotron-3.5-lightning-30b-a3b/README.md):
   GRPO on Nemotron 3.5 Lightning with the DAPO-Math-17k prompts.
 - [`web-search-agent`](../../case-studies/web-search-agent/README.md) (case study): Nemotron 3.5
-  Lightning trained as a Gym search agent on SimpleQA, with You.com search and an LLM judge, and
+  Lightning trained as a Gym search agent on ASearcher questions, with You.com search and an LLM judge, and
   evaluated on BrowseComp.
 
 An example's `run.env` holds the settings that this README names. This recipe's `k8s/` directory
@@ -45,39 +45,40 @@ kit ConfigMap.
 | --- | --- |
 | `policy.generation.backend` | `coreweave`: `cwtrain.integrations.nemo_rl.CoreWeaveGeneration`, a `GenerationInterface`. It turns NeMo-RL's token-id batches into `/v1/completions` requests (prompts as token ids, `n` per distinct prompt). It returns `output_ids`, `logprobs`, lengths and `truncated` in the same shape as the vLLM backend. It needs no GPUs and no Ray workers. |
 | `policy_generation.weight_synchronizer` | `HotLoadWeightSynchronizer`. On every refit it exports the weights in HF layout and publishes a full snapshot (first refit and every `full_every`) or a zstd XOR delta against the previous export. Then it hot-loads the snapshot and waits until every replica is READY on the new identity. Per-version checksum manifests go next to the snapshots. |
-| `policy.worker_extension_cls_fqn` | `CoreWeaveDTensorPolicyWorker` (and a Megatron counterpart): the stock policy worker plus an `export_hf_checkpoint` RPC. It reuses the HF-layout weight generator of NeMo-RL's NCCL refit, so TP/PP shards are gathered the same way. The refit casts every tensor to the policy dtype. The DTensor worker instead keeps each tensor in the dtype that the deployment's checkpoint stores. The Megatron worker writes the dtypes that Megatron-Bridge exports. Rank 0 writes the safetensors shards, the index and the checkpoint's non-weight files. |
+| `policy.worker_extension_cls_fqn` | `CoreWeaveDTensorPolicyWorker` (and a Megatron counterpart): the stock AutoModel policy worker plus an `export_hf_checkpoint` RPC. It reuses the HF-layout weight generator of NeMo-RL's NCCL refit, so TP/PP shards are gathered the same way. The export keeps each tensor in the dtype that the deployment's checkpoint stores. The Megatron worker writes the dtypes that Megatron-Bridge exports. Rank 0 writes the safetensors shards, the index and the checkpoint's non-weight files. |
 
 NeMo-RL's registries are hardcoded. So
 [`patches/0001-coreweave-generation-backend.patch`](patches/0001-coreweave-generation-backend.patch)
-adds these changes to the `v0.7.0` release (the newest release with an arm64 container):
+adds these changes to the `v0.8.0` release:
 
 - A `coreweave` branch in `grpo.setup()`. It builds only the policy's Ray cluster (no inference
   cluster, no NCCL collective). It creates the policy with the cwtrain worker extension for the
   configured training backend, or with the `worker_extension_cls_fqn` you set. It registers that
   class's Ray Python environment (reusing the stock worker's prebuilt venv) and attaches the
   synchronizer.
-- A short-circuit at the top of `refit_policy_generation`. When the generation object has a
-  `weight_synchronizer`, it calls `sync_weights()` and returns. Newer NeMo-RL releases have this
-  seam.
+- Hot-load and phase-timing metrics in the synchronous loop. NeMo-RL v0.8.0 already delegates
+  refits to an attached `weight_synchronizer`, after synchronizing policy parameters, so the patch
+  uses that upstream seam unchanged.
 
 Nothing else in NeMo-RL changes. The loop, data, loss and checkpointing are stock.
 
 ### About the patch
 
-The patch (about 120 changed lines) is necessary until NeMo-RL can load a generation backend and a
-weight synchronizer from configuration. All of the work happens in the `cwtrain` library, which
+The patch is necessary until NeMo-RL can load a generation backend and a weight synchronizer
+from configuration. All of the work happens in the `cwtrain` library, which
 has no patches. The launcher ([`launch.py`](launch.py)) checks the patch against the checkout in
 the container before it applies it. If a patch fails, the launcher reverts what it applied and
 stops the job with a message that names the tested version. So a different NeMo-RL never starts
 half-patched.
 
-### Tested versions
+### Pinned versions
 
 | Component | Version |
 | --- | --- |
-| NeMo-RL | [`v0.7.0`](https://github.com/NVIDIA-NeMo/RL/releases/tag/v0.7.0); the patch applies to the tag and to the checkout inside the container |
-| Trainer image | `nvcr.io/nvidia/nemo-rl:v0.7.0` (arm64 and amd64) |
-| Bundled training Gym | `0.4.0` |
+| NeMo-RL | [`v0.8.0`](https://github.com/NVIDIA-NeMo/RL/releases/tag/v0.8.0); the patches are validated against the release tag |
+| Trainer image | `nvcr.io/nvidia/nemo-rl:v0.8.0` (arm64 and amd64) |
+| Bundled training Gym | `0.7.0` (`1f8afc7`), including BrowseComp contamination filtering |
+| Ray / PyTorch | `2.58.0` / `2.13.0` |
 | Inference engine | `dynamo-vllm` `0.30.0+crwv.5` |
 
 ## Configure
@@ -113,7 +114,7 @@ The backend configuration is:
 ```yaml
 policy:
   worker_extension_cls_fqn: cwtrain.integrations.nemo_rl.worker.CoreWeaveDTensorPolicyWorker  # optional; the patch defaults to it
-  dtensor_cfg:
+  automodel_cfg:
     env_vars: {PYTHONPATH: /work/py}   # the worker venv sees the extension without cwtrain's deps
   generation:
     backend: coreweave
@@ -311,10 +312,6 @@ already set in the trainer's environment.
   a shared filesystem, or pin the driver to rank 0's node.
 - **Do not `uv run` after you install extra packages.** `uv run` syncs the environment back to the
   lockfile. Call the venv's interpreter directly, as the launch script does.
-- **A traceback at exit is not a failed run.** NeMo-RL v0.7.0 shuts down Ray before the policy
-  object's destructor runs. So the last lines of a successful run can be `Exception ignored in
-  Policy.__del__ ... PythonFinalizationError`. The process still exits 0. Judge the run by the last
-  `[cwtrain] hot-load` line and the Job status.
 
 ## Failure handling
 
@@ -373,7 +370,7 @@ the optimizer state exists, after the first step. The config sets
 no memory unusable.
 
 The [web-search-agent case study](../../case-studies/web-search-agent/README.md#training-environment)
-trains Gym's BrowseComp agent this way, on SimpleQA, with You.com search and an LLM judge.
+trains Gym's BrowseComp agent this way, on ASearcher questions, with You.com search and an LLM judge.
 
 ### Exact tokens across turns
 
@@ -401,14 +398,28 @@ Limits of the adapter:
 
 ### Validation
 
-An end-to-end run with Nemotron 3.5 Lightning BF16 completed two GRPO steps of 32 Gym DAPO
-trajectories each. It used eight trainer H100s and a two-H100 inference replica. The first full
+On NeMo-RL v0.7.0, an end-to-end run with Nemotron 3.5 Lightning BF16 completed two GRPO steps
+of 32 Gym DAPO trajectories each. It used eight trainer H100s and a two-H100 inference replica. The first full
 checkpoint and the trained delta between steps both hot-loaded. The serving replica's identity was
 verified before sampling. The Job exited successfully, and generation still worked after the
 trained delta was applied. This is a smoke test of training and weight propagation, not a
 model-quality benchmark. The
 [web-search-agent case study](../../case-studies/web-search-agent/README.md) also completed GRPO
 steps of 32 trajectories, on one eight-H100 node against four two-H100 inference replicas.
+
+The v0.8.0 upgrade is validated locally against pristine release source: both patches apply and
+reverse cleanly; CPU checks exercise policy-only allocation, the AutoModel worker registry,
+upstream refit delegation, secret filtering, config migration, and weight dtypes with PyTorch
+2.13.0. Gym v0.7.0 services also collected a training rollout against mock endpoints, preserving
+exact token IDs and log-probs. These checks do not replace a GPU GRPO run on the new container;
+the live results above have not been rerun on v0.8.0.
+
+To repeat the release-source checks with CPU PyTorch and the cwtrain test dependencies installed:
+
+```bash
+git clone --depth 1 --branch v0.8.0 https://github.com/NVIDIA-NeMo/RL.git /tmp/nemo-rl-v080
+NEMO_RL_SOURCE_DIR=/tmp/nemo-rl-v080 pytest training/recipes/nemo-rl/tests/test_nemo_rl_v080.py
+```
 
 For a short validation run, add `++data.train.max_samples=32` and `grpo.max_num_steps=2` to
 `EXTRA_OVERRIDES`. The sample limit is optional. Without it, the launcher converts the complete

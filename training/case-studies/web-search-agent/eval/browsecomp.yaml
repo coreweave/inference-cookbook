@@ -3,7 +3,7 @@
 # SPDX-PackageName: inference-cookbook
 
 # BrowseComp on the NeMo-RL recipe's hot-load deployment. Loaded with
-# benchmarks/browsecomp/config.yaml from Gym v0.6.0, whose settings this file overrides. launch.py
+# benchmarks/browsecomp/config.yaml from Gym v0.7.0, whose settings this file overrides. launch.py
 # sets the CWTRAIN_* variables.
 policy_model:
   responses_api_models:
@@ -12,7 +12,7 @@ policy_model:
         # Per turn. The agent's whole trajectory is limited by max_context_tokens below.
         max_tokens: 4096
 
-# The LLM judge that grades the final answers: GLM-5.2 on W&B Inference by default
+# The LLM judge that grades the final answers: GLM-5.3 on W&B Inference by default
 # (--judge-model, --judge-base-url).
 judge_model:
   responses_api_models:
@@ -32,6 +32,9 @@ browsecomp_benchmark_resources_server:
       # tools from You.com. It reads the You.com key from the harness's Tavily key setting.
       entrypoint: you_search.py
       search_provider: tavily
+      # Keep the inline search/browse tools; the upstream benchmark enables a shell workspace.
+      workspace: none
+      max_results: 5
       tavily_api_key: ${oc.env:CWTRAIN_SEARCH_API_KEY}
       exa_api_key: null
       exclude_domains_file_path: ${oc.env:CWTRAIN_EXCLUDE_DOMAINS_FILE}

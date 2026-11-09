@@ -105,16 +105,16 @@ def test_the_patch_logs_the_hot_load_and_the_timeline_with_each_training_step() 
     # taken before validation, whose refit would replace the step's hot-load, and merged after it
     pop = text.index("synchronizer.pop_metrics(timer=timer")
     merge = text.index("metrics.update({k: v for k, v in _cw.items() if k not in timeline})")
-    assert pop < text.index("# Run validation if it's a validation step") < merge
+    assert pop < text.index("early_stop_message: Optional[str] = None") < merge
     # hot-load metrics join the step's train/ metrics; the timeline keeps its own, unprefixed keys
     assert "logger.log_metrics(timeline, total_steps + 1)" in added
     # a validation after the last step has no next step: its hot-load goes at the one after it
-    final = text.index("if is_last_step or should_save_by_timeout:")
+    final = text.index("if is_last_step or should_save_by_timeout or early_stop_message is not None:")
     assert text.index('prefix="timing/train",') < final
     assert "synchronizer.pop_metrics(step=total_steps + 2)" in added
     assert 'logger.log_metrics(hotload, total_steps + 2, prefix="train")' in added
     # only the coreweave backend swaps the training loop's timer
-    assert '== "coreweave":' in added and "timer = SpanTimer()" in added
+    assert '== "coreweave":' in added and 'timer = SpanTimer(context={"worker": "driver"})' in added
 
 
 def test_install_into_workers_covers_every_prebuilt_venv(tmp_path: Path, monkeypatch) -> None:
@@ -146,7 +146,7 @@ def test_main_patches_installs_stages_then_hands_over(
         monkeypatch.setenv("CWTRAIN_HOTLOAD_PROMPT_CACHE_POLICY", given)
     kit = make_kit(tmp_path)
     calls: list[tuple] = []
-    monkeypatch.setattr(launch, "git_describe", lambda repo: "v0.7.0")
+    monkeypatch.setattr(launch, "git_describe", lambda repo: "v0.8.0")
     monkeypatch.setattr(launch, "apply_patches", lambda repo, patches, tested: calls.append(("patch", [p.name for p in patches], tested)))
     monkeypatch.setattr(launch, "install_into_workers", lambda job, whl: calls.append(("install", whl.name)))
 
@@ -163,7 +163,7 @@ def test_main_patches_installs_stages_then_hands_over(
            "BASE_S3_URI": "s3://b/models/Qwen3-4B", "NEMO_RL_PYTHON": "/venv/bin/python"}  # fmt: skip
     launch.main(env)
     assert [c[0] for c in calls] == ["patch", "install", "stage", "chdir"]
-    assert calls[0][1] == ["0001-backend.patch"] and "v0.7.0" in calls[0][2]
+    assert calls[0][1] == ["0001-backend.patch"] and "v0.8.0" in calls[0][2]
     assert execs[0][:2] == ["/venv/bin/python", "examples/run_grpo.py"]
     # GRPO here is synchronous, so the trainer asks for a clean prompt cache unless told otherwise
     assert launch.os.environ["CWTRAIN_HOTLOAD_PROMPT_CACHE_POLICY"] == expected
@@ -197,7 +197,7 @@ def test_main_prepares_data_then_trains_with_the_example_config(tmp_path: Path, 
     model = tmp_path / "w" / "models" / "m"
     model.mkdir(parents=True)
     (model / "config.json").write_text("{}")
-    monkeypatch.setattr(launch, "git_describe", lambda repo: "v0.7.0")
+    monkeypatch.setattr(launch, "git_describe", lambda repo: "v0.8.0")
     monkeypatch.setattr(launch, "apply_patches", lambda *a, **kw: None)
     monkeypatch.setattr(launch, "install_into_workers", lambda *a, **kw: None)
     runs: list[list[str]] = []
@@ -209,9 +209,9 @@ def test_main_prepares_data_then_trains_with_the_example_config(tmp_path: Path, 
         {"MODEL_SLUG": "m", "WORK": str(tmp_path / "w"), "CWTRAIN_KIT_DIR": str(kit),
          "NEMO_RL_PYTHON": "/venv/bin/python", "GRPO_CONFIG": "grpo_search.yaml",
          # render.sh flattens the Job's block scalar to one line; shell quoting groups words
-         "PREPARE_DATA": "/kit/prepare.py --dataset simpleqa --note 'two words'"}
+         "PREPARE_DATA": "/kit/prepare.py --dataset browsecomp --note 'two words'"}
     )  # fmt: skip
-    assert runs == [["/venv/bin/python", "/kit/prepare.py", "--dataset", "simpleqa", "--note", "two words"]]
+    assert runs == [["/venv/bin/python", "/kit/prepare.py", "--dataset", "browsecomp", "--note", "two words"]]
     assert execs[0][2:4] == ["--config", str(kit / "grpo_search.yaml")]
 
 
@@ -259,7 +259,7 @@ def test_make_kit_bundles_extra_files_under_their_names(tmp_path: Path) -> None:
 
 def test_main_refuses_to_train_without_a_model(tmp_path: Path, monkeypatch) -> None:
     kit = make_kit(tmp_path)
-    monkeypatch.setattr(launch, "git_describe", lambda repo: "v0.7.0")
+    monkeypatch.setattr(launch, "git_describe", lambda repo: "v0.8.0")
     monkeypatch.setattr(launch, "apply_patches", lambda *a, **kw: None)
     monkeypatch.setattr(launch, "install_into_workers", lambda *a, **kw: None)
     with pytest.raises(LaunchError, match=r"no model at .*set BASE_S3_URI.*stage-nemotron-job\.yaml"):
@@ -280,7 +280,7 @@ def test_no_worker_venvs_is_a_configuration_error(tmp_path: Path, monkeypatch) -
 def test_a_kit_without_patches_stops_before_anything_else(tmp_path: Path, monkeypatch) -> None:
     kit = make_kit(tmp_path)
     (kit / "0001-backend.patch").unlink()
-    monkeypatch.setattr(launch, "git_describe", lambda repo: "v0.7.0")
+    monkeypatch.setattr(launch, "git_describe", lambda repo: "v0.8.0")
     installs: list[str] = []
     monkeypatch.setattr(launch, "install_into_workers", lambda *a, **kw: installs.append("x"))
     with pytest.raises(LaunchError, match="no \\*.patch files"):

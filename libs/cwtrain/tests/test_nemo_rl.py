@@ -87,10 +87,18 @@ def fake_nemo_rl():
     modules["nemo_rl.weight_sync.interfaces"].WeightSynchronizer = WeightSynchronizer
     saved = {k: sys.modules.get(k) for k in modules}
     sys.modules.update(modules)
+    saved_integration = {
+        name: module
+        for name, module in sys.modules.items()
+        if name.startswith("cwtrain.integrations.nemo_rl")
+    }
+    for name in saved_integration:
+        del sys.modules[name]
+    yield modules
     for name in list(sys.modules):
         if name.startswith("cwtrain.integrations.nemo_rl"):
             del sys.modules[name]
-    yield modules
+    sys.modules.update(saved_integration)
     for k, v in saved.items():
         if v is None:
             sys.modules.pop(k, None)
@@ -620,8 +628,8 @@ def test_worker_export_refuses_casts_a_quantized_checkpoint_needs_scales_for(
     assert not (tmp_path / "export").exists()
 
 
-def nemo_rl_v070_generator(model, target_dtype):
-    """NeMo-RL v0.7.0's dtensor_params_generator for a plain module: no DTensor, LoRA, adapter."""
+def nemo_rl_v080_generator(model, target_dtype):
+    """NeMo-RL v0.8.0's automodel_params_generator for a plain module: no DTensor, LoRA, adapter."""
     for name, tensor in model.state_dict().items():
         yield name, tensor.to(target_dtype, non_blocking=True).contiguous()
 
@@ -629,11 +637,13 @@ def nemo_rl_v070_generator(model, target_dtype):
 def test_dtensor_export_skips_nemo_rls_cast_to_one_dtype(monkeypatch) -> None:
     import cwtrain.integrations.nemo_rl.worker as worker
 
-    monkeypatch.setattr(worker, "dtensor_params_generator", nemo_rl_v070_generator)
+    monkeypatch.setattr(worker, "automodel_params_generator", nemo_rl_v080_generator)
     model = torch.nn.Linear(2, 2)  # FP32, like master weights
-    kept = dict(worker._dtensor_hf_params(model, torch.bfloat16, {"weight": "F32", "bias": "F32"}))
+    kept = dict(
+        worker._automodel_hf_params(model, torch.bfloat16, {"weight": "F32", "bias": "F32"})
+    )
     assert {t.dtype for t in kept.values()} == {torch.float32}  # uncast: _export applies dtypes
-    cast = dict(worker._dtensor_hf_params(model, torch.bfloat16, None))
+    cast = dict(worker._automodel_hf_params(model, torch.bfloat16, None))
     assert {t.dtype for t in cast.values()} == {torch.bfloat16}  # no dtypes: the refit's own cast
 
 
@@ -644,9 +654,9 @@ def test_dtensor_export_stops_if_nemo_rl_casts_despite_none(monkeypatch) -> None
         for name, tensor in model.state_dict().items():
             yield name, tensor.to(target_dtype or torch.bfloat16)
 
-    monkeypatch.setattr(worker, "dtensor_params_generator", changed)
+    monkeypatch.setattr(worker, "automodel_params_generator", changed)
     with pytest.raises(RuntimeError, match="no longer keeps each tensor's dtype"):
-        worker._dtensor_hf_params(torch.nn.Linear(2, 2), torch.bfloat16, {"weight": "F32"})
+        worker._automodel_hf_params(torch.nn.Linear(2, 2), torch.bfloat16, {"weight": "F32"})
 
 
 def recasting_generator(source: torch.dtype, via: torch.dtype, back: bool):
@@ -676,9 +686,11 @@ def test_dtensor_export_stops_if_nemo_rl_casts_some_dtypes_despite_none(
 ) -> None:
     import cwtrain.integrations.nemo_rl.worker as worker
 
-    monkeypatch.setattr(worker, "dtensor_params_generator", recasting_generator(source, via, back))
+    monkeypatch.setattr(
+        worker, "automodel_params_generator", recasting_generator(source, via, back)
+    )
     with pytest.raises(RuntimeError, match=found):
-        worker._dtensor_hf_params(torch.nn.Linear(2, 2), torch.bfloat16, {"weight": "F32"})
+        worker._automodel_hf_params(torch.nn.Linear(2, 2), torch.bfloat16, {"weight": "F32"})
 
 
 def test_dtensor_export_stops_if_nemo_rl_rounds_the_tensors_in_place(monkeypatch) -> None:
@@ -690,9 +702,9 @@ def test_dtensor_export_stops_if_nemo_rl_rounds_the_tensors_in_place(monkeypatch
                 tensor.copy_(tensor.to(torch.bfloat16))
             yield name, tensor.to(target_dtype, non_blocking=True).contiguous()
 
-    monkeypatch.setattr(worker, "dtensor_params_generator", in_place)
+    monkeypatch.setattr(worker, "automodel_params_generator", in_place)
     with pytest.raises(RuntimeError, match="F32 changed value"):
-        worker._dtensor_hf_params(torch.nn.Linear(2, 2), torch.bfloat16, {"weight": "F32"})
+        worker._automodel_hf_params(torch.nn.Linear(2, 2), torch.bfloat16, {"weight": "F32"})
 
 
 def test_dtensor_export_stops_if_nemo_rl_yields_other_tensors_for_a_plain_module(
@@ -703,9 +715,9 @@ def test_dtensor_export_stops_if_nemo_rl_yields_other_tensors_for_a_plain_module
     def sharded_only(model, target_dtype):  # a NeMo-RL that yields only DTensor shards, say
         return iter(())
 
-    monkeypatch.setattr(worker, "dtensor_params_generator", sharded_only)
+    monkeypatch.setattr(worker, "automodel_params_generator", sharded_only)
     with pytest.raises(RuntimeError, match="cannot check that it keeps each tensor's dtype"):
-        worker._dtensor_hf_params(torch.nn.Linear(2, 2), torch.bfloat16, {"weight": "F32"})
+        worker._automodel_hf_params(torch.nn.Linear(2, 2), torch.bfloat16, {"weight": "F32"})
 
 
 def test_dtensor_export_checks_the_generator_once_per_process(monkeypatch) -> None:
@@ -716,12 +728,12 @@ def test_dtensor_export_checks_the_generator_once_per_process(monkeypatch) -> No
     def counting(model, target_dtype):
         if not isinstance(model, torch.nn.Linear):
             probes.append(model)
-        yield from nemo_rl_v070_generator(model, target_dtype)
+        yield from nemo_rl_v080_generator(model, target_dtype)
 
-    monkeypatch.setattr(worker, "dtensor_params_generator", counting)
+    monkeypatch.setattr(worker, "automodel_params_generator", counting)
     model = torch.nn.Linear(2, 2)
     for _refit in range(3):
-        assert len(dict(worker._dtensor_hf_params(model, torch.bfloat16, {"weight": "F32"}))) == 2
+        assert len(dict(worker._automodel_hf_params(model, torch.bfloat16, {"weight": "F32"}))) == 2
     assert len(probes) == 1
 
 
@@ -1326,13 +1338,13 @@ def test_rollout_config_errors_name_where_the_value_was_set(cfg, env, message) -
 
 def test_span_timer_keeps_the_wall_clock_span_of_each_grpo_phase(monkeypatch) -> None:
     class Timer:  # NeMo-RL's, reduced to what SpanTimer extends
-        def __init__(self) -> None:
+        def __init__(self, context=None) -> None:
             self.elapsed: dict[str, list[float]] = {}
 
-        def start(self, label: str) -> None:
+        def start(self, label: str, should_log: bool = True) -> None:
             pass
 
-        def stop(self, label: str) -> float:
+        def stop(self, label: str, should_log: bool = True) -> float:
             self.elapsed.setdefault(label, []).append(1.0)
             return 1.0
 

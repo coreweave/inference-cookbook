@@ -214,7 +214,7 @@ def test_cwtrain_accepts_the_config_and_the_actor_gets_the_keys(tmp_path, monkey
     harness = result["browsecomp_resources_server"]["resources_servers"]["browsecomp_advanced_harness"]
     assert (judge["api_key"], harness["tavily_api_key"]) == ("judge-key", "you-key")
     assert (root / "resources_servers" / "browsecomp_advanced_harness" / harness["entrypoint"]).is_file()
-    assert __import__("os").environ["YOU_SEARCH_MAX_CHARS"] == "2000"
+    assert __import__("os").environ["YOU_SEARCH_MAX_CHARS"] == "500"
 
 
 def load_prepare():
@@ -237,14 +237,18 @@ def encrypt(plaintext: str, password: str) -> str:
     return base64.b64encode(bytes(a ^ b for a, b in zip(data, key, strict=True))).decode()
 
 
-@pytest.mark.parametrize("dataset", ["simpleqa", "browsecomp"])
+@pytest.mark.parametrize("dataset", ["asearcher", "browsecomp"])
 def test_the_data_script_writes_the_benchmark_prompt(tmp_path, dataset, capsys) -> None:
     prepare = load_prepare()
     question, answer = "Who wrote the first draft?", "Ada Lovelace"
     if dataset == "browsecomp":
         rows = [{"problem": encrypt(question, "c"), "answer": encrypt(answer, "c"), "canary": "c"}] * 3
     else:
-        rows = [{"problem": question, "answer": answer}] * 3
+        rows = [
+            {"question": f"{question} ({n})", "answer": [answer], "source": "opensource"}
+            for n in range(3)
+        ]
+        question = f"{question} (0)"
     output = tmp_path / "search.jsonl"
     prepare.main(["--dataset", dataset, "--max-samples", "2", "--output", str(output)], rows=rows)
     lines = [json.loads(line) for line in output.read_text().splitlines()]
@@ -272,5 +276,90 @@ def test_the_data_script_rejects_a_short_download(monkeypatch) -> None:
             return b"problem,answer\nq,a\n"
 
     monkeypatch.setattr(prepare.urllib.request, "urlopen", lambda url, timeout: Response())
-    with pytest.raises(ValueError, match="expected 4326 simpleqa rows, got 1"):
-        prepare.download("simpleqa")
+    with pytest.raises(ValueError, match="expected 1266 browsecomp rows, got 1"):
+        prepare.download("browsecomp")
+
+
+def test_the_data_script_samples_at_random_with_a_seed(tmp_path) -> None:
+    prepare = load_prepare()
+    rows = [{"question": f"Q{n}?", "answer": [str(n)], "source": "opensource"} for n in range(100)]
+
+    def answers(*argv: str) -> list[str]:
+        output = tmp_path / "search.jsonl"
+        prepare.main(["--output", str(output), *argv], rows=rows)
+        return [json.loads(line)["ground_truth"] for line in output.read_text().splitlines()]
+
+    assert answers() == [str(n) for n in range(100)]
+    assert answers("--max-samples", "3") == ["0", "1", "2"]
+    sample = answers("--sample", "10", "--seed", "7")
+    assert len(set(sample)) == 10
+    assert answers("--sample", "10", "--seed", "7") == sample  # the seed fixes the sample
+    assert answers("--sample", "10", "--seed", "8") != sample
+    with pytest.raises(SystemExit):
+        answers("--sample", "101")
+    with pytest.raises(SystemExit):
+        answers("--sample", "2", "--max-samples", "2")
+
+
+def test_the_data_script_holds_out_questions_it_does_not_train_on(tmp_path) -> None:
+    prepare = load_prepare()
+    rows = [{"question": f"Q{n}?", "answer": [str(n)], "source": "opensource"} for n in range(100)]
+    output = tmp_path / "search.jsonl"
+
+    def answers(path: Path) -> list[str]:
+        return [json.loads(line)["ground_truth"] for line in path.read_text().splitlines()]
+
+    prepare.main(["--output", str(output), "--sample", "30", "--holdout", "20"], rows=rows)
+    train, held_out = answers(output), answers(tmp_path / "holdout.jsonl")
+    assert len(train) == 30 and len(held_out) == 20 and not set(train) & set(held_out)
+    other = tmp_path / "val.jsonl"
+    argv = ["--output", str(output), "--sample", "30", "--holdout", "20"]
+    prepare.main([*argv, "--holdout-output", str(other)], rows=rows)
+    assert answers(other) == held_out  # the seed fixes both
+    with pytest.raises(SystemExit):
+        prepare.main(["--output", str(output), "--holdout", "20"], rows=rows)  # needs --sample
+    with pytest.raises(SystemExit):
+        prepare.main(["--output", str(output), "--sample", "90", "--holdout", "20"], rows=rows)
+
+
+def test_the_data_script_keeps_asearcher_questions_with_one_open_answer(tmp_path) -> None:
+    prepare = load_prepare()
+
+    def row(question: str, *answers: str, source: str = "compose_chain_qa") -> dict:
+        return {"question": question, "answer": list(answers), "source": source, "qid": 1}
+
+    rows = [
+        row("Who wrote the first draft?", "Ada Lovelace"),
+        row("Who wrote the first draft?", "Ada Lovelace"),  # a duplicate question
+        row("Which river?", "the question is invalid.", source="compose_chain_qa_invalid"),
+        row("Are both towns in Iran?", "Yes"),
+        row("Which castles are in Kent?", "Allington Castle", "Blenheim Palace"),
+        row("哪位作家写了初稿？", "Ada"),
+        row("In what year did the museum move?", "1988", source="opensource"),
+    ]
+    output = tmp_path / "search.jsonl"
+    prepare.main(["--output", str(output)], rows=rows)  # the default dataset
+    lines = [json.loads(line) for line in output.read_text().splitlines()]
+    assert [(item["question"], item["ground_truth"]) for item in lines] == [
+        ("Who wrote the first draft?", "Ada Lovelace"),
+        ("In what year did the museum move?", "1988"),
+    ]
+
+
+def test_the_data_script_downloads_pinned_asearcher(monkeypatch) -> None:
+    prepare = load_prepare()
+    row = {"question": "Who wrote the first draft?", "answer": ["Ada"], "source": "opensource"}
+    lines = [(json.dumps(row) + "\n").encode()] * 2
+    requests = []
+
+    def urlopen(url, timeout):
+        requests.append(url)
+        return __import__("contextlib").nullcontext(iter(lines))
+
+    monkeypatch.setattr(prepare.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(prepare, "ASEARCHER_ROWS", 2)
+    assert prepare.download_asearcher() == [row, row]
+    assert requests == [prepare.ASEARCHER_URL] and prepare.ASEARCHER_REVISION in requests[0]
+    monkeypatch.setattr(prepare, "ASEARCHER_ROWS", 3)
+    with pytest.raises(ValueError, match="expected 3 asearcher rows, got 2"):
+        prepare.download_asearcher()

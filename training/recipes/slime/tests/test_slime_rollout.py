@@ -67,6 +67,7 @@ def rollout(monkeypatch):
 
     async def sample_groups(sampler, groups, **kwargs):
         seen["configs"].append(sampler)
+        seen.setdefault("top_k", []).append(kwargs.get("top_k"))
         seen.setdefault("salts", []).append(kwargs.get("cache_salt"))
         for group in groups:
             for sample in group:
@@ -106,6 +107,19 @@ def test_routes_follow_the_replay_flag_and_the_sample_hooks_run(rollout) -> None
     assert seen["hooks"] == [out.samples]  # e.g. spill_routed_experts, as slime's own rollout
     module.generate_rollout(args(False), 4, Data())
     assert seen["configs"][-1].routed_experts is False
+
+
+@pytest.mark.parametrize("top_k", [-1, 0, 20])
+def test_rollout_forwards_top_k(rollout, top_k) -> None:
+    module, seen = rollout
+    module.generate_rollout(args(False, rollout_top_k=top_k), 3, Data())
+    assert seen["top_k"] == [top_k]
+
+
+def test_rollout_defaults_to_disabled_top_k(rollout) -> None:
+    module, seen = rollout
+    module.generate_rollout(args(False), 3, Data())
+    assert seen["top_k"] == [-1]
 
 
 def test_routes_with_another_layer_count_than_the_trainer_fail_the_rollout(rollout) -> None:

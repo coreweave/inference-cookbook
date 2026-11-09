@@ -17,6 +17,9 @@ inference engines. The library covers each part of the loop:
 - **Rollouts and frameworks** (`cwtrain.integrations`): a rollout sampler for the deployment's
   OpenAI-compatible endpoint, the post-write hook for slime and miles, and the generation backend,
   weight synchronizer and policy-worker extension for NeMo-RL.
+- **W&B dashboards** (`cwtrain dashboard ...`, pending release): native post-training views,
+  run comparisons, interactive phase timelines, and local timeline export.
+  See [Post-training dashboards](docs/dashboards.md).
 
 The [CoreWeave Inference Cookbook](https://github.com/coreweave/inference-cookbook) has the recipes
 that use `cwtrain` with miles, slime, NeMo-RL and Axolotl, and examples that run them end to end.
@@ -24,7 +27,7 @@ that use `cwtrain` with miles, slime, NeMo-RL and Axolotl, and examples that run
 ## Install
 
 ```bash
-pip install cwtrain
+python -m pip install --upgrade cwtrain
 ```
 
 This also installs the `cwtrain` CLI. The framework integrations need no extras: install
@@ -95,15 +98,53 @@ cwtrain deployment create --file deployment.json --wait
 
 A request with a `hotLoad` section needs `dynamo-vllm` `0.32.0+crwv.5` or later: `create` uses
 that version when `runtime.version` is unset and refuses an older one. It also turns on the
-ModelExpress refit options in `runtime.engineEnv` (`MX_REFIT_DELTA_SURGICAL`,
-`MX_REFIT_FULL_STREAMING`, `MX_REFIT_INPLACE`, `MX_REFIT_PREFER_PREPARED`, `MX_REFIT_PREFETCH` and
-`MX_REFIT_PREFETCH_S3_WATCH`, set to `"true"`). A value in the request overrides each one.
+ModelExpress refit options in `runtime.engineEnv`, described below. A value in the request
+overrides each one.
 `InferenceClient.create_deployment` does the same.
 
 `create` prints the deployment as JSON, with its `id` and its `rollout_base_url` for rollouts.
 With `--wait`, it returns when the deployment is READY. This takes minutes, and longer for large
 models. If the deployment fails, or is not READY within `--timeout` (an hour by default), `create`
 still prints it and exits with status 1.
+
+### Hot-load engine options
+
+For a deployment with a `hotLoad` section, `cwtrain deployment create` and
+`InferenceClient.create_deployment` set all six options below to the string `"true"` unless the
+request explicitly sets a value. These are inference worker settings: put them in the deployment
+request's `runtime.engineEnv`, rather than exporting them in the trainer's shell. They require
+`dynamo-vllm` `0.32.0+crwv.5` or later when creating a deployment through cwtrain.
+
+| Option | Behavior when `"true"` |
+| --- | --- |
+| `MX_REFIT_DELTA_SURGICAL` | Reload only the destination modules touched by a delta chain. Fall back to a full reload when the live version or lineage is unknown, or a module is incomplete. |
+| `MX_REFIT_FULL_STREAMING` | Stream a full checkpoint into vLLM while writing a local copy in the background. |
+| `MX_REFIT_INPLACE` | Stage a prepared delta's nonzero XOR bytes and apply them directly to live vLLM weights, avoiding a checkpoint reload. |
+| `MX_REFIT_PREFER_PREPARED` | Prefer a locally prepared checkpoint from object storage over fetching weights from a generator peer. |
+| `MX_REFIT_PREFETCH` | Prepare upcoming checkpoint versions in the background before they are requested for installation. |
+| `MX_REFIT_PREFETCH_S3_WATCH` | Also prepare deltas discovered under the snapshot prefix in object storage before their versions are registered. Requires `MX_REFIT_PREFETCH`. |
+
+To disable an option, set it to the string `"false"` in the request. For example, merge this
+`runtime` block into your deployment request to disable background preparation and its S3 watcher
+while keeping the other four defaults:
+
+```json
+{
+  "runtime": {
+    "engine": "dynamo-vllm",
+    "version": "0.32.0+crwv.5",
+    "engineEnv": {
+      "MX_REFIT_PREFETCH": "false",
+      "MX_REFIT_PREFETCH_S3_WATCH": "false"
+    }
+  }
+}
+```
+
+Omitting a key lets cwtrain supply `"true"`; it does not disable the option. The same six
+defaults are also implemented in the Dedicated Inference service for hot-load deployments.
+An explicit value takes precedence there too. Requests without a `hotLoad` section pass through
+cwtrain unchanged.
 
 ### Publish weights
 
@@ -132,3 +173,19 @@ cwtrain deployment delete <uuid> --wait
 
 The deployment holds its GPUs until you delete it. `cwtrain --help` lists the commands, and
 `cwtrain <group> <command> --help` shows a command's options.
+
+## W&B dashboards
+
+The dashboard commands are planned for the next release and are not included in
+`cwtrain 1.0.2`. Once released, the standard package includes them and their W&B dependencies:
+
+```bash
+python -m pip install --upgrade cwtrain
+cwtrain dashboard setup --entity ENTITY --project PROJECT --framework miles --dry-run
+```
+
+The dry run previews the full metric catalogue offline. Authenticate with `wandb login` or
+`WANDB_API_KEY`, then omit `--dry-run` to create a managed **Post-training** view from the
+project's recorded metrics. Dashboard commands need W&B credentials, not CoreWeave or storage
+credentials. The [dashboard guide](docs/dashboards.md) covers the other frameworks, safe reruns,
+metric semantics, and exporting an interactive run timeline to HTML.

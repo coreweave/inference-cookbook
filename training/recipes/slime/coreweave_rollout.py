@@ -22,12 +22,6 @@ import time
 from argparse import Namespace
 from typing import Any
 
-from slime.rollout.base_types import RolloutFnTrainOutput
-from slime.rollout.rm_hub import batched_async_rm
-from slime.rollout.sample_hooks import apply_rollout_sample_hooks
-from slime.utils.async_utils import run
-from slime.utils.processing_utils import load_tokenizer
-
 from cwtrain.errors import CWTrainError
 from cwtrain.integrations import tracking
 from cwtrain.integrations.rollout import (
@@ -38,6 +32,11 @@ from cwtrain.integrations.rollout import (
     sample_groups,
     shared_sampler,
 )
+from slime.rollout.base_types import RolloutFnTrainOutput
+from slime.rollout.rm_hub import batched_async_rm
+from slime.rollout.sample_hooks import apply_rollout_sample_hooks
+from slime.utils.async_utils import run
+from slime.utils.processing_utils import load_tokenizer
 
 log = logging.getLogger(__name__)
 
@@ -71,6 +70,7 @@ async def _generate(
         max_tokens=int(args.rollout_max_response_len),
         temperature=float(args.rollout_temperature),
         top_p=float(getattr(args, "rollout_top_p", 1.0) or 1.0),
+        top_k=getattr(args, "rollout_top_k", -1),
         stop=getattr(args, "rollout_stop", None),
         # one rollout samples one version; keep its prompts out of later versions' cache
         cache_salt=rollout_cache_salt(rollout_id),
