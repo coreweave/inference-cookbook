@@ -7,14 +7,6 @@
     "engineConfig": {
       "gpu-memory-utilization": "0.50",
       "max-model-len": "8192"
-    },
-    "engineEnv": {
-      "MX_REFIT_DELTA_SURGICAL": "true",
-      "MX_REFIT_FULL_STREAMING": "true",
-      "MX_REFIT_INPLACE": "true",
-      "MX_REFIT_PREFER_PREPARED": "true",
-      "MX_REFIT_PREFETCH": "true",
-      "MX_REFIT_PREFETCH_S3_WATCH": "true"
     }
   },
   "resources": {"instanceType": "gb300-4x", "gpuCount": 1},

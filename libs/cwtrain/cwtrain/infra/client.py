@@ -181,9 +181,6 @@ class InferenceClient:
         to retry when the outcome is unknown. If an earlier attempt created the deployment, the
         API answers ``ALREADY_EXISTS``, and the deployment is fetched and returned.
 
-        Runtime versions and engine configuration pass through unchanged. The API validates
-        them and supplies any defaults.
-
         Raises:
             AlreadyExistsError: another deployment in the organization has the same name.
         """

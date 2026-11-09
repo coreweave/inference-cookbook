@@ -271,10 +271,8 @@ unit tests for the launcher's argument building are in the recipe's `tests/`.
    study's `k8s/` (git-ignored).
 2. Fill in the gateway id, instance type, bucket and unique deployment prefix. Set `model.path` to
    `$MODEL_PREFIX/$MODEL_SLUG` from the same `run.env` that you used for staging.
-3. The study pins `dynamo-vllm` to `0.32.0+crwv.5`. Make sure that the gateway zone has this
-   version with hot-load support. Its `runtime.engineEnv` turns on the six ModelExpress refit
-   options (`MX_REFIT_*`) that this version accepts.
-   Put your API token in `COREWEAVE_API_TOKEN` (or `CW_API_TOKEN`,
+3. The study pins `dynamo-vllm` to `0.30.0+crwv.5`. Make sure that the gateway zone has this
+   version with hot-load support. Put your API token in `COREWEAVE_API_TOKEN` (or `CW_API_TOKEN`,
    as the CoreWeave docs set it). Then `cwtrain deployment parameters` lists the runtime versions,
    instance types and engine options for your organization. Add `--gateway <gateway id>` to show
    only that gateway's zone.

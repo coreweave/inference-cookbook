@@ -309,41 +309,6 @@ def test_create_list_delete_deployment(api: FakeAPI, client: InferenceClient) ->
     assert api.requests[-1].method == "DELETE"
 
 
-@pytest.mark.parametrize(
-    "runtime",
-    [
-        None,
-        {},
-        {"engine": "dynamo-vllm"},
-        {"engine": "dynamo-vllm", "version": "0.30.0+crwv.5"},
-        {
-            "engine": "dynamo-vllm",
-            "version": "custom-engine-build",
-            "engineConfig": {"reasoning-parser": "<think>"},
-            "engineEnv": {"MX_REFIT_PREFETCH": "false", "STOP_TOKEN": "<s>"},
-        },
-    ],
-)
-@pytest.mark.parametrize("hot_load", [None, {}])
-def test_deployment_runtime_passes_through_unchanged(
-    api: FakeAPI, client: InferenceClient, runtime: dict | None, hot_load: dict | None
-) -> None:
-    from copy import deepcopy
-
-    from tests.conftest import deployment_json
-
-    api.queue("POST", DEPLOYMENTS, httpx.Response(200, json=deployment_json()))
-    spec = {"id": DEPLOYMENT_ID, "name": "qwen3-8b"}
-    if runtime is not None:
-        spec["runtime"] = runtime
-    if hot_load is not None:
-        spec["hotLoad"] = hot_load
-    original = deepcopy(spec)
-    client.create_deployment(spec)
-    assert posted(api, DEPLOYMENTS) == [original]
-    assert spec == original  # neither defaults nor overrides mutate the caller's request
-
-
 ALREADY_EXISTS = httpx.Response(409, json=error_json("already_exists", "resource already exists"))
 
 

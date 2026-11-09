@@ -28,15 +28,6 @@ import pytest
 SHARED = Path(__file__).resolve().parents[1]
 ROOT = SHARED.parent
 PLACEHOLDER = re.compile(r"<[A-Za-z][A-Za-z0-9 _-]*>")
-#: The ModelExpress refit options that every example deployment turns on, as the hot-load E2E does.
-MX_REFIT_KNOBS = (
-    "MX_REFIT_DELTA_SURGICAL",
-    "MX_REFIT_FULL_STREAMING",
-    "MX_REFIT_INPLACE",
-    "MX_REFIT_PREFER_PREPARED",
-    "MX_REFIT_PREFETCH",
-    "MX_REFIT_PREFETCH_S3_WATCH",
-)
 needs_envsubst = pytest.mark.skipif(
     shutil.which("envsubst") is None, reason="render.sh needs envsubst"
 )
@@ -296,12 +287,11 @@ def test_the_trainer_does_not_start_without_the_api_token(recipe: Recipe) -> Non
 
 
 @per_example
-def test_the_example_deployment_sets_only_refit_engine_env_and_no_internal_options(
+def test_the_example_deployment_sets_no_engine_env_or_internal_options(
     example: Example,
 ) -> None:
     runtime = json.loads((example.path / "deployment.example.json").read_text())["runtime"]
-    assert runtime["version"] == "0.32.0+crwv.5"
-    assert runtime["engineEnv"] == dict.fromkeys(MX_REFIT_KNOBS, "true")
+    assert "engineEnv" not in runtime
     assert not {"enable-rl", "load-format"} & set(runtime["engineConfig"])
 
 

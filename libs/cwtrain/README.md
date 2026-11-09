@@ -96,11 +96,6 @@ cwtrain deployment parameters --gateway <gateway id>
 cwtrain deployment create --file deployment.json --wait
 ```
 
-`cwtrain deployment create` and `InferenceClient.create_deployment` pass runtime versions and
-engine configuration through unchanged. The Dedicated Inference API validates them and supplies
-server defaults. To configure the hot-load engine options, see the
-[RL Rollouts user guide](https://docs.coreweave.com/products/inference/rl-rollouts#configure-hot-load-engine-options).
-
 `create` prints the deployment as JSON, with its `id` and its `rollout_base_url` for rollouts.
 With `--wait`, it returns when the deployment is READY. This takes minutes, and longer for large
 models. If the deployment fails, or is not READY within `--timeout` (an hour by default), `create`

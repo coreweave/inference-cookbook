@@ -521,7 +521,7 @@ def test_deployment_create_warns_without_hot_load(gateway_api, tmp_path, caplog)
 def test_deployment_create_sends_tags_in_the_engine_options(gateway_api, tmp_path, capsys):
     runtime = {
         "engine": "dynamo-vllm",
-        "version": "0.32.0+crwv.5",
+        "version": "0.30.0",
         "engineConfig": {"reasoning-parser": "<think>"},
         "engineEnv": {"STOP_TOKEN": "<s>"},
     }
@@ -538,27 +538,6 @@ def test_deployment_create_sends_tags_in_the_engine_options(gateway_api, tmp_pat
     err = capsys.readouterr().err
     assert "runtime.version = '<runtime version>'" in err and "engineConfig" not in err
     assert gateway_api.requests == []
-
-
-@pytest.mark.parametrize(
-    "runtime",
-    [
-        {"engine": "dynamo-vllm"},
-        {"engine": "dynamo-vllm", "version": "0.30.0+crwv.5"},
-        {
-            "engine": "dynamo-vllm",
-            "version": "custom-engine-build",
-            "engineConfig": {"custom-option": "value"},
-            "engineEnv": {"MX_REFIT_PREFETCH": "false"},
-        },
-    ],
-)
-def test_deployment_create_passes_runtime_through(gateway_api, tmp_path, runtime):
-    answer_as_created(gateway_api)
-    request = deployment_request(tmp_path, runtime=runtime)
-    assert cli.main(["deployment", "create", "--file", str(request)]) == 0
-    (sent,) = [json.loads(r.content) for r in gateway_api.requests if r.method == "POST"]
-    assert sent["runtime"] == runtime
 
 
 @pytest.mark.parametrize("status,code", [(403, "permission_denied"), (404, "not_found")])

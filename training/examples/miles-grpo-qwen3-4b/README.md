@@ -156,9 +156,7 @@ The recipe's `trainer-job.yaml` runs its `run-trainer.sh`, which does these step
 
 Copy [`deployment.example.json`](deployment.example.json) to `deployment.run.json` in this example's
 `k8s/` (git-ignored). Fill in the gateway id and the bucket. The example pins `dynamo-vllm` to
-`0.32.0+crwv.5`, which has hot-load support; its ModelExpress client is built into the engine.
-Its `runtime.engineEnv` turns on the six ModelExpress refit options (`MX_REFIT_*`) that this
-version accepts. Put your API token in `COREWEAVE_API_TOKEN` (or `CW_API_TOKEN`, as the
+`0.30.0+crwv.5`, which has hot-load support; its ModelExpress client is built into the engine. Put your API token in `COREWEAVE_API_TOKEN` (or `CW_API_TOKEN`, as the
 CoreWeave docs set it). Then `cwtrain deployment parameters` lists the runtime versions, instance
 types and engine options that your organization can use. `--gateway <gateway id>` limits the list
 to that gateway's zone:

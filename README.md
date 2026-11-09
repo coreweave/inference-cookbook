@@ -90,10 +90,7 @@ does.
   [`bucket-policy.example.json`](k8s/bucket-policy.example.json) has this structure.
 - A gateway, and a deployment created with engine `dynamo-vllm` and a `hotLoad` section naming the
   bucket and path prefix for snapshots ([example request](training/examples/miles-grpo-qwen3-4b/deployment.example.json)).
-  The recipes use `cwtrain deployment create` to create it from such a request. Runtime versions
-  and engine configuration pass through to the API for validation and defaults. See the
-  [RL Rollouts user guide](https://docs.coreweave.com/products/inference/rl-rollouts#configure-hot-load-engine-options)
-  for hot-load engine options and overrides. You can also use
+  The recipes use `cwtrain deployment create` to create it from such a request. You can also use
   the API, or the **Hot loading** section of the Cloud Console's create drawer. You can enable
   hot-load only when you create a deployment; you cannot add it later. All of the deployment's
   gateways must be in one zone.
