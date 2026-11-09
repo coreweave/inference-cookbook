@@ -8,7 +8,7 @@ ASearcher-Base-35k (the default) has 35,583 multi-hop questions over Wikipedia, 
 label. None of them are BrowseComp's, so the model can still be evaluated on BrowseComp after
 training on them. BrowseComp's questions take dozens of tool calls; the Gym eval recipe measures
 the model on them. Each row gets the prompt and tools of Gym's benchmarks/browsecomp/prepare.py
-(Gym v0.4.0, Apache-2.0), so that training prompts match the benchmark's.
+(Gym, Apache-2.0), with inline search/browse tools shared by training and evaluation.
 
 The launcher runs this before training (``PREPARE_DATA`` in run.env.example). It uses only the
 standard library.

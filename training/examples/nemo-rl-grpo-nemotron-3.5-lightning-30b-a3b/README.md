@@ -87,7 +87,7 @@ account prerequisites, the gateway and the bucket policy. Then get these:
   Federation, it holds no key; otherwise, the trainer's key. The Jobs that create the bucket and
   stage the base model mount the admin's key from `ADMIN_STORAGE_SECRET`. The trainer also needs
   the API token in its environment.
-- **The NeMo-RL container**, `nvcr.io/nvidia/nemo-rl:v0.7.0` (amd64 and arm64 on NGC). The
+- **The NeMo-RL container**, `nvcr.io/nvidia/nemo-rl:v0.8.0` (amd64 and arm64 on NGC). The
   recipe's launch script patches `/opt/nemo-rl` in place and installs the `cwtrain` wheel into the
   project venv.
 - **The base model, staged separately for each deployment.** Stage it into the bucket with the

@@ -43,7 +43,7 @@ from cwtrain.integrations.launch import (
     wandb_run_env,
 )
 
-TESTED = "NeMo-RL v0.7.0 (nvcr.io/nvidia/nemo-rl:v0.7.0)"
+TESTED = "NeMo-RL v0.8.0 (nvcr.io/nvidia/nemo-rl:v0.8.0)"
 NO_WANDB_KEY = (
     "WANDB_PROJECT is set, but the trainer has no WANDB_API_KEY: create the Secret that "
     "WANDB_API_KEY_SECRET names (default wandb-api-key) with the key under api_key, or leave "
