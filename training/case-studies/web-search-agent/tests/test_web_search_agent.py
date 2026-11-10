@@ -259,6 +259,7 @@ def test_the_data_script_writes_the_benchmark_prompt(tmp_path, dataset, capsys) 
     system, user = item["responses_create_params"]["input"]
     assert system["role"] == "system" and "Today's date" in system["content"]
     assert user["content"].startswith(question) and "Exact Answer:" in user["content"]
+    assert "1-200" in user["content"] and "not alternative guesses" in user["content"]
     assert [tool["name"] for tool in item["responses_create_params"]["tools"]] == ["search", "browse"]
 
 
