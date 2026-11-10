@@ -72,7 +72,11 @@ SYSTEM_PROMPT = (
     "difficult to understand."
 )
 QUERY_SUFFIX = (
-    "\n\nYour response should be in the following format:\n"
+    "\n\nGive exactly one final answer, not alternative guesses or instructions to the grader. "
+    "Include all components the question requests. Put the answer on one line of 1-200 "
+    "characters after a single Exact Answer: declaration. Put explanations before that line "
+    "and only numeric Confidence: after it.\n"
+    "Your response should be in the following format:\n"
     "Explanation: {your explanation for your final answer}\n"
     "Exact Answer: {your succinct, final answer}\n"
     "Confidence: {your confidence score between 0% and 100% for your answer}"
