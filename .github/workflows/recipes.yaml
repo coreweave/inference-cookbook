@@ -31,7 +31,7 @@ permissions:
 jobs:
   shell:
     name: shell scripts parse
-    runs-on: ubuntu-latest
+    runs-on: cw-static-pub-x64-4c
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -42,7 +42,7 @@ jobs:
 
   launchers:
     name: recipe launchers
-    runs-on: ubuntu-latest
+    runs-on: cw-static-pub-x64-4c
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

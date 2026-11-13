@@ -29,7 +29,7 @@ concurrency:
 jobs:
   test:
     name: lint and test (Python ${{ matrix.python }})
-    runs-on: ubuntu-latest
+    runs-on: cw-static-pub-x64-4c
     strategy:
       fail-fast: false
       matrix:
@@ -157,7 +157,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     # after the reviewed PyPI upload, so a wrong tag creates nothing public before approval
     needs: [test, publish]
-    runs-on: ubuntu-latest
+    runs-on: cw-static-pub-x64-4c
     permissions:
       contents: write
     steps:
@@ -192,7 +192,7 @@ jobs:
     name: Publish cwtrain to PyPI
     if: startsWith(github.ref, 'refs/tags/v')
     needs: test
-    runs-on: ubuntu-latest
+    runs-on: cw-static-pub-x64-4c
     environment:
       name: pypi
       url: https://pypi.org/project/cwtrain/
