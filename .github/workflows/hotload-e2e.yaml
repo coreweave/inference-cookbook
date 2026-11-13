@@ -18,7 +18,7 @@ jobs:
     if: >-
       github.event.issue.pull_request &&
       github.event.comment.body == '/hotload-e2e'
-    runs-on: ubuntu-latest
+    runs-on: cw-static-pub-x64-4c
     timeout-minutes: 5
     outputs:
       sha: ${{ steps.pr.outputs.sha }}
@@ -54,7 +54,7 @@ jobs:
       group: hotload-e2e
       cancel-in-progress: false
     environment: hotload-e2e
-    runs-on: ubuntu-latest
+    runs-on: cw-static-pub-x64-4c
     timeout-minutes: 105
     defaults:
       run:
@@ -116,7 +116,7 @@ jobs:
     name: Report E2E result on PR
     needs: [authorize, hotload]
     if: ${{ always() && needs.authorize.result == 'success' }}
-    runs-on: ubuntu-latest
+    runs-on: cw-static-pub-x64-4c
     timeout-minutes: 5
     permissions:
       pull-requests: write
