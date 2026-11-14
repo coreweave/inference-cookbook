@@ -1,0 +1,23 @@
+--- a/miles/utils/arguments.py
++++ b/miles/utils/arguments.py
+@@ -1545,10 +1545,16 @@
+                 getattr(args, "ckpt_step", None) if args.load == args.requested_load else None
+             ),  # config-access-exempt: native backend parsers do not define the Megatron step selector
+         ):
+-            raise ValueError(
+-                "--update-weight-transfer-mode=disk-delta cannot resume from a training checkpoint: "
+-                f"Requested --load={args.requested_load}."
+-            )
++            if args.rollout_num_gpus != 0 or args.custom_update_weight_post_write_path != "cwtrain.integrations.slime.hook":
++                raise ValueError(
++                    "--update-weight-transfer-mode=disk-delta cannot resume from a training checkpoint: "
++                    f"Requested --load={args.requested_load}."
++                )
++            # The recipe verifies an unused transport identity and synchronous, checked activation.
++            # The first sync encodes the restored trainer weights against the original HF baseline.
++            from coreweave_resume import validate_resume
++
++            validate_resume(args)
+ 
+     if args.update_weight_transfer_mode == "ici":
+         assert (

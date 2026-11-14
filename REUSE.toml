@@ -24,3 +24,10 @@ precedence = "override"
 SPDX-FileCopyrightText = ["2025-2026 NVIDIA CORPORATION", "2026 CoreWeave, Inc."]
 SPDX-License-Identifier = "Apache-2.0"
 SPDX-PackageName = "inference-cookbook"
+
+[[annotations]]
+path = "training/recipes/miles/patches/*.patch"
+precedence = "override"
+SPDX-FileCopyrightText = ["2025 Zhipu AI", "2026 CoreWeave, Inc."]
+SPDX-License-Identifier = "Apache-2.0"
+SPDX-PackageName = "inference-cookbook"

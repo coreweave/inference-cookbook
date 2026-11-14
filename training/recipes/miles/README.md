@@ -201,12 +201,60 @@ Any model with a `scripts/models/<type>.py` works by name (`--model-name Qwen3-8
 
 | Component | Version |
 | --- | --- |
-| miles | [`v0.1.1`](https://github.com/radixark/miles/releases/tag/v0.1.1): the trainer image `radixark/miles:v0.1.1` (amd64 and arm64), pinned by digest in the example's `run.env.example`. `run-trainer.sh` runs the miles checkout inside that image. |
+| miles | [`v0.2.0`](https://github.com/radixark/miles/releases/tag/v0.2.0): the trainer image `radixark/miles:v0.2.0` (amd64 and arm64), pinned by digest in the example's `run.env.example`. `run-trainer.sh` runs the miles checkout inside that image. |
 
 Releases after v0.1.1 keep the launcher helpers that `run_hotload.py` calls (`convert_checkpoint`,
 `execute_train`, `hf_download_dataset`, `exec_command_cpu`) in `command_utils.legacy`, not in
 `command_utils`. The script takes them from either module. When neither has them, it stops before
-any download and names the pinned image. A newer image works if it accepts the flags above.
+any download and names the pinned image. Accepting the flags alone does not qualify a newer runtime.
+
+Miles 0.2.0 needs the included patch to skip local router initialization when
+`--rollout-num-gpus 0` and no local evaluation GPUs are requested. The Kubernetes launcher
+applies it automatically. For a direct launch, run `python3 apply_patches.py --miles-dir /root/miles`
+first. Patch conflicts stop startup.
+
+### Native checkpoint restart
+
+Restore the complete native checkpoint, including its `rollout/` state, and pass
+`--load /path/to/checkpoint` through `EXTRA_TRAIN_ARGS`. Keep the original HF base.
+Use a new `CWTRAIN_HOTLOAD_RUN_ID`, `WAIT=1`, `VERIFY=1`, `MIRROR=1`, and
+`PROMPT_CACHE_POLICY=reset_all` (all with the `CWTRAIN_HOTLOAD_` prefix).
+
+The resume patch supports this recipe's external rollout topology only. It rejects
+identities already present in DI history or object storage. Miles publishes a new
+base and then a checksum-verified delta containing the restored trainer weights
+before the next rollout; native optimizer, scheduler, RNG, and data progress remain
+in the training checkpoint. If extending the run, pass
+`--use-checkpoint-opt-param-scheduler` to retain the saved scheduler configuration.
+
+### Miles 0.2.0 qualification
+
+Validated on 2026-11-14 with Qwen3-4B, two B200 trainer GPUs, and a separate one-H100
+DI replica running `dynamo-vllm 0.32.0+crwv.5`: two optimizer updates, then restoration
+on another node and two further updates. Native Adam, scheduler, RNG, and rollout
+cursor state were saved and restored; scheduler samples and the data cursor advanced
+from 16 to 32. Full and incremental hot-loads completed with replica identity checks.
+Worker W&B flushes completed before teardown; a failure probe produced a failed run.
+[Initial run](https://forge.coreweave.com/wandb/wandb/sig-rl/runs/6e9tqfx1),
+[recovery](https://forge.coreweave.com/wandb/wandb/sig-rl/runs/080bmtef).
+
+This short systems test used 256-token responses and entropy regularization; math
+rewards were zero. It establishes integration and restart behavior, not learning
+quality, automatic spot recovery, or browser-agent performance.
+
+The default is [v0.2.0](https://github.com/radixark/miles/releases/tag/v0.2.0),
+commit `8e419cc739fb09b5f21085aeacc7f6fd951084e1`. The example pins the release image by digest. Validate it in a separate run
+with `CONVERSION_DIR=/work/converted/miles-v0.2.0` (direct launcher: `--conversion-dir`).
+The HF source stays in `--model-dir`; conversion output and `--ref-load` use the new directory.
+The new converter requires conversion stamp 6; never relabel or overwrite a running release's cache.
+
+The custom rollout emits `rollout/raw_reward` for its scored batch. Miles 0.2.0 logs
+retained training rewards as `rollout/raw_reward_filtered`; this recipe does no dynamic filtering.
+CPU adapter tests do not establish trainer/rollout logprob agreement or useful learning.
+
+GLM-5.3-Flash additionally needs the canonical HF
+export-name fix and a separately tested multi-turn adapter. The existing single-turn example
+is not a browser-agent qualification.
 
 ## Synchronous or one-step-ahead: `train.py` vs `train_async.py`
 
