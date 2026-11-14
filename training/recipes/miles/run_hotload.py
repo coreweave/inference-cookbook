@@ -61,7 +61,7 @@ from cwtrain.integrations.rollout import refuse_rollout_loop_flags
 from cwtrain.integrations.slime import TRAINER_TIMELINE_ARGS
 
 DAPO = "zhuzilin/dapo-math-17k"
-PINNED_IMAGE = "radixark/miles:v0.1.1"
+PINNED_IMAGE = "radixark/miles:v0.2.0"
 HELPERS = (
     "exec_command_cpu", "hf_download_dataset", "convert_checkpoint", "execute_train", "ExecuteTrainConfig",
     "repo_base_dir",
@@ -82,9 +82,9 @@ def command_utils() -> tuple[ModuleType, str]:
         from miles.utils.external_utils.command_utils import legacy
 
         if not isinstance(legacy, ModuleType):  # an attribute of that name, not the module
-            raise ImportError(f"command_utils.legacy is a {type(legacy).__name__}, not a module")
+            raise TypeError(f"command_utils.legacy is a {type(legacy).__name__}, not a module")
         return legacy, ""
-    except ImportError as legacy_error:
+    except (ImportError, TypeError) as legacy_error:
         try:
             import miles.utils.external_utils.command_utils as utils
         except ImportError as exc:
@@ -214,6 +214,8 @@ def parse_args() -> argparse.Namespace:
                    help="Hugging Face repo id (org/name), or a bare name in the Qwen org")
     p.add_argument("--megatron-model-type", default=None, help="scripts/models/<type>.py; derived from --model-name")
     p.add_argument("--model-dir", default="/work/models")
+    p.add_argument("--conversion-dir", default=None,
+                   help="Separate output root for Megatron conversion; defaults to --model-dir")
     p.add_argument("--data-dir", default="/work/datasets")
     p.add_argument("--work-dir", default="/work", help="deltas, mirror, checkpoints and outputs live here")
     p.add_argument("--megatron-path", default="/root/Megatron-LM")
@@ -286,7 +288,7 @@ def main() -> None:
         model_name=model_name,
         megatron_model_type=model_type,
         num_gpus_per_node=args.num_gpus,
-        dir_dst=args.model_dir,
+        dir_dst=args.conversion_dir or args.model_dir,
         hf_checkpoint=hf_checkpoint,
         megatron_path=args.megatron_path,
     )
@@ -294,7 +296,7 @@ def main() -> None:
     # ---- train arguments: the stock groups minus --colocate and --sglang-*, plus CoreWeave's
     ckpt_args = (
         f"--hf-checkpoint {hf_checkpoint} "
-        f"--ref-load {args.model_dir}/{model_name}_torch_dist "
+        f"--ref-load {args.conversion_dir or args.model_dir}/{model_name}_torch_dist "
         f"--save {args.work_dir}/ckpt --save-interval 100000 "
     )
     rollout_args = (

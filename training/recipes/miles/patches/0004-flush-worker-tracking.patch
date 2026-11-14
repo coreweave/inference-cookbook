@@ -1,0 +1,81 @@
+--- a/miles/ray/train_actor.py
++++ b/miles/ray/train_actor.py
+@@ -304,6 +304,12 @@
+     def control_fault_hook(self, command: FaultHookCommand) -> FaultHookRecord:
+         return fault_hook_controller.apply(command)
+ 
++    def finish_tracking(self) -> None:
++        """Flush this worker before the driver closes the shared tracking run."""
++        from miles.utils.tracking_utils.tracking import finish_tracking
++
++        finish_tracking()
++
+     @rpc(concurrency_group="kill_self")
+     def kill_self(self) -> None:
+         os._exit(1)
+--- a/miles/ray/train/group.py
++++ b/miles/ray/train/group.py
+@@ -177,6 +177,12 @@
+             await disposer()
+             self._watcher_disposer = None
+ 
++        # Ray termination does not run worker atexit handlers reliably.
++        await asyncio.gather(
++            *[cell.execute("finish_tracking", kill_on_failure=False, timeout=60)
++              for cell in self._cells if cell.is_alive]
++        )
++
+     # ------------------------ API :: train ------------------------
+ 
+     async def train(
+--- a/miles/ray/rollout/rollout_executor.py
++++ b/miles/ray/rollout/rollout_executor.py
+@@ -54,7 +54,7 @@
+ from miles.utils.output_store.plan import StorePlanError
+ from miles.utils.simple_checkpointer import atomic_save_folder
+ from miles.utils.timer import timer
+-from miles.utils.tracking_utils.tracking import init_tracking
++from miles.utils.tracking_utils.tracking import finish_tracking, init_tracking
+ from miles.utils.weight_version import assert_samples_weight_version_sane, assert_weight_version_is_published
+ from miles.utils.workers.rpc.common.metadata import DedicatedRpcLoopWorker
+ from miles.utils.workers.worker_provider.base import BaseWorkerProvider
+@@ -178,21 +178,24 @@
+             return
+         self._disposed = True
+ 
+-        if self.generate_rollout is not None and not self.use_legacy_rollout_v1:
+-            await maybe_await(self.generate_rollout.dispose())
+-        if (
+-            close := getattr(self.data_source, "close", None)
+-        ) is not None:  # config-access-exempt: custom data sources may omit this lifecycle method
+-            close()
+-        event_analyzer.run_sample_ownership_analysis(args=self.args)
+-        event_analyzer.run_analysis_from_args(self.args)
+-        if self._metric_checker is not None:
+-            self._metric_checker.dispose()
+-        if isinstance(self.eval_generate_rollout, CheckpointEvalFn):
+-            await maybe_await(self.eval_generate_rollout.dispose())
+-        # Last, so a failed CI check raises after the rest of this dispose; only once init reached the store.
+-        if self._delete_store_refs is not None:
+-            await asyncio.to_thread(self._sweep_output_store)
++        try:
++            if self.generate_rollout is not None and not self.use_legacy_rollout_v1:
++                await maybe_await(self.generate_rollout.dispose())
++            if (
++                close := getattr(self.data_source, "close", None)
++            ) is not None:  # config-access-exempt: custom data sources may omit this lifecycle method
++                close()
++            event_analyzer.run_sample_ownership_analysis(args=self.args)
++            event_analyzer.run_analysis_from_args(self.args)
++            if self._metric_checker is not None:
++                self._metric_checker.dispose()
++            if isinstance(self.eval_generate_rollout, CheckpointEvalFn):
++                await maybe_await(self.eval_generate_rollout.dispose())
++            # Last, so a failed CI check raises after the rest of this dispose; only once init reached the store.
++            if self._delete_store_refs is not None:
++                await asyncio.to_thread(self._sweep_output_store)
++        finally:
++            finish_tracking()
+ 
+     def _sweep_output_store(self) -> None:
+         """Remove what the run left in the output store, which nothing reads once it ends."""
