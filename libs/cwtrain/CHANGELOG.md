@@ -5,6 +5,8 @@ GitHub. Versions follow [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+- Initialize and reset the hot-load mirror from numbered full snapshots, including Slime 0.4.0’s first publication.
+
 - **NeMo-RL v0.8.0:** the recipe pins the release container with Gym v0.7.0 and Ray 2.58.0,
   ports its backend and Gym patches, and uses the renamed AutoModel config and worker.
   Checkpoint export preserves stored tensor dtypes and phase timing supports the new Timer API.

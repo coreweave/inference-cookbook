@@ -409,7 +409,19 @@ class SlimePublisher:
         )
         metrics: dict[str, float] = {}
 
-        if self._mirror is not None:
+        # Slime 0.4 starts (and can restart) with a numbered full snapshot,
+        # without the older baseline-root callback. Seed from the exported
+        # trainer weights, which may differ from the original HF checkpoint.
+        if info.type is SnapshotType.FULL and self.config.mirror_enabled:
+            started, wall = time.monotonic(), time.time()
+            self._mirror = WeightMirror.create(
+                version_dir,
+                self.state_dir(version_dir.parent) / "mirror",
+                version=f"{version:06d}",
+            )
+            metrics["hotload/mirror_seconds"] = round(time.monotonic() - started, 3)
+            metrics.update(tracking.span("mirror", wall, time.time()))
+        elif self._mirror is not None:
             if not info.empty_delta:
                 started, wall = time.monotonic(), time.time()
                 report = self._mirror.apply_delta(version_dir)
@@ -426,7 +438,8 @@ class SlimePublisher:
                 self._mirror.advance(f"{version:06d}")
 
         cut = bool(
-            self._mirror is not None
+            info.is_incremental
+            and self._mirror is not None
             and self.config.full_every
             and version % self.config.full_every == 0
         )

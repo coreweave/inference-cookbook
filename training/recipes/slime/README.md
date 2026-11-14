@@ -12,7 +12,7 @@ trainer runs no inference engines:
 
 ![One training step: the trainer writes weight_vNNNNNN, the cwtrain hook uploads it to Object Storage, creates a hot-load and polls until every replica is READY; the next rollout batch samples fresh weights from the OpenAI-compatible endpoint.](../../../docs/hotload-flow.drawio.svg)
 
-The same loop with miles, which needs no patch, is in [`../miles/`](../miles/README.md).
+The same loop with miles is in [`../miles/`](../miles/README.md).
 
 ## Running it
 
@@ -45,11 +45,39 @@ so the hook never runs.
 
 Without the flag, slime's behaviour does not change.
 
+### Slime 0.4.0 qualification
+
+Validated on 2026-11-14 with Qwen3-4B, two B200 trainer GPUs, and a separate one-H100
+DI replica running `dynamo-vllm 0.32.0+crwv.5`: two optimizer updates, followed by native
+checkpoint restoration on another node and two further updates. Adam, scheduler, RNG,
+and data-cursor state were restored; scheduler samples and the cursor advanced from
+16 to 32. Full, delta, and periodic full hot-loads passed replica identity checks.
+Both workers acknowledged their metric flushes before termination, and an intentional
+failure probe produced a failed W&B run.
+[Initial run](https://forge.coreweave.com/wandb/wandb/sig-rl/runs/u1begt39),
+[recovery](https://forge.coreweave.com/wandb/wandb/sig-rl/runs/nhfv1u5t).
+
+This short synchronous systems test used 256-token responses and entropy regularization;
+math rewards were zero. It does not establish learning quality or automatic spot recovery.
+
+The default is [v0.4.0](https://github.com/THUDM/slime/releases/tag/v0.4.0),
+commit `0b0c277d5b4cc66efc3b6db269e2e5184e8f3b1e`. The existing standalone-publication
+patch is still required. Its first numbered publication is a full export of the current trainer
+weights. The cwtrain hook initializes or resets its mirror from that full export, then verifies
+subsequent deltas and creates periodic full snapshots. No synthetic HF-baseline callback is needed.
+
+CPU tests cover full-first and baseline-then-full transitions followed by a delta and chain cut.
+The example pins the official CUDA 13 amd64 image and uses its bundled Megatron stack.
+Keep XOR encoding and Adler-32 checksums explicit.
+
+This exact tag does not support GLM-5.3-Flash (`glm5_next`). Newer upstream support needs a separate
+pinned build or backport. A multi-turn agent port also needs trajectory-aware reward normalization;
+the default normalizer processes flattened turn rewards. These remain qualification blockers.
+
 ### About the patches
 
 The patches add what slime does not ship yet. They are not a second integration layer: the
-`cwtrain` library carries no patches, and the miles recipe needs none because miles has the
-standalone disk-delta path. The patches are small and stay in this recipe, so each one can go when
+`cwtrain` library carries no patches. The patches are small and stay in this recipe, so each one can go when
 slime ships an equivalent.
 
 | Patch | Size | What it changes | Needed when |
@@ -58,26 +86,24 @@ slime ships an equivalent.
 | `0002-relax-numpy-check` | about 7 lines | lets slime's numpy 1 assertion be skipped with `SLIME_RELAX_NUMPY_CHECK=1` | only on images that ship numpy 2, such as the arm64 miles image |
 | `0003-zero-kl-without-rollout-logprobs` | about 8 lines | shapes slime's zero KL from response lengths when a sample has no `rollout_log_probs` | only with `USE_TIS=0`, as a fallback when the endpoint's log-probs cannot be aligned with a batch |
 
+The failure-reporting patch (`0004`) passes a nonzero exit code to W&B when training raises.
+Patch `0005` waits for worker metric flushes before Ray termination and logs the acknowledged count.
+
 The launcher (`launch.py`) applies the patches in order and checks each one before it applies it.
 If a patch does not apply, the launcher reverts the patches it applied and stops the job. The
 message names the tested commit, so a newer slime never starts half-patched. Patches that are
 already applied are skipped.
 
-### Tested versions
+### Pinned versions
 
 | Component | Version |
 | --- | --- |
-| slime | [`8ee9c1e1c`](https://github.com/THUDM/slime/commit/8ee9c1e1c8871ccd6dc8ec812edfaefa3dd1156b) (the default `SLIME_COMMIT`, checked out regardless of the slime the image ships) |
-| Megatron-LM, when not taken from the image | [`1dcf0dafa`](https://github.com/NVIDIA/Megatron-LM/commit/1dcf0dafa884ad52ffb243625717a3471643e087) (the `MEGATRON_COMMIT` in the example's `run.env.example`), with slime's own Megatron patches |
-| Trainer image | `radixark/miles` with `SLIME_RELAX_NUMPY_CHECK=1`; the example's `run.env.example` pins `radixark/miles:v0.1.1`, the release closest to the slime commit above |
+| Slime | `v0.4.0`, commit `0b0c277d5b4cc66efc3b6db269e2e5184e8f3b1e` |
+| Megatron-LM | Bundled commit `4b4acac9a1d28ea6829c8d4f566d75698a21249d` with Slime patches |
+| Trainer image | `slimerl/slime:v0.4.0-cu130`, pinned by digest in the example; amd64 only |
 
-A newer slime usually works if every patch still applies. The launcher tells you when one does
-not. On slime's main branch, the code that patch 0001 touches is different. So the launcher moves
-the official slime images' clone of main to `SLIME_COMMIT`.
-
-`--rollout-external-engine-addrs` is not an alternative. It keeps the sync running, but slime then
-calls each address's `/pull_weights` and `update_weights_from_disk` routes. A CoreWeave deployment
-does not expose them.
+The launcher checks out the pinned source and applies the recipe patches before training.
+CPU regression tests and patch application checks do not establish GPU or DI compatibility.
 
 ## Configure the hook
 
@@ -292,8 +318,8 @@ already set in the trainer's environment.
 
 | Step | Who | What |
 | --- | --- | --- |
-| baseline | slime rank 0 | Captures `--hf-checkpoint` bytes as the delta baseline and calls the hook with the delta root |
-| baseline | hook | Publishes `--hf-checkpoint` as full snapshot `<run>-v000000`, unless a completed hot-load with that identity already exists; creates the weight mirror |
+| first sync | slime ranks | Export the current trainer weights to a numbered full checkpoint (`weight_v000001/` in a fresh directory), seed the delta encoder, and call the hook |
+| first sync | hook (rank 0) | Publish that full checkpoint and initialize the weight mirror from its bytes |
 | sync N | slime ranks | Diff against the previous sync, write `weight_v00000N/` (shards + index with `base_version`) |
 | sync N | hook (rank 0) | Apply the delta to the mirror and check every changed tensor's Adler-32; upload to `<prefix>/<run>-v00000N/`, create an incremental hot-load chained onto the last published version (a skipped empty sync publishes nothing), and wait until the hot-load completes (every replica READY on `<run>-v00000N`) |
 | sync N, N % FULL_EVERY == 0 | hook (rank 0) | Same, but publish a **full** snapshot rebuilt from the mirror (with per-tensor checksums) so the chain restarts |
@@ -313,12 +339,17 @@ new version. `CWTRAIN_HOTLOAD_VERIFY=1` re-reads the replicas anyway.
 
 ## Resuming a run
 
-On restart, slime captures its baseline again, so the hook is called with the delta root again.
-The hook looks for a completed `<run>-v000000` and skips the upload if it finds one. Version
-numbers also restart at 1: slime clears the delta directory, and the deltas are again relative to
-`--hf-checkpoint`. So a resumed run must publish under a *new* run ID. With the same run ID, the
-hook would try to reuse identities that already exist with different bytes. Always start a
-resumed run with a fresh `CWTRAIN_HOTLOAD_RUN_ID`.
+Restore the complete native checkpoint, including `rollout/`, and pass
+`--load /path/to/checkpoint` through `EXTRA_TRAIN_ARGS`. Pass
+`--use-checkpoint-opt-param-scheduler` to retain the saved scheduler settings.
+Use a fresh work directory and `CWTRAIN_HOTLOAD_RUN_ID`, with hot-load waiting,
+replica verification, and `reset_all` prompt-cache policy enabled.
+
+Slime 0.4.0 first exports the restored trainer's current weights as a full snapshot.
+The hook initializes its mirror from that export; subsequent deltas reference those
+restored bytes. The next rollout starts after DI has loaded this snapshot. Reusing a
+run ID would collide with earlier snapshot identities. This recipe does not automate
+rescheduling after node loss or copying native checkpoints to durable storage.
 
 ## Pitfalls
 

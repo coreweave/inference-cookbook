@@ -1193,3 +1193,23 @@ def test_the_driver_runs_train_py_without_wandb_or_init_tracking(driver, caplog)
     with caplog.at_level(logging.WARNING, logger="cwtrain.integrations.slime"):
         slime.run_train_script(driver.script, [])
     assert driver.wandb.ran == "again" and "has no init_tracking" in caplog.text
+
+
+@pytest.mark.parametrize("prior_baseline", [False, True])
+def test_numbered_full_seeds_or_resets_mirror(env, real_args, monkeypatch, prior_baseline):
+    monkeypatch.setenv("CWTRAIN_HOTLOAD_FULL_EVERY", "2")
+    stub = StubLoader()
+    publisher = SlimePublisher(HookConfig.from_env(), loader=stub)
+    args = real_args
+    deltas = Path(args.update_weight_disk_dir)
+    if prior_baseline:
+        publisher.handle(args, deltas)
+    w1 = perturb(args.weights, ("model.layers.0.weight",), seed=11)
+    publisher.handle(args, write_real_checkpoint(deltas / "weight_v000001", w1))
+    assert read_all(publisher.state_dir() / "mirror") == {n: d for n, (_t, _s, d) in w1.items()}
+    w2 = perturb(w1, ("lm_head.bias",), seed=12)
+    metrics = publisher.handle(args, write_real_delta(deltas / "weight_v000002", w1, w2, version=2))
+    assert metrics["hotload/tensors_verified"] == 1
+    assert metrics["hotload/chain_cut"] == 1
+    assert stub.uploads[-1][0].type is SnapshotType.FULL
+    assert stub.manifests[-1][1]["version"] == "000002"
