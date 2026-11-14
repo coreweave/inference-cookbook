@@ -1,0 +1,82 @@
+--- a/slime/ray/train_actor.py
++++ b/slime/ray/train_actor.py
+@@ -93,6 +93,13 @@
+         except Exception as e:
+             logger.info(f"Warning: Failed to set NUMA affinity: {e}")
+ 
++    def finish_tracking(self):
++        """Flush this worker before Ray terminates it."""
++        from slime.observability.logging_utils import finish_tracking
++
++        if hasattr(self, "args"):
++            finish_tracking(self.args)
++
+     def clear_memory(self):
+         if self.args.debug_rollout_only:
+             return
+--- a/slime/ray/serving.py
++++ b/slime/ray/serving.py
+@@ -196,7 +196,12 @@
+         self.training_actors[role] = actors
+ 
+     def release_trainers(self):
++        from slime.ray.tracking import flush_training_actors
++
+         with Cleanup() as cleanup:
++            cleanup.run("flush training metrics", flush_training_actors,
++                        [actor for actors in self.training_actors.values() for actor in actors],
++                        timeout=cleanup.remaining)
+             for actors in self.training_actors.values():
+                 for actor in actors[:]:
+                     # Retain failed handles so a repeated detach can retry them.
+--- a/slime/ray/actor_group.py
++++ b/slime/ray/actor_group.py
+@@ -196,9 +196,14 @@
+         return ray.get([actor.sleep.remote() for actor in self._actor_handlers])
+ 
+     def release(self):
++        from slime.ray.tracking import flush_training_actors
++        from slime.utils.cleanup import Cleanup
++
+         actors, self._actor_handlers = self._actor_handlers, []
+-        for actor in actors:
+-            ray.kill(actor, no_restart=True)
++        with Cleanup() as cleanup:
++            cleanup.run("flush training metrics", flush_training_actors, actors, timeout=cleanup.remaining)
++            for actor in actors:
++                cleanup.run("terminate training actor", ray.kill, actor, no_restart=True)
+         if actors:
+             time.sleep(5)
+ 
+--- /dev/null
++++ b/slime/ray/tracking.py
+@@ -0,0 +1,29 @@
++"""Flush secondary writers before their owner terminates training actors."""
++
++import logging
++
++import ray
++
++from slime.utils.cleanup import Cleanup
++
++logger = logging.getLogger(__name__)
++
++
++def flush_training_actors(actors, timeout=60):
++    # Start all writers together; one deadline bounds the whole group.
++    pending = [actor.finish_tracking.remote() for actor in actors]
++    flushed = 0
++    with Cleanup(timeout) as cleanup:
++        for ref in pending:
++            def wait(ref=ref):
++                try:
++                    ray.get(ref, timeout=cleanup.remaining)
++                    return True
++                except ray.exceptions.RayActorError:
++                    # A failed/released worker cannot flush; still flush its peers.
++                    logger.warning("Training actor already exited; its metrics cannot be flushed")
++                    return False
++
++            if cleanup.run("flush training metrics", wait):
++                flushed += 1
++    logger.info("Flushed training metrics from %d/%d workers", flushed, len(pending))

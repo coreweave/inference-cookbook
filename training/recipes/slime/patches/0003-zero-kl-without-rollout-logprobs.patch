@@ -1,5 +1,5 @@
 CoreWeave Inference Cookbook patch for slime (https://github.com/THUDM/slime)
-Base: commit 8ee9c1e1c8871ccd6dc8ec812edfaefa3dd1156b
+Base: commit 0b0c277d5b4cc66efc3b6db269e2e5184e8f3b1e
 Purpose: when a sample has no rollout log-probs, shape slime's zero KL from the response lengths
   instead of from an empty list.
 License: Apache-2.0. Upstream code by Zhipu AI; changes by CoreWeave, Inc. (see REUSE.toml).

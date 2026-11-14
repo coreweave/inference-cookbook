@@ -11,7 +11,7 @@ loop, its patches, its settings and its failure handling.
 | Model | [`Qwen/Qwen3-4B`](https://huggingface.co/Qwen/Qwen3-4B), at the commit that `HF_REVISION` pins |
 | Data | [`zhuzilin/dapo-math-17k`](https://huggingface.co/datasets/zhuzilin/dapo-math-17k), which the recipe's launcher downloads |
 | Reward | slime's `math` reward (`RM_TYPE`), which grades the boxed answer |
-| Trainer | 2 GPUs of a `gb300-4x` node, TP=2; 30 rollout steps (`NUM_ROLLOUT`) of 8 prompts × 4 samples |
+| Trainer | 2 GPUs of a `b200-8x` node, TP=2; 30 rollout steps (`NUM_ROLLOUT`) of 8 prompts × 4 samples |
 | Deployment | [`deployment.example.json`](deployment.example.json): `dynamo-vllm` on `gb300-4x`, 1 GPU per replica, 2 replicas, `autoscaling.concurrency` 256 |
 
 ## What you need
@@ -88,20 +88,11 @@ the gateway, and the bucket policy. This example also needs:
   Federation, it holds no key; otherwise, the trainer's key. The Jobs that create the bucket and
   stage the base model mount the admin's key from `ADMIN_STORAGE_SECRET`. The trainer also needs
   the API token in its environment.
-- **A trainer image with slime's dependencies.** The image that `run.env.example` pins,
-  `radixark/miles:v0.1.1`, carries slime's torch, SGLang and Ray stack for amd64 and arm64 (GB200,
-  GB300). With this image, the recipe's launcher:
-  - clones slime at `SLIME_COMMIT`.
-  - checks out the Megatron-LM commit that slime is developed against (`MEGATRON_COMMIT`, from
-    `docker/Dockerfile` in the slime repo), applies slime's Megatron patches, and puts it first on
-    `PYTHONPATH`.
-  - skips slime's numpy 1 assertion, because the image ships numpy 2 (`SLIME_RELAX_NUMPY_CHECK=1`,
-    the recipe's `patches/0002-relax-numpy-check.patch`).
-
-  The official `slimerl/slime` images are amd64 only and carry slime's own Megatron. With one of
-  them, set `SLIME_RELAX_NUMPY_CHECK=0` and leave `MEGATRON_COMMIT` empty. The launcher moves the
-  image's `/root/slime` clone to `SLIME_COMMIT` before it patches it. At start, the Job installs
-  `cwtrain` from the wheel that the recipe's `k8s/make-kit.sh` bundles into a ConfigMap.
+- **A trainer image with slime's dependencies.** The pinned `slimerl/slime:v0.4.0-cu130`
+  image is amd64-only and includes Slime's matching Megatron stack. The trainer runs on B200;
+  the separate inference deployment can remain on GB300. Keep `MEGATRON_COMMIT` empty and
+  `SLIME_RELAX_NUMPY_CHECK=0`. The launcher checks out `SLIME_COMMIT` and applies its recipe patches.
+  At start, the Job installs `cwtrain` from the wheel bundled in the kit ConfigMap.
 - **The base model, staged once.** Stage it into the bucket with
   [`stage-model-job.yaml`](../../../k8s/stage-model-job.yaml). The
   deployment loads it from there. When `BASE_S3_URI` is set, the trainer fetches the same objects,

@@ -50,7 +50,7 @@ from cwtrain.integrations.rollout import refuse_rollout_loop_flags
 from cwtrain.integrations.slime import TRAINER_TIMELINE_ARGS
 
 #: The slime commit this recipe and its patches were validated against (README, "Tested versions").
-TESTED_SLIME_COMMIT = "8ee9c1e1c8871ccd6dc8ec812edfaefa3dd1156b"
+TESTED_SLIME_COMMIT = "0b0c277d5b4cc66efc3b6db269e2e5184e8f3b1e"
 DATASET = "zhuzilin/dapo-math-17k"
 NO_WANDB_KEY = (
     "WANDB_PROJECT is set, but the trainer has no WANDB_API_KEY: create the Secret that "
