@@ -31,3 +31,11 @@ precedence = "override"
 SPDX-FileCopyrightText = ["2025 Zhipu AI", "2026 CoreWeave, Inc."]
 SPDX-License-Identifier = "Apache-2.0"
 SPDX-PackageName = "inference-cookbook"
+
+# Temporary upstream Gym image/admission patch: retain the upstream context's copyright.
+[[annotations]]
+path = "training/patches/nemo-gym/agent-images/*.patch"
+precedence = "override"
+SPDX-FileCopyrightText = ["2026 NVIDIA CORPORATION & AFFILIATES.", "2026 CoreWeave, Inc."]
+SPDX-License-Identifier = "Apache-2.0"
+SPDX-PackageName = "inference-cookbook"
