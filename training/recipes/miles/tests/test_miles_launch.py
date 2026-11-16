@@ -105,7 +105,7 @@ def test_the_launcher_stops_before_any_download_when_no_module_has_the_helpers(m
     package.__path__ = []
     package.legacy = types.ModuleType(f"{UTILS}.legacy")  # moved again: nothing where we look
     message = stop_message(load_launcher(monkeypatch, package), monkeypatch)
-    assert re.search(r"no exec_command_cpu, .*ExecuteTrainConfig.*radixark/miles:v0\.1\.1", message)
+    assert re.search(r"no exec_command_cpu, .*ExecuteTrainConfig.*radixark/miles:v0\.2\.0", message)
 
 
 def test_the_launcher_stops_with_the_pinned_image_when_command_utils_is_gone(monkeypatch) -> None:
@@ -144,7 +144,7 @@ def test_the_launcher_stages_the_model_where_every_later_step_reads_it(
     calls: list[tuple] = []
     module.exec_command_cpu = lambda cmd: calls.append(("cmd", cmd))
     module.hf_download_dataset = lambda *a, **kw: None
-    module.convert_checkpoint = lambda **kw: calls.append(("convert", kw["hf_checkpoint"]))
+    module.convert_checkpoint = lambda **kw: calls.append(("convert", kw["hf_checkpoint"], kw["dir_dst"]))
     module.execute_train = lambda **kw: calls.append(("train", kw["train_args"]))
     module.ExecuteTrainConfig = lambda **kw: kw
     variant = load_launcher(monkeypatch, module)
@@ -173,7 +173,7 @@ def test_the_launcher_stages_the_model_where_every_later_step_reads_it(
     assert downloads == ([] if base_s3_uri else [
         f"hf download {repo} --revision {revision} --local-dir {checkpoint}"
     ])
-    assert ("convert", checkpoint) in calls
+    assert ("convert", checkpoint, str(models)) in calls
     train_args = next(c[1] for c in calls if c[0] == "train")
     assert f"--hf-checkpoint {checkpoint} " in train_args
 
@@ -189,7 +189,8 @@ def launched_train(tmp_path, monkeypatch, *options: str, environ=None) -> dict:
     calls: list[dict] = []
     module.exec_command_cpu = lambda cmd: None
     module.hf_download_dataset = lambda *a, **kw: None
-    module.convert_checkpoint = lambda **kw: None
+    conversions = []
+    module.convert_checkpoint = lambda **kw: conversions.append(kw)
     module.execute_train = lambda **kw: calls.append(kw)
     module.ExecuteTrainConfig = lambda **kw: kw
     variant = load_launcher(monkeypatch, module)
@@ -201,7 +202,7 @@ def launched_train(tmp_path, monkeypatch, *options: str, environ=None) -> dict:
     ])  # fmt: skip
     monkeypatch.setattr(variant.os, "environ", dict(environ or {}))
     variant.main()
-    return calls[0]
+    return {**calls[0], "conversion": conversions[0]}
 
 
 @pytest.mark.parametrize(
@@ -339,3 +340,11 @@ def test_run_trainer_hands_the_model_and_its_source_to_the_launcher() -> None:
     # MODEL_SLUG only names the staged copy in the bucket; the trainer reads HF_MODEL alone
     job = (K8S / "trainer-job.yaml").read_text()
     assert "{name: HF_MODEL," in job and "{name: BASE_S3_URI," in job and "MODEL_SLUG" not in job
+
+
+def test_conversion_can_use_a_separate_release_directory(tmp_path, monkeypatch):
+    converted = tmp_path / "converted-v020"
+    result = launched_train(tmp_path, monkeypatch, "--conversion-dir", str(converted))
+    assert result["conversion"]["dir_dst"] == str(converted)
+    assert f"--ref-load {converted}/Qwen3-4B_torch_dist " in result["train_args"]
+    assert f"--hf-checkpoint {tmp_path}/models/Qwen3-4B " in result["train_args"]

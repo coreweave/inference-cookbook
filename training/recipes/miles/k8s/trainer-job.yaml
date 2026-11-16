@@ -40,6 +40,8 @@ spec:
         - {name: ACTOR_GPUS, value: "${ACTOR_GPUS}"}
         - {name: TP_SIZE, value: "${TP_SIZE}"}
         # block scalar: the value may carry shell quotes, e.g. --apply-chat-template-kwargs '{"a":1}'
+        - name: CONVERSION_DIR
+          value: "${CONVERSION_DIR}"
         - name: EXTRA_TRAIN_ARGS
           value: |-
             ${EXTRA_TRAIN_ARGS}

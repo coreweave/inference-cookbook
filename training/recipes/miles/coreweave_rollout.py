@@ -77,6 +77,10 @@ class CoreWeaveRolloutFn(BaseRolloutFn):
         rewards = await batched_async_rm(args, flat)
         for sample, reward in zip(flat, rewards, strict=True):
             sample.reward = float(reward)
+        # Custom rollouts own this metric in Miles 0.2. The trainer separately
+        # logs the retained batch under rollout/raw_reward_filtered.
+        if flat:
+            metrics["rollout/raw_reward"] = sum(sample.reward for sample in flat) / len(flat)
         metrics.update(tracking.span("reward", scored, time.time()))
         metrics[tracking.TIMELINE_STEP] = float(input.rollout_id)
         metrics["coreweave/rollout_id"] = float(input.rollout_id)

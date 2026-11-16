@@ -24,8 +24,9 @@ WORK=${WORK:-/work}
 
 echo "== install cwtrain + launcher"
 pip install --quiet --no-cache-dir /opt/cwtrain/cwtrain-*.whl "huggingface_hub[cli]"
+python3 /opt/cwtrain/apply_patches.py --patch-dir /opt/cwtrain
 mkdir -p $WORK/py
-cp /opt/cwtrain/coreweave_rollout.py /opt/cwtrain/coreweave_train.py /opt/cwtrain/run_hotload.py \
+cp /opt/cwtrain/coreweave_resume.py /opt/cwtrain/coreweave_rollout.py /opt/cwtrain/coreweave_train.py /opt/cwtrain/run_hotload.py \
   $WORK/py/
 
 echo "== check snapshot access"
@@ -41,6 +42,7 @@ cd /root/miles
 exec python3 $WORK/py/run_hotload.py \
   --model-name "$HF_MODEL" ${MEGATRON_MODEL_TYPE:+--megatron-model-type "$MEGATRON_MODEL_TYPE"} \
   --model-dir "$WORK/models" --data-dir "$WORK/datasets" --work-dir "$WORK" \
+  --conversion-dir "${CONVERSION_DIR:-$WORK/models}" \
   --num-gpus "$ACTOR_GPUS" --tp "$TP_SIZE" \
   --num-rollout "$NUM_ROLLOUT" --rollout-batch-size "${ROLLOUT_BATCH_SIZE:-8}" \
   --n-samples-per-prompt "${N_SAMPLES_PER_PROMPT:-4}" --global-batch-size "${GLOBAL_BATCH_SIZE:-32}" \

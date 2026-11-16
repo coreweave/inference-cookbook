@@ -170,3 +170,9 @@ def test_each_rollout_is_salted_with_the_run_and_the_rollout(rollout, monkeypatc
     from cwtrain.integrations.nvext import _PROCESS_TOKEN
 
     assert seen["salts"] == [f"grpo-7-{_PROCESS_TOKEN}-r3"]
+
+
+def test_custom_rollout_emits_raw_reward_for_miles_v020(rollout):
+    module, _ = rollout
+    result = run(module, False)
+    assert result.metrics["rollout/raw_reward"] == 1.0
