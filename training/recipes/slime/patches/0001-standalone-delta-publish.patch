@@ -1,78 +1,18 @@
 CoreWeave Inference Cookbook patch for slime (https://github.com/THUDM/slime)
-Base: commit 8ee9c1e1c8871ccd6dc8ec812edfaefa3dd1156b
+Base: commit 0b0c277d5b4cc66efc3b6db269e2e5184e8f3b1e
 Purpose: add --update-weight-standalone-publish, so slime runs its disk-delta writer and the
   post-write hook without SGLang engines of its own; nothing changes without the flag.
 License: Apache-2.0. Upstream code by Zhipu AI; changes by CoreWeave, Inc. (see REUSE.toml).
 Applied by training/recipes/slime/launch.py with `git apply`, which skips this header.
 
-diff --git a/slime/backends/megatron_utils/actor.py b/slime/backends/megatron_utils/actor.py
-index 65540e1..01a6fcf 100644
---- a/slime/backends/megatron_utils/actor.py
-+++ b/slime/backends/megatron_utils/actor.py
-@@ -643,18 +643,21 @@ class MegatronTrainRayActor(TrainRayActor):
-         ) = ray.get(self.rollout_manager.get_updatable_engines_and_lock.remote())
- 
-         reconnect_rollout_engines = self.args.offload_train and self.args.use_critic and not self.args.colocate
-+        standalone_publish = getattr(self.args, "update_weight_standalone_publish", False)
- 
--        if not rollout_engines and not reconnect_rollout_engines:
-+        if not rollout_engines and not reconnect_rollout_engines and not standalone_publish:
-             if dist.get_rank() == 0:
-                 logger.info("No updatable SGLang engines are running; skip weight update.")
-             return
-+        if standalone_publish and not rollout_engines and dist.get_rank() == 0:
-+            logger.info("No updatable SGLang engines are running; publishing a standalone disk delta.")
- 
-         if reconnect_rollout_engines:
-             self.wake_up()
-         elif self.args.offload_train:
-             reload_process_groups()
- 
--        if num_new_engines > 0 or reconnect_rollout_engines:
-+        if num_new_engines > 0 or reconnect_rollout_engines or (standalone_publish and not rollout_engines):
-             self.weight_updater.connect_rollout_engines(
-                 rollout_engines,
-                 rollout_engine_lock,
-diff --git a/slime/ray/rollout.py b/slime/ray/rollout.py
-index e57247f..864244a 100644
---- a/slime/ray/rollout.py
-+++ b/slime/ray/rollout.py
-@@ -38,6 +38,15 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
- logger = logging.getLogger(__name__)
- 
- 
-+def _should_start_rollout_servers(args) -> bool:
-+    """False when the run owns no rollout engines: --debug-train-only, or a standalone
-+    disk-delta publisher (--update-weight-standalone-publish with --rollout-num-gpus 0) whose
-+    rollouts come from an external service."""
-+    return not args.debug_train_only and not (
-+        getattr(args, "update_weight_standalone_publish", False) and args.rollout_num_gpus == 0
-+    )
-+
-+
- @ray.remote
- class RolloutManager:
-     """The class to run rollout and convert rollout data to training data."""
-@@ -49,8 +58,10 @@ class RolloutManager:
-         self.args = args
- 
-         rollout_init_handles: list[Any] = []
--        if self.args.debug_train_only:
-+        if not _should_start_rollout_servers(self.args):
-             self.servers: dict[str, Any] = {}
-+            if not self.args.debug_train_only:
-+                logger.info("Standalone disk-delta publish with zero rollout GPUs; skip SGLang router startup.")
-         else:
-             init_http_client(args)
-             self.servers, rollout_init_handles = start_rollout_servers(args, pg)
-diff --git a/slime/utils/arguments.py b/slime/utils/arguments.py
-index 1529c58..6058648 100644
 --- a/slime/utils/arguments.py
 +++ b/slime/utils/arguments.py
-@@ -140,6 +140,17 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
+@@ -149,6 +149,17 @@
+                     "Weight sync strategy. 'full' (default) broadcasts every parameter "
+                     "every sync. 'delta' diffs each sync against a pinned-CPU snapshot of the "
                      "previous one and ships only the changed bytes (disk transport only)."
-                 ),
-             )
++                ),
++            )
 +            parser.add_argument(
 +                "--update-weight-standalone-publish",
 +                action="store_true",
@@ -82,12 +22,10 @@ index 1529c58..6058648 100644
 +                    "with --rollout-num-gpus=0 and no external engines: the trainer owns no "
 +                    "inference engines and an external consumer (the post-write hook) ships each "
 +                    "delta, e.g. to a hot-load deployment. Bypasses the empty-engine early return."
-+                ),
-+            )
+                 ),
+             )
              parser.add_argument(
-                 "--update-weight-transport",
-                 choices=["nccl", "disk"],
-@@ -1946,6 +1957,12 @@ def slime_validate_args(args):
+@@ -2081,6 +2092,12 @@
  
      args.rollout_external = args.rollout_external_engine_addrs is not None
  
@@ -100,7 +38,7 @@ index 1529c58..6058648 100644
      if args.rollout_external and not args.debug_train_only:
          apply_external_engine_info_to_args(args, logger=logger)
  
-@@ -2096,6 +2113,13 @@ def slime_validate_args(args):
+@@ -2212,6 +2229,13 @@
      if args.only_train_params_name_list and args.freeze_params_name_list:
          raise ValueError("You can only specify ONE of: --only-train-params-name-list, or --freeze-params-name-list.")
  
@@ -114,7 +52,7 @@ index 1529c58..6058648 100644
      # disk-backed sync (full or delta) writes on the trainer and reads on the engines: needs a shared dir
      if args.update_weight_transport == "disk" and not args.update_weight_disk_dir:
          raise ValueError(
-@@ -2123,7 +2147,7 @@ def slime_validate_args(args):
+@@ -2239,7 +2263,7 @@
                  "weights via CUDA IPC (only a handle crosses processes), so the delta bookkeeping "
                  "(snapshot + diff + encode) is pure overhead."
              )
@@ -123,3 +61,44 @@ index 1529c58..6058648 100644
              raise ValueError(
                  "--update-weight-mode=delta requires --update-weight-local-checkpoint-dir "
                  "(a rollout-host-local NVMe directory)."
+--- a/slime/backends/megatron_utils/actor.py
++++ b/slime/backends/megatron_utils/actor.py
+@@ -646,18 +646,22 @@
+         ) = ray.get(self.rollout_manager.get_updatable_engines_and_lock.remote())
+ 
+         reconnect_rollout_engines = self.args.offload_train and self.args.use_critic and not self.args.colocate
+-
+-        if not rollout_engines and not reconnect_rollout_engines:
++        standalone_publish = self.args.update_weight_standalone_publish
++
++        if not rollout_engines and not reconnect_rollout_engines and not standalone_publish:
+             if dist.get_rank() == 0:
+                 logger.info("No updatable SGLang engines are running; skip weight update.")
+             return
++
++        if standalone_publish and not rollout_engines and dist.get_rank() == 0:
++            logger.info("No updatable SGLang engines are running; publishing a standalone disk delta.")
+ 
+         if reconnect_rollout_engines:
+             self.wake_up()
+         elif self.args.offload_train:
+             reload_process_groups()
+ 
+-        if num_new_engines > 0 or reconnect_rollout_engines:
++        if num_new_engines > 0 or reconnect_rollout_engines or (standalone_publish and not rollout_engines):
+             # A replacement trainer must reconnect even to surviving engines;
+             # their previous update groups belonged to the old trainer ranks.
+             self.weight_updater.connect_rollout_engines(
+--- a/slime/backends/sglang_utils/deployment.py
++++ b/slime/backends/sglang_utils/deployment.py
+@@ -78,6 +78,10 @@
+ 
+ def start_rollout_servers(args, pg) -> tuple[dict[str, Any], list[Any]]:
+     """Start configured rollout servers without waiting for final engine initialization."""
++    if getattr(args, "update_weight_standalone_publish", False) and args.rollout_num_gpus == 0:
++        logger.info("Standalone disk-delta publish with zero rollout GPUs; skip SGLang router startup.")
++        return {}, []
++
+     if args.rollout_external:
+         return start_external_rollout_servers(args, start_router=_start_router)
+ 

@@ -28,5 +28,5 @@ kubectl --context "$CTX" -n "$NS" create configmap "$KIT" \
   --from-file=coreweave_train.py="$HERE/../coreweave_train.py" \
   --from-file=launch.py="$HERE/../launch.py" \
   ${patches[@]+"${patches[@]}"} \
-  --dry-run=client -o yaml | kubectl --context "$CTX" apply -f -
+  --dry-run=client -o yaml | kubectl --context "$CTX" apply --server-side --field-manager=cwtrain-kit -f -
 echo "$KIT updated in $CTX/$NS with $(basename "$WHEEL")"
