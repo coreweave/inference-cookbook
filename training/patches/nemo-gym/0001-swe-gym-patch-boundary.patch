@@ -1,0 +1,1407 @@
+From 2d354c0ce4b0a3be38ad3c2d3c1cd87cd676806e Mon Sep 17 00:00:00 2001
+From: Anson Qian <1474346+anson627@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 15:21:30 -0500
+Subject: [PATCH] fix(swe-gym): validate patches before fresh-sandbox grading
+
+Signed-off-by: Anson Qian <1474346+anson627@users.noreply.github.com>
+---
+ resources_servers/swe_gym/README.md           | 127 ++++++
+ resources_servers/swe_gym/app.py              |  90 +++-
+ resources_servers/swe_gym/patch_policy.py     | 155 +++++++
+ resources_servers/swe_gym/patch_preflight.py  |  72 +++
+ resources_servers/swe_gym/tests/test_app.py   |  19 +-
+ .../swe_gym/tests/test_patch_policy.py        | 413 ++++++++++++++++++
+ .../swe_gym/tests/test_session_consumers.py   |  20 +-
+ .../swe_gym/tests/test_sessions.py            |   8 +-
+ resources_servers/swe_gym/verification.py     |  54 ++-
+ resources_servers/swebench/patch_capture.py   |  70 ++-
+ .../swebench/tests/test_patch_capture.py      |  20 +
+ 11 files changed, 1015 insertions(+), 33 deletions(-)
+ create mode 100644 resources_servers/swe_gym/patch_policy.py
+ create mode 100644 resources_servers/swe_gym/patch_preflight.py
+ create mode 100644 resources_servers/swe_gym/tests/test_patch_policy.py
+
+diff --git a/resources_servers/swe_gym/README.md b/resources_servers/swe_gym/README.md
+index df0f2c644..eb29ee109 100644
+--- a/resources_servers/swe_gym/README.md
++++ b/resources_servers/swe_gym/README.md
+@@ -115,3 +115,130 @@ after the Environment Server migration.
+ ```bash
+ gym env test --resources-server swe_gym
+ ```
++
++## Patch submission boundary
++
++Candidate patches pass a strict intake gate before a verifier sandbox is allocated.
++The limit is 1 MiB of UTF-8 text. Only canonical, unquoted ASCII paths and ordinary
++regular-file text hunks are accepted. The gate rejects traversal, mismatched file
++headers, duplicate sections, binary patches, renames/copies, symlinks, submodules,
++and mode-only changes. New and deleted regular files are supported. This narrower
++contract can reject previously accepted benchmark submissions; compare golden-patch
++coverage before using it to produce benchmark results.
++
++Edits to recognized test directories, `conftest.py`, pytest/build/environment
++configuration, Python startup hooks, and known grader/request/result filenames
++reject the **whole** submission. Paths in the trusted hidden-test patch are also
++protected, including files outside conventionally named test directories. This
++replaces the previous behavior of silently dropping candidate edits to hidden tests.
++The list of recognized names is a conservative gate, not a complete inventory of
++all files any project can use as grading inputs.
++
++The fresh verifier checks its HEAD against the trusted task's `base_commit` and
++checks every existing candidate path component with `lstat` before candidate code
++or the repository install step runs. Symlinks, dangling symlinks, directories used
++as file targets, and special files are refused. It applies the diff with `git apply
++--check` and `git apply`; the fuzzy `patch` fallback is removed. These checks require
++an audited task image with a trusted, clean working tree and no concurrent writer.
++The preflight uses an isolated Python interpreter so repository startup modules do
++not run during the check.
++
++The existing two-sandbox lifecycle is retained. Only the patch is captured from the
++agent; the verifier image, hidden tests, script, test lists, and grading authority
++come from the server/task definition. No agent environment, test tree, request,
++result file, or harness directory is copied into the verifier. The expected test
++outcomes stay in the resources server. A small preflight JSON contains only the
++trusted base commit and candidate paths.
++
++Malformed/oversized submissions receive `reward=0`, `evaluation_completed=True`,
++`mask_sample=False`, and `failure_kind=agent_invalid_output`. An unsafe path in the
++fresh verifier is likewise an attributable failed submission. Capture failures,
++wrong-base images, preflight failures, and provider errors are inconclusive and
++masked with `failure_kind=verifier_error`. Invalid **golden** patches are masked as
++verifier/data failures, rather than attributed to the policy. Provider-reported
++interruptions and ambiguous exit codes 124/137 are masked; this environment cannot
++reliably attribute them to the candidate. A nonzero test-process exit cannot earn
++credit from passing-looking log lines.
++
++Capture bounds the normal Git diff stream before provider transfer, disables Git
++external diff/textconv, checks returned patch size again on the server, and retains
++the existing capture deadline. The agent controls its executable/image state, so
++this is not a provider-enforced output quota; malicious output producers still
++need provider-side transport/output limits. `evaluation_timeout` must be positive
++and finite. The verifier receives a fallback TTL when none is configured. CPU,
++memory and disk ceilings remain the provider's responsibility; the shipped YAML
++already requests these. When absent from a verifier config, the request defaults
++to 2 CPUs, 4096 MiB memory and 8 GiB disk; null/nonpositive values are refused. Configure an isolated provider that enforces those limits.
++Session ownership, bounded retries, stop-on-close/shutdown, and retained handles
++when stop fails remain with the shared SWE sandbox-session implementation.
++
++### Security scope and remaining grading gap
++
++This is patch-boundary hardening, **not a claim of tamper-proof SWE verification**.
++In particular, candidate source code is executable: it can influence pytest from
++inside the test process, print forged test-status lines, or attempt to rewrite
++verifier files at runtime under the existing shared user identity. Filtering test
++filenames and creating a fresh sandbox cannot eliminate those attacks. The current
++log parser remains a grading trust limitation even after these changes. The strict
++expected-failure test `test_runtime_forged_success_remains_an_unclosed_grader_boundary`
++records a passing-looking stdout payload that the current grader still credits.
++It must stop being an expected failure when a stronger grading boundary is built.
++
++A complete stronger boundary needs a task-specific test architecture: keep the
++trusted controller and expected outputs outside candidate-controlled processes;
++run candidate operations through a restricted, resource-bounded interface with
++separate credentials/filesystem authority; compare observable outputs in the
++trusted controller. A separate UID or read-only tests alone cannot prevent Python
++code from monkeypatching assertions in its own test process. Do not describe this
++SWE implementation as satisfying that stronger guarantee. Do not run it with the
++`local` provider or with shared host mounts for untrusted submissions.
++
++This change does not alter agent-image hygiene or outbound network access. Those
++are separate controls. It also does not change search-only agents or their
++server-side judges.
++
++### Audit baseline and local checks
++
++The implementation was audited against upstream NeMo Gym
++`59d0b04f17cc5860e66bc51a35a7dcd8db0b1ebb`:
++
++- `nemo_gym/verification/sandbox_verification.py` already creates one sandbox per
++  call, delivers trusted files through `SandboxSpec.files`, uses a unique work
++  directory, applies resources/TTL/deadlines, checks process/provider errors,
++  validates the downloaded result, and attempts teardown in `finally`. It does not
++  isolate the runner from code it launches or protect its result from a shared UID.
++- `code_gen/sandbox_execution.py` and `competitive_coding_challenges/sandbox_evaluator.py`
++  already use that helper. Code-gen removes its expected-output-bearing request
++  file before execution; this does not make its in-process harness trustworthy
++  against arbitrary introspection or mutation by submitted Python.
++- SWE-Gym already uses a separate sandbox from the same task image and keeps hidden
++  tests out of the agent session. Its shared SWE sandbox-session implementation
++  owns retries and cleanup. Replacing that lifecycle with the generic helper would
++  duplicate infrastructure and disrupt session retry/cleanup behavior.
++- `terminal_multi_harness` grades tool-call action comparisons; it is not a SWE
++  workspace patch verifier.
++
++No provider implementation was added. No model/GPU rollout was run: these checks
++exercise local trusted fixtures and mocked provider/session boundaries. Before
++claiming rollout readiness, run representative model rollouts on a configured
++isolated provider and inspect the agent, patch, verifier logs and outcome fields.
++
++Local validation: 213 tests passed and one strict expected failure records the
++unclosed stdout-forgery boundary. Scoped pre-commit/Ruff checks passed; the private
++guardwords catalog was unavailable and its hook skipped that scan. Focused mypy
++could not start because the locked development environment lacks `pathspec`.
++No production-provider or model rollout claim is made.
++
++Run the focused regression suite from the Gym checkout:
++
++```bash
++pytest resources_servers/swe_gym/tests \
++  resources_servers/swebench/tests/test_patch_capture.py \
++  tests/unit_tests/verification/test_sandbox_verification.py
++```
++
++The malicious patch fixtures cover traversal, conflicting headers, oversized
++output, binary/special-file modes, grader/test/environment edits and trusted-tree
++symlinks. A real temporary Git repository exercises an ordinary patch captured from
++one workspace and applied to a separate trusted checkout. Session tests exercise
++hidden-file separation, retries, failed starts/stops, replay, and final teardown.
+diff --git a/resources_servers/swe_gym/app.py b/resources_servers/swe_gym/app.py
+index 5c8543ff7..d57e71068 100644
+--- a/resources_servers/swe_gym/app.py
++++ b/resources_servers/swe_gym/app.py
+@@ -38,11 +38,11 @@ from traceback import format_exc
+ from typing import Any
+ 
+ from fastapi import Request
+-from pydantic import BaseModel, ConfigDict
++from pydantic import BaseModel, ConfigDict, Field
+ 
+ from nemo_gym.client import SESSION_ID_KEY
+ from nemo_gym.config import get_global_config_dict
+-from nemo_gym.core import SESSION_LOST
++from nemo_gym.core import AGENT_INVALID_OUTPUT, SESSION_LOST, VERIFIER_ERROR
+ from nemo_gym.sandbox import (
+     AsyncSandbox,
+     SandboxResources,
+@@ -63,6 +63,12 @@ from nemo_gym.server_runtime import (
+     lost_session_verification,
+ )
+ from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
++from resources_servers.swe_gym.patch_policy import (
++    MAX_PATCH_BYTES,
++    PatchPolicyError,
++    trusted_test_paths,
++    validate_patch,
++)
+ from resources_servers.swe_gym.swebench_specs import spec_for
+ from resources_servers.swe_gym.verification import (
+     CONDA_ENV,
+@@ -71,14 +77,15 @@ from resources_servers.swe_gym.verification import (
+     VerificationResult,
+     as_list,
+     drop_patch_sections,
+-    drop_test_patch_files,
+     run_verification,
+     verification_files,
+ )
+ from resources_servers.swebench.anti_cheat import apply_anti_cheat_setup
+ from resources_servers.swebench.patch_capture import (
++    CaptureCommandError,
+     PatchCapture,
+     PatchCaptureMode,
++    PatchSizeError,
+     capture_model_patch,
+     prepare_git_for_commits,
+ )
+@@ -101,7 +108,7 @@ class SWEGymResourcesServerConfig(BaseResourcesServerConfig):
+     # "worktree" (diff of the working tree) or "committed" (committed work only); see swebench/patch_capture.py.
+     patch_capture_mode: PatchCaptureMode = "worktree"
+     include_model_patch_in_response: bool = True
+-    evaluation_timeout: int | None = 3600
++    evaluation_timeout: int = Field(default=3600, gt=0)
+     # A verdict-less run is retried on a fresh sandbox: an image pull or a flaky provider start
+     # is not evidence about the patch.
+     inconclusive_verification_retries: int = 1
+@@ -181,7 +188,7 @@ class SWEGymResourcesServer(SandboxSessionResourcesServer):
+             repo=body.repo,
+             version=str(body.version),
+             base_commit=body.base_commit,
+-            patch=drop_test_patch_files(patch, body.test_patch),
++            patch=patch,
+             test_patch=body.test_patch,
+             fail_to_pass=as_list(body.FAIL_TO_PASS),
+             pass_to_pass=as_list(body.PASS_TO_PASS),
+@@ -201,7 +208,12 @@ class SWEGymResourcesServer(SandboxSessionResourcesServer):
+ 
+         # Cap test parallelism to the CPU limit: a container sees the HOST core count, so pytest-xdist
+         # and BLAS fan out ~96 workers against a small quota and spend their time CFS-throttled.
+-        sandbox_resources = SandboxResources.from_mapping(self.config.sandbox_config.get("resources", {}))
++        resources = self.config.sandbox_config.get("resources", {})
++        if verifier_session_id is not None:
++            resources = {"cpu": 2, "memory_mib": 4096, "disk_gib": 8} | resources
++            if any(resources[key] is None or resources[key] <= 0 for key in ("cpu", "memory_mib", "disk_gib")):
++                raise ValueError("verifier CPU, memory and disk limits must be positive")
++        sandbox_resources = SandboxResources.from_mapping(resources)
+         env = dict(self.config.sandbox_config.get("env", {}))
+         if self.config.sandbox_config.get("derive_cpu_env", True):
+             env = cpu_cap_env(sandbox_resources.cpu) | env
+@@ -210,7 +222,12 @@ class SWEGymResourcesServer(SandboxSessionResourcesServer):
+         spec = SandboxSpec(
+             # The row names its own image; there is no repository template to apply.
+             image=body.image_name,
+-            ttl_s=self.config.sandbox_config.get("ttl_s"),
++            ttl_s=self.config.sandbox_config.get("ttl_s")
++            or (
++                (self.config.sandbox_config.get("ready_timeout_s") or 1200) + self.config.evaluation_timeout + 300
++                if verifier_session_id is not None
++                else None
++            ),
+             ready_timeout_s=self.config.sandbox_config.get("ready_timeout_s"),
+             workdir=REPO_DIRECTORY,
+             env=env,
+@@ -255,6 +272,7 @@ class SWEGymResourcesServer(SandboxSessionResourcesServer):
+             mode=self.config.patch_capture_mode,
+             pristine_untracked=self._session_id_to_pristine_untracked.get(session_id, frozenset()),
+             drop_sections=drop_patch_sections,
++            max_patch_bytes=MAX_PATCH_BYTES,
+         )
+ 
+     async def seed_session(
+@@ -357,6 +375,15 @@ class SWEGymResourcesServer(SandboxSessionResourcesServer):
+             async def capture_or_fallback() -> tuple[PatchCapture, str | None]:
+                 try:
+                     return await self._extract_model_patch(session_id, REPO_DIRECTORY, body.base_commit), None
++                except CaptureCommandError as exc:
++                    # The bounded diff command uses 91 only when Git itself failed.
++                    # Missing interpreters and provider failures remain inconclusive.
++                    if exc.error_type is None and exc.return_code == 91:
++                        return PatchCapture.static("", mode, "rejected"), str(exc)
++                    return PatchCapture.static("", mode, "none"), f"Failed to extract model patch: {exc}"
++                except PatchSizeError as exc:
++                    # Preserve the classified failure across session retries without transferring the patch.
++                    return PatchCapture.static("", mode, "rejected"), str(exc)
+                 except Exception as exc:
+                     return PatchCapture.static("", mode, "none"), f"Failed to extract model patch: {exc}"
+ 
+@@ -364,6 +391,46 @@ class SWEGymResourcesServer(SandboxSessionResourcesServer):
+             capture, extraction_error = await self.capture_task_sandbox_patch(session_id, capture_or_fallback)
+             await self.stop_task_sandbox_after_capture(session_id)
+         patch = capture.patch
++        try:
++            if capture.source == "rejected":
++                raise PatchPolicyError(extraction_error or "patch exceeds size limit")
++            # Check the complete declared submission before dropping any sections. Silently
++            # removing a test edit would hide an attributable tampering attempt.
++            validate_patch(patch, protected_paths=trusted_test_paths(body.test_patch))
++        except PatchPolicyError as exc:
++            return self._response(
++                body,
++                reward=0.0,
++                evaluation_completed=not self.config.is_verifying_golden_patch,
++                mask_sample=self.config.is_verifying_golden_patch,
++                failure_kind=VERIFIER_ERROR if self.config.is_verifying_golden_patch else AGENT_INVALID_OUTPUT,
++                failure_reason=str(exc),
++                resolved=False,
++                patch_applied=False,
++                test_results=None,
++                test_output="",
++                error=str(exc),
++                eval_sandbox_start_time_taken=0.0,
++                patch_verification_time_taken=0.0,
++                **capture.response_fields(False),
++            )
++        if extraction_error:
++            return self._response(
++                body,
++                reward=0.0,
++                evaluation_completed=False,
++                mask_sample=True,
++                failure_kind=VERIFIER_ERROR,
++                failure_reason=extraction_error,
++                resolved=False,
++                patch_applied=False,
++                test_results=None,
++                test_output="",
++                error=extraction_error,
++                eval_sandbox_start_time_taken=0.0,
++                patch_verification_time_taken=0.0,
++                **capture.response_fields(False),
++            )
+ 
+         # Resolve the spec before spending a sandbox: a (repo, version) without one can never be graded.
+         try:
+@@ -373,6 +440,9 @@ class SWEGymResourcesServer(SandboxSessionResourcesServer):
+                 body,
+                 reward=0.0,
+                 evaluation_completed=False,
++                mask_sample=True,
++                failure_kind=VERIFIER_ERROR,
++                failure_reason=str(exc),
+                 resolved=False,
+                 patch_applied=False,
+                 test_results=None,
+@@ -429,12 +499,18 @@ class SWEGymResourcesServer(SandboxSessionResourcesServer):
+                     flush=True,
+                 )
+ 
++        if self.config.is_verifying_golden_patch and result.failure_kind == AGENT_INVALID_OUTPUT:
++            result.completed = False
++
+         return self._response(
+             body,
+             # An unresolved-but-completed run is a real 0. An incomplete run is also 0, but
+             # evaluation_completed distinguishes them so a broken row is not read as a hard task.
+             reward=1.0 if result.resolved else 0.0,
+             evaluation_completed=result.completed,
++            mask_sample=not result.completed,
++            failure_kind=result.failure_kind if result.completed else VERIFIER_ERROR,
++            failure_reason=result.error if result.failure_kind or not result.completed else None,
+             resolved=result.resolved,
+             patch_applied=result.patch_applied,
+             test_results=result.test_results,
+diff --git a/resources_servers/swe_gym/patch_policy.py b/resources_servers/swe_gym/patch_policy.py
+new file mode 100644
+index 000000000..7c04107b7
+--- /dev/null
++++ b/resources_servers/swe_gym/patch_policy.py
+@@ -0,0 +1,155 @@
++# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++# SPDX-License-Identifier: Apache-2.0
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++# http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++"""Fail-closed intake of a small, regular-file-only Git text diff.
++
++This is a submission boundary, not a Python or pytest execution sandbox. The path
++checks run on the resources server, independently of the agent's Git executable.
++"""
++
++from __future__ import annotations
++
++import re
++from collections.abc import Iterable
++
++
++MAX_PATCH_BYTES = 1024 * 1024
++
++
++def trusted_test_paths(test_patch: str) -> set[str]:
++    """Paths in the trusted hidden-test patch, including tests outside named test directories."""
++    return {line[6:] for line in test_patch.splitlines() if line.startswith(("--- a/", "+++ b/"))}
++
++
++_PATH = re.compile(r"[A-Za-z0-9_./-]+")
++_HEADER = re.compile(r"diff --git a/(\S+) b/(\S+)")
++_HUNK = re.compile(r"@@ -(\d{1,9})(?:,(\d{1,9}))? \+(\d{1,9})(?:,(\d{1,9}))? @@(?: .*)?")
++_INDEX = re.compile(r"index [0-9a-f]+\.\.[0-9a-f]+(?: 100(?:644|755))?")
++_PROTECTED_PARTS = {"test", "tests", "testing", "__pycache__", "node_modules", "venv"}
++_PROTECTED_NAMES = {
++    "conftest.py",
++    "pytest.ini",
++    "tox.ini",
++    "setup.cfg",
++    "setup.py",
++    "pyproject.toml",
++    "sitecustomize.py",
++    "usercustomize.py",
++    "environment.yml",
++    "environment.yaml",
++    "sandbox_runner.py",
++    "request.json",
++    "result.json",
++    "Makefile",
++    "Dockerfile",
++}
++
++
++class PatchPolicyError(ValueError):
++    """The declared submission violates the patch contract (a scored policy failure)."""
++
++
++def validate_patch(patch: str, *, protected_paths: Iterable[str] = ()) -> tuple[str, ...]:
++    """Return changed paths, rejecting ambiguous headers, special files and grading inputs.
++
++    Only ordinary Git unified diffs with unquoted ASCII paths are accepted. Renames,
++    copies, mode-only edits, binary patches, symlinks and submodules are unsupported.
++    Reject the whole patch; never salvage a source edit from a tampering submission.
++    """
++    try:
++        size = len(patch.encode("utf-8", errors="strict"))
++    except UnicodeError as exc:
++        raise PatchPolicyError("patch must be UTF-8 text") from exc
++    if size > MAX_PATCH_BYTES:
++        raise PatchPolicyError(f"patch exceeds {MAX_PATCH_BYTES} bytes")
++    if "\x00" in patch or "\r" in patch:
++        raise PatchPolicyError("patch contains NUL or carriage returns")
++    if not patch:
++        return ()
++    if not patch.endswith("\n"):
++        raise PatchPolicyError("patch must end with a newline")
++    lines = patch.splitlines(keepends=True)
++    protected = frozenset(protected_paths)
++    paths: list[str] = []
++    seen: set[str] = set()
++    i = 0
++    while i < len(lines):
++        header = _HEADER.fullmatch(lines[i].removesuffix("\n"))
++        if not header or header[1] != header[2]:
++            raise PatchPolicyError("expected matching canonical diff --git paths")
++        path = header[1]
++        parts = path.split("/")
++        if (
++            not _PATH.fullmatch(path)
++            or path.startswith("/")
++            or len(path) > 4096
++            or any(len(part) > 255 for part in parts)
++            or any(part in {"", ".", ".."} or part.startswith(".") for part in parts)
++        ):
++            raise PatchPolicyError(f"unsafe patch path: {path!r}")
++        if (
++            path in protected
++            or any(p in _PROTECTED_PARTS for p in parts)
++            or parts[-1] in _PROTECTED_NAMES
++            or parts[-1].startswith(("test_", "requirements"))
++            or parts[-1].endswith(("_test.py", ".pth", ".pyc"))
++        ):
++            raise PatchPolicyError(f"protected grading or environment path: {path!r}")
++        if path in seen:
++            raise PatchPolicyError(f"duplicate patch path: {path!r}")
++        paths.append(path)
++        seen.add(path)
++        i += 1
++        change = None
++        if i < len(lines) and lines[i].startswith(("new file mode ", "deleted file mode ")):
++            mode = lines[i].strip()
++            if mode not in {
++                "new file mode 100644",
++                "new file mode 100755",
++                "deleted file mode 100644",
++                "deleted file mode 100755",
++            }:
++                raise PatchPolicyError("only regular file modes are allowed")
++            change = "new" if mode.startswith("new") else "deleted"
++            i += 1
++        if i < len(lines) and _INDEX.fullmatch(lines[i].removesuffix("\n")):
++            i += 1
++        old = "/dev/null" if change == "new" else f"a/{path}"
++        new = "/dev/null" if change == "deleted" else f"b/{path}"
++        if lines[i : i + 2] != [f"--- {old}\n", f"+++ {new}\n"]:
++            raise PatchPolicyError("missing or mismatched unified diff paths")
++        i += 2
++        hunks = 0
++        while i < len(lines) and lines[i].startswith("@@ "):
++            hunk = _HUNK.fullmatch(lines[i].removesuffix("\n"))
++            if not hunk:
++                raise PatchPolicyError("invalid hunk header")
++            remaining_old = int(hunk[2]) if hunk[2] is not None else 1
++            remaining_new = int(hunk[4]) if hunk[4] is not None else 1
++            i += 1
++            while remaining_old or remaining_new:
++                if i >= len(lines) or lines[i][0] not in " +-":
++                    raise PatchPolicyError("truncated hunk")
++                prefix = lines[i][0]
++                remaining_old -= prefix in " -"
++                remaining_new -= prefix in " +"
++                if remaining_old < 0 or remaining_new < 0:
++                    raise PatchPolicyError("hunk counts do not match content")
++                i += 1
++                if i < len(lines) and lines[i] == "\\ No newline at end of file\n":
++                    i += 1
++            hunks += 1
++        if not hunks:
++            raise PatchPolicyError("each file must contain a text hunk")
++    return tuple(paths)
+diff --git a/resources_servers/swe_gym/patch_preflight.py b/resources_servers/swe_gym/patch_preflight.py
+new file mode 100644
+index 000000000..b7b9d4a32
+--- /dev/null
++++ b/resources_servers/swe_gym/patch_preflight.py
+@@ -0,0 +1,72 @@
++# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++# SPDX-License-Identifier: Apache-2.0
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++# http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++"""Trusted, isolated-interpreter preflight in the fresh SWE-Gym verifier image.
++
++Run before any candidate code or repository install. The input is generated on the
++resources server, never copied from the agent workspace. No expected outputs belong here.
++"""
++
++from __future__ import annotations
++
++import json
++import stat
++import subprocess
++import sys
++from pathlib import Path
++
++
++EXIT_UNSAFE_PATH = 95
++EXIT_WRONG_BASE = 94
++
++
++def check_paths(repo: Path, paths: list[str]) -> None:
++    """Reject existing symlinks and special files along every validated candidate path."""
++    if repo.is_symlink() or not repo.is_dir():
++        raise ValueError("repository root must be a real directory")
++    for path in paths:
++        parts = path.split("/")
++        if not path or any(part in {"", ".", ".."} for part in parts) or path.startswith("/"):
++            raise ValueError("noncanonical candidate path")
++        current = repo
++        for index, part in enumerate(parts):
++            current = current / part
++            try:
++                mode = current.lstat().st_mode
++            except FileNotFoundError:
++                break
++            if stat.S_ISLNK(mode) or not (stat.S_ISDIR(mode) if index < len(parts) - 1 else stat.S_ISREG(mode)):
++                raise ValueError(f"candidate path crosses a symlink or special file: {path}")
++
++
++def main(path: Path) -> int:
++    request = json.loads(path.read_text(encoding="utf-8"))
++    repo = Path(request["repo"])
++    # The fresh image, not the agent's refs or working directory, is the source of authority.
++    head = subprocess.run(
++        ["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True, timeout=30, check=True
++    ).stdout.strip()
++    if head != request["base_commit"]:
++        print("fresh verifier image is not at the trusted task base", file=sys.stderr)
++        return EXIT_WRONG_BASE
++    try:
++        check_paths(repo, request["paths"])
++    except ValueError as exc:
++        print(str(exc), file=sys.stderr)
++        return EXIT_UNSAFE_PATH
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main(Path(sys.argv[1])))
+diff --git a/resources_servers/swe_gym/tests/test_app.py b/resources_servers/swe_gym/tests/test_app.py
+index 9d202a64e..7f5014c56 100644
+--- a/resources_servers/swe_gym/tests/test_app.py
++++ b/resources_servers/swe_gym/tests/test_app.py
+@@ -60,7 +60,11 @@ def _inputs(**overrides) -> VerificationInputs:
+         repo="getmoto/moto",
+         version="5.0",
+         base_commit="7f6c9cb1deafb280fe7fcc7551c38e397f11a706",  # pragma: allowlist secret
+-        patch="diff --git a/moto/dynamodb/models/dynamo_type.py b/moto/dynamodb/models/dynamo_type.py\n",
++        patch=(
++            "diff --git a/moto/dynamodb/models/dynamo_type.py b/moto/dynamodb/models/dynamo_type.py\n"
++            "--- a/moto/dynamodb/models/dynamo_type.py\n+++ b/moto/dynamodb/models/dynamo_type.py\n"
++            "@@ -1 +1 @@\n-old\n+new\n"
++        ),
+         test_patch="diff --git a/tests/test_dynamodb/test_update.py b/tests/test_dynamodb/test_update.py\n",
+         fail_to_pass=["tests/test_dynamodb/test_update.py::test_update_item_add_float"],
+         pass_to_pass=["tests/test_dynamodb/test_update.py::test_update_different_map_elements"],
+@@ -216,10 +220,10 @@ class TestBuildEvalScript:
+         assert f"conda activate testbed >/dev/null 2>&1 || exit {EXIT_NO_CONDA}" in script
+         assert f"cd /testbed || exit {EXIT_NO_REPO}" in script
+ 
+-    def test_applies_the_patch_strictly_with_the_harness_fallback(self) -> None:
++    def test_applies_the_patch_strictly_without_fuzzy_fallback(self) -> None:
+         script = build_eval_script(_inputs())
+-        assert "git apply -v /tmp/nemo_gym_patch.diff" in script
+-        assert "patch --batch --fuzz=5 -p1 -i /tmp/nemo_gym_patch.diff" in script
++        assert "git apply --check /tmp/nemo_gym_patch.diff" in script
++        assert "--fuzz" not in script
+         assert f"echo {PATCH_FAILED}" in script
+ 
+     def test_follows_the_swebench_recipe_in_order(self) -> None:
+@@ -255,7 +259,12 @@ class TestBuildEvalScript:
+ class TestVerificationFiles:
+     def test_ships_the_script_and_only_the_patches_that_exist(self) -> None:
+         files = verification_files(_inputs(test_patch=""))
+-        assert set(files) == {"/tmp/nemo_gym_eval.sh", "/tmp/nemo_gym_patch.diff"}
++        assert set(files) == {
++            "/tmp/nemo_gym_eval.sh",
++            "/tmp/nemo_gym_patch.diff",
++            "/tmp/nemo_gym_preflight.py",
++            "/tmp/nemo_gym_preflight.json",
++        }
+         files = verification_files(_inputs())
+         assert "/tmp/nemo_gym_test_patch.diff" in files
+ 
+diff --git a/resources_servers/swe_gym/tests/test_patch_policy.py b/resources_servers/swe_gym/tests/test_patch_policy.py
+new file mode 100644
+index 000000000..c3864cbc5
+--- /dev/null
++++ b/resources_servers/swe_gym/tests/test_patch_policy.py
+@@ -0,0 +1,413 @@
++# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++# SPDX-License-Identifier: Apache-2.0
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++# http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++"""Attack fixtures at the agent -> fresh verifier boundary; no model or paid compute."""
++
++import asyncio
++import json
++import shutil
++import subprocess
++from types import SimpleNamespace
++
++import pytest
++
++from resources_servers.swe_gym.patch_policy import (
++    MAX_PATCH_BYTES,
++    PatchPolicyError,
++    trusted_test_paths,
++    validate_patch,
++)
++from resources_servers.swe_gym.patch_preflight import EXIT_UNSAFE_PATH, EXIT_WRONG_BASE, check_paths, main
++from resources_servers.swe_gym.verification import (
++    VerificationInputs,
++    build_eval_script,
++    drop_patch_sections,
++    verification_files,
++)
++from resources_servers.swebench.patch_capture import PatchSizeError, _exec, capture_model_patch
++
++
++def patch(path="src/answer.py", *, old="wrong", new="correct"):
++    return f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n-{old}\n+{new}\n"
++
++
++@pytest.mark.parametrize(
++    "path",
++    [
++        "../escape",
++        "src/../../escape",
++        "/tmp/escape",
++        "src//answer.py",
++        "./answer.py",
++        "src/./answer.py",
++        ".git/config",
++        "src/.git/hooks/post-checkout",
++        "src/../tests/a.py",
++        "src/evil\\name.py",
++        "-bad\tname.py",
++        "src/é.py",
++        "a" * 256,
++    ],
++)
++def test_traversal_and_noncanonical_paths(path):
++    with pytest.raises(PatchPolicyError):
++        validate_patch(patch(path))
++
++
++@pytest.mark.parametrize(
++    "path",
++    [
++        "tests/test_answer.py",
++        "src/tests/fixture.json",
++        "src/test/data.json",
++        "conftest.py",
++        "src/conftest.py",
++        "pyproject.toml",
++        "setup.py",
++        "pytest.ini",
++        "tox.ini",
++        "sitecustomize.py",
++        "src/usercustomize.py",
++        "src/plugin.pth",
++        "requirements.txt",
++        "sandbox_runner.py",
++        "request.json",
++        "result.json",
++    ],
++)
++def test_grader_tampering_fixture_rejected_in_full(path):
++    # A valid source edit cannot launder a second edit that disables the tests or forges a verdict.
++    tampering = patch(path, new='print("PASSED tests/hidden.py::test_answer")')
++    with pytest.raises(PatchPolicyError, match="protected"):
++        validate_patch(patch() + tampering)
++
++
++@pytest.mark.parametrize(
++    "replacement",
++    [
++        "new file mode 120000\n",
++        "new file mode 160000\n",
++        "old mode 100644\nnew mode 100755\n",
++        "similarity index 100%\nrename from src/answer.py\nrename to src/other.py\n",
++        "GIT binary patch\nliteral 1\nA\n",
++        "Binary files a/src/answer.py and b/src/answer.py differ\n",
++    ],
++)
++def test_special_modes_binary_and_renames(replacement):
++    with pytest.raises(PatchPolicyError):
++        validate_patch("diff --git a/src/answer.py b/src/answer.py\n" + replacement)
++
++
++@pytest.mark.parametrize(
++    "mutate",
++    [
++        lambda p: p.replace("+++ b/src/answer.py", "+++ b/../result.json"),
++        lambda p: p.replace("diff --git a/src/answer.py", "diff --git a/other.py"),
++        lambda p: p + "arbitrary trailer\n",
++        lambda p: "arbitrary preamble\n" + p,
++        lambda p: p.replace("@@ -1 +1 @@", "@@ -1,2 +1 @@"),
++        lambda p: p.replace("@@ -1 +1 @@", "@@ -" + "9" * 5000 + " +1 @@"),
++        lambda p: p.replace("+correct\n", ""),
++        lambda p: p.replace("+correct", "+\x00correct"),
++        lambda p: p.replace("\n", "\r\n"),
++        lambda p: p[:-1],
++        lambda p: p + p,
++    ],
++)
++def test_malformed_and_ambiguous_diff(mutate):
++    with pytest.raises(PatchPolicyError):
++        validate_patch(mutate(patch()))
++
++
++def test_size_checked_before_parsing():
++    with pytest.raises(PatchPolicyError, match="exceeds"):
++        validate_patch("x" * (MAX_PATCH_BYTES + 1))
++    with pytest.raises(PatchPolicyError, match="UTF-8"):
++        validate_patch("\ud800")
++
++
++def test_valid_regular_file_diffs_and_hidden_tests_outside_test_directory():
++    assert validate_patch(patch()) == ("src/answer.py",)
++    assert validate_patch("") == ()
++    assert validate_patch(patch() + patch("src/helper.py")) == ("src/answer.py", "src/helper.py")
++    created = "diff --git a/src/new.py b/src/new.py\nnew file mode 100644\n--- /dev/null\n+++ b/src/new.py\n@@ -0,0 +1 @@\n+value = 1\n"
++    assert validate_patch(created) == ("src/new.py",)
++    deleted = "diff --git a/src/gone.py b/src/gone.py\ndeleted file mode 100644\n--- a/src/gone.py\n+++ /dev/null\n@@ -1 +0,0 @@\n-old\n"
++    assert validate_patch(deleted) == ("src/gone.py",)
++    assert validate_patch(patch().replace("-wrong\n", "-wrong\n\\ No newline at end of file\n"))
++    with pytest.raises(PatchPolicyError, match="protected"):
++        validate_patch(patch(), protected_paths=trusted_test_paths(patch()))
++
++
++@pytest.mark.parametrize("kind", ["leaf", "parent", "dangling", "directory", "fifo"])
++def test_trusted_verifier_tree_rejects_symlinks_and_special_files(tmp_path, kind):
++    import os
++
++    repo = tmp_path / "repo"
++    repo.mkdir()
++    target = tmp_path / "outside"
++    target.mkdir()
++    if kind == "parent":
++        (repo / "src").symlink_to(target, target_is_directory=True)
++    else:
++        (repo / "src").mkdir()
++        leaf = repo / "src/answer.py"
++        if kind in {"leaf", "dangling"}:
++            leaf.symlink_to(target / ("absent" if kind == "dangling" else "existing"))
++        elif kind == "directory":
++            leaf.mkdir()
++        else:
++            os.mkfifo(leaf)
++    with pytest.raises(ValueError, match="symlink or special"):
++        check_paths(repo, ["src/answer.py"])
++    assert list(target.iterdir()) == []
++
++
++class LocalCapture:
++    """Only for trusted local fixtures; deliberately not an execution sandbox."""
++
++    async def exec(self, command, *, timeout_s=30):
++        result = await asyncio.to_thread(subprocess.run, command, shell=True, capture_output=True, timeout=timeout_s)
++        return SimpleNamespace(
++            return_code=result.returncode,
++            error_type=None,
++            stdout=result.stdout.decode(errors="replace"),
++            stderr=result.stderr.decode(errors="replace"),
++        )
++
++
++@pytest.mark.skipif(shutil.which("git") is None, reason="git is required")
++async def test_valid_patch_from_agent_workspace_applies_only_to_fresh_trusted_base(tmp_path):
++    agent = tmp_path / "agent"
++    agent.mkdir()
++
++    def git(*args, cwd=agent):
++        return subprocess.run(
++            ["git", "-C", str(cwd), *args], check=True, capture_output=True, text=True
++        ).stdout.strip()
++
++    git("init", "-q")
++    git("config", "user.email", "test@example.com")
++    git("config", "user.name", "Test")
++    (agent / "src").mkdir()
++    (agent / "src/answer.py").write_text("wrong\n")
++    (agent / "tests").mkdir()
++    (agent / "tests/hidden.py").write_text("trusted test\n")
++    git("add", ".")
++    git("commit", "-qm", "base")
++    base = git("rev-parse", "HEAD")
++    fresh = tmp_path / "fresh"
++    subprocess.run(["git", "clone", "-q", str(agent), str(fresh)], check=True)
++    (agent / "src/answer.py").write_text("correct\n")
++    # Unrelated workspace artifacts are not transfer authority.
++    (agent / "request.json").write_text('{"reward": 1}')
++    capture = await capture_model_patch(
++        LocalCapture(),
++        str(agent),
++        base,
++        max_patch_bytes=MAX_PATCH_BYTES,
++        pristine_untracked={"request.json"},
++        drop_sections=drop_patch_sections,
++    )
++    paths = validate_patch(capture.patch)
++    check_paths(fresh, list(paths))
++    subprocess.run(["git", "-C", str(fresh), "apply", "-"], input=capture.patch, text=True, check=True)
++    assert (fresh / "src/answer.py").read_text() == "correct\n"
++    assert (fresh / "tests/hidden.py").read_text() == "trusted test\n"
++    assert not (fresh / "request.json").exists()
++
++
++async def test_capture_caps_bytes_before_provider_transfer():
++    with pytest.raises(PatchSizeError):
++        await _exec(LocalCapture(), "printf '123456789'", max_output_bytes=8)
++    assert (await _exec(LocalCapture(), "printf '12345678'", max_output_bytes=8)).stdout == "12345678"
++
++
++@pytest.mark.parametrize("code,error_type", [(90, None), (None, "timeout"), (91, None)])
++async def test_capture_size_failure_distinguished_from_exec_failure(code, error_type):
++    class Fake:
++        async def exec(self, *args, **kwargs):
++            return SimpleNamespace(return_code=code, error_type=error_type, stdout="", stderr="failed")
++
++    with pytest.raises(PatchSizeError if code == 90 else RuntimeError):
++        await _exec(Fake(), "git diff", max_output_bytes=8)
++
++
++def test_preflight_checks_trusted_base_and_runs_before_candidate_or_install(tmp_path):
++    repo = tmp_path / "repo"
++    repo.mkdir()
++    subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
++    subprocess.run(
++        [
++            "git",
++            "-C",
++            str(repo),
++            "-c",
++            "user.email=test@example.com",
++            "-c",
++            "user.name=Test",
++            "commit",
++            "--allow-empty",
++            "-qm",
++            "base",
++        ],
++        check=True,
++    )
++    base = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
++    request = tmp_path / "preflight.json"
++    request.write_text(json.dumps({"repo": str(repo), "base_commit": base, "paths": ["src/new.py"]}))
++    assert main(request) == 0
++    request.write_text(json.dumps({"repo": str(repo), "base_commit": "0" * 40, "paths": []}))
++    assert main(request) == EXIT_WRONG_BASE
++    (repo / "src").symlink_to(tmp_path)
++    request.write_text(json.dumps({"repo": str(repo), "base_commit": base, "paths": ["src/new.py"]}))
++    assert main(request) == EXIT_UNSAFE_PATH
++    inputs = VerificationInputs("fixture", "getmoto/moto", "5.0", base, patch())
++    script = build_eval_script(inputs)
++    assert script.index("python3 -I /tmp/nemo_gym_preflight.py") < script.index("git apply --check")
++    files = verification_files(inputs)
++    assert "fail_to_pass" not in files["/tmp/nemo_gym_preflight.json"]
++    assert "--fuzz" not in script
++
++
++@pytest.mark.parametrize(
++    "submission",
++    [patch("conftest.py"), patch("../escape"), "x" * (MAX_PATCH_BYTES + 1)],
++    ids=["grader-edit", "traversal", "oversized"],
++)
++def test_rejected_patch_is_scored_without_allocating_a_verifier(monkeypatch, submission):
++    from unittest.mock import AsyncMock
++
++    from fastapi.testclient import TestClient
++
++    import resources_servers.swe_gym.app as app
++    from resources_servers.swe_gym.tests.test_sessions import _VERIFY, _seed, _server
++    from resources_servers.swebench.patch_capture import PatchCapture
++
++    server, sandboxes = _server(monkeypatch)
++    monkeypatch.setattr(
++        app, "capture_model_patch", AsyncMock(return_value=PatchCapture.static(submission, "worktree", "worktree"))
++    )
++    with TestClient(server.setup_webserver()) as client:
++        assert client.post("/seed_session", json=_seed().model_dump(mode="json")).status_code == 200
++        response = client.post("/verify", json=_VERIFY)
++        assert response.status_code == 200
++        result = response.json()
++        assert result["evaluation_completed"] and not result["mask_sample"]
++        assert result["reward"] == 0 and result["failure_kind"] == "agent_invalid_output"
++        assert len(sandboxes) == 1 and sandboxes[0].stop.await_count == 1
++        app.run_verification.assert_not_awaited()
++
++
++async def test_failed_test_process_cannot_get_credit_from_pass_lines():
++    from resources_servers.swe_gym.verification import TEST_OUTPUT_BEGIN, TEST_OUTPUT_END, run_verification
++
++    class Fake:
++        async def exec(self, *args, **kwargs):
++            return SimpleNamespace(
++                return_code=1,
++                error_type=None,
++                stdout=f"{TEST_OUTPUT_BEGIN}\nPASSED src/test.py::test_hidden\n{TEST_OUTPUT_END}\n",
++                stderr="",
++            )
++
++    result = await run_verification(
++        Fake(),
++        VerificationInputs("fixture", "getmoto/moto", "5.0", "base", "", fail_to_pass=["src/test.py::test_hidden"]),
++    )
++    assert result.completed and not result.resolved
++
++
++@pytest.mark.parametrize(
++    "code,error_type", [(None, "timeout"), (0, "sandbox"), (124, None), (137, None), (93, None), (94, None)]
++)
++async def test_infrastructure_and_preflight_failures_never_score_pass_logs(code, error_type):
++    from resources_servers.swe_gym.verification import run_verification
++
++    class Fake:
++        async def exec(self, *args, **kwargs):
++            return SimpleNamespace(
++                return_code=code, error_type=error_type, stdout="PASSED src/test.py::test_hidden\n", stderr=""
++            )
++
++    result = await run_verification(
++        Fake(),
++        VerificationInputs("fixture", "getmoto/moto", "5.0", "base", "", fail_to_pass=["src/test.py::test_hidden"]),
++    )
++    assert not result.completed and not result.resolved
++
++
++@pytest.mark.parametrize("kind", ["size", "git", "provider"])
++def test_capture_failure_attribution_and_teardown(monkeypatch, kind):
++    from unittest.mock import AsyncMock
++
++    from fastapi.testclient import TestClient
++
++    import resources_servers.swe_gym.app as app
++    from resources_servers.swe_gym.tests.test_sessions import _VERIFY, _seed, _server
++    from resources_servers.swebench.patch_capture import CaptureCommandError
++
++    server, sandboxes = _server(monkeypatch)
++    error = (
++        PatchSizeError("too large")
++        if kind == "size"
++        else CaptureCommandError(
++            "capture failed",
++            return_code=91 if kind == "git" else None,
++            error_type=None if kind == "git" else "timeout",
++        )
++    )
++    monkeypatch.setattr(app, "capture_model_patch", AsyncMock(side_effect=error))
++    with TestClient(server.setup_webserver()) as client:
++        assert client.post("/seed_session", json=_seed().model_dump(mode="json")).status_code == 200
++        result = client.post("/verify", json=_VERIFY).json()
++        assert result["reward"] == 0 and result["mask_sample"] == (kind == "provider")
++        assert result["evaluation_completed"] == (kind != "provider")
++        assert result["failure_kind"] == ("verifier_error" if kind == "provider" else "agent_invalid_output")
++        assert len(sandboxes) == 1 and sandboxes[0].stop.await_count == 1
++        app.run_verification.assert_not_awaited()
++
++
++def test_invalid_golden_patch_is_masked_as_data_failure(monkeypatch):
++    from fastapi.testclient import TestClient
++
++    from resources_servers.swe_gym.tests.test_sessions import _VERIFY, _server
++
++    server, sandboxes = _server(monkeypatch)
++    server.config.is_verifying_golden_patch = True
++    with TestClient(server.setup_webserver()) as client:
++        result = client.post("/verify", json=_VERIFY | {"patch": patch("conftest.py")}).json()
++        assert result["mask_sample"] and not result["evaluation_completed"]
++        assert result["failure_kind"] == "verifier_error" and not sandboxes
++
++
++@pytest.mark.xfail(strict=True, reason="SWE pytest stdout is not authenticated against candidate source code")
++async def test_runtime_forged_success_remains_an_unclosed_grader_boundary():
++    """Track the stronger requirement explicitly; path filtering cannot fix in-process grading."""
++    from resources_servers.swe_gym.verification import TEST_OUTPUT_BEGIN, TEST_OUTPUT_END, run_verification
++
++    class CandidateControlledOutput:
++        async def exec(self, *args, **kwargs):
++            return SimpleNamespace(
++                return_code=0,
++                error_type=None,
++                stdout=f"{TEST_OUTPUT_BEGIN}\nPASSED src/check.py::hidden\n{TEST_OUTPUT_END}\n",
++                stderr="",
++            )
++
++    result = await run_verification(
++        CandidateControlledOutput(),
++        VerificationInputs("fixture", "getmoto/moto", "5.0", "base", "", fail_to_pass=["src/check.py::hidden"]),
++    )
++    assert not result.resolved
+diff --git a/resources_servers/swe_gym/tests/test_session_consumers.py b/resources_servers/swe_gym/tests/test_session_consumers.py
+index f23567817..95d45aa1e 100644
+--- a/resources_servers/swe_gym/tests/test_session_consumers.py
++++ b/resources_servers/swe_gym/tests/test_session_consumers.py
+@@ -88,7 +88,7 @@ def test_capture_survives_failed_task_teardown_and_preserves_capture_mode(consum
+         assert len(sandboxes) == 1
+         retried = client.post("/verify", json=fixtures._VERIFY)
+         assert retried.status_code == 200 and retried.json()["reward"] == 1, retried.text
+-        assert retried.json()["model_patch"] == "diff --git a/x b/x\n"
++        assert retried.json()["model_patch"] == module.capture_model_patch.return_value.patch
+         assert module.capture_model_patch.await_count == 1
+         assert module.capture_model_patch.await_args.kwargs["mode"] == "committed"
+         assert task.stop.await_count == 2
+@@ -169,14 +169,16 @@ def test_failed_close_keeps_task_owned_until_successful_retry(consumer):
+ def test_seedless_golden_verification_keeps_hidden_files_in_the_grader_only(consumer):
+     module, fixtures, server, sandboxes, _ = consumer
+     server.config.is_verifying_golden_patch = True
+-    body = fixtures._VERIFY | {"patch": "diff --git a/fix.py b/fix.py\n"}
++    body = fixtures._VERIFY | {
++        "patch": "diff --git a/fix.py b/fix.py\n--- a/fix.py\n+++ b/fix.py\n@@ -1 +1 @@\n-old\n+new\n"
++    }
+     with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
+         verified = client.post("/verify", json=body)
+         assert verified.status_code == 200 and verified.json()["reward"] == 1, verified.text
+         assert verified.json()["patch_source"] == "golden"
+         module.capture_model_patch.assert_not_awaited()
+         assert len(sandboxes) == 1
+-        assert "diff --git a/fix.py b/fix.py\n" in sandboxes[0].initial_files.values()
++        assert body["patch"] in sandboxes[0].initial_files.values()
+         sandboxes[0].stop.assert_awaited_once()
+ 
+ 
+@@ -356,7 +358,10 @@ def test_a_failed_task_stop_after_capture_keeps_an_episode_session_retryable_on_
+ 
+         retried = client.post("/verify", json=fixtures._VERIFY)
+         assert retried.status_code == 200, retried.text
+-        assert retried.json()["reward"] == 1.0 and retried.json()["model_patch"] == "diff --git a/x b/x\n"
++        assert (
++            retried.json()["reward"] == 1.0
++            and retried.json()["model_patch"] == module.capture_model_patch.return_value.patch
++        )
+         assert module.capture_model_patch.await_count == 1, "the retry reuses the saved patch"
+         assert sandboxes[0].stop.await_count == 2
+ 
+@@ -406,6 +411,13 @@ async def test_an_interrupted_grading_after_a_failed_extraction_grades_the_same_
+     await server.seed_session(request, episode_seed)
+     body = verify_type.model_validate(fixtures._VERIFY)
+ 
++    if module.__name__ == "resources_servers.swe_gym.app":
++        result = await server.verify(request, body)
++        assert result.mask_sample and not result.evaluation_completed
++        assert result.failure_kind == "verifier_error" and calls == 0
++        assert not server._session_id_to_sandbox
++        return
++
+     interrupted = asyncio.create_task(server.verify(request, body))
+     await grading_started.wait()
+     interrupted.cancel()
+diff --git a/resources_servers/swe_gym/tests/test_sessions.py b/resources_servers/swe_gym/tests/test_sessions.py
+index 182bd806c..84a25f28b 100644
+--- a/resources_servers/swe_gym/tests/test_sessions.py
++++ b/resources_servers/swe_gym/tests/test_sessions.py
+@@ -74,7 +74,11 @@ def _server(monkeypatch: MonkeyPatch) -> tuple[SWEGymResourcesServer, list[Magic
+     monkeypatch.setattr(
+         swe_gym_app,
+         "capture_model_patch",
+-        AsyncMock(return_value=PatchCapture.static("diff --git a/x b/x\n", "worktree", "worktree")),
++        AsyncMock(
++            return_value=PatchCapture.static(
++                "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n", "worktree", "worktree"
++            )
++        ),
+     )
+     monkeypatch.setattr(
+         swe_gym_app, "run_verification", AsyncMock(return_value=VerificationResult(True, True, True, {}, "ok"))
+@@ -116,7 +120,7 @@ def test_episode_session_hands_over_the_task_sandbox_grades_it_and_closes(monkey
+         verified = client.post("/verify", json=_VERIFY)
+         assert verified.status_code == 200, verified.text
+         assert verified.json()["reward"] == 1.0
+-        assert verified.json()["model_patch"] == "diff --git a/x b/x\n"
++        assert verified.json()["model_patch"] == "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n"
+         sandboxes[0].stop.assert_awaited_once()
+         repeated = client.post("/verify", json=_VERIFY)
+         assert repeated.status_code == 200 and repeated.json()["model_patch"] == verified.json()["model_patch"]
+diff --git a/resources_servers/swe_gym/verification.py b/resources_servers/swe_gym/verification.py
+index a11fb3582..36d591dd7 100644
+--- a/resources_servers/swe_gym/verification.py
++++ b/resources_servers/swe_gym/verification.py
+@@ -28,11 +28,15 @@ sandbox created for grading, so the held-out tests and the golden patch never si
+ from __future__ import annotations
+ 
+ import asyncio
++import json
+ import shlex
+ from dataclasses import dataclass, field
+ from pathlib import Path
+ from typing import Any, Iterable, Sequence
+ 
++from nemo_gym.core import AGENT_INVALID_OUTPUT
++from resources_servers.swe_gym.patch_policy import trusted_test_paths, validate_patch
++from resources_servers.swe_gym.patch_preflight import EXIT_UNSAFE_PATH, EXIT_WRONG_BASE
+ from resources_servers.swe_gym.swebench_specs import (
+     PASSING_STATUSES,
+     normalize_test_id,
+@@ -55,6 +59,7 @@ TEST_PATCH_FAILED = "___NEMO_GYM_SWE_GYM_TEST_PATCH_FAILED___"
+ # verdicts (evaluation incomplete), never a 0 for the patch.
+ EXIT_NO_REPO = 97
+ EXIT_NO_CONDA = 96
++EXIT_PREFLIGHT_FAILED = 93
+ 
+ 
+ def as_list(value: Any) -> list[str]:
+@@ -96,6 +101,7 @@ class VerificationResult:
+     test_output: str
+     error: str | None = None
+     test_patch_failed: bool = False
++    failure_kind: str | None = None
+ 
+ 
+ def patch_section_path(section: str) -> str | None:
+@@ -142,7 +148,7 @@ def _sections(patch: str) -> list[str]:
+ def build_eval_script(inputs: VerificationInputs) -> str:
+     """The SWE-bench eval recipe as one bash script, run from a sandbox created for grading.
+ 
+-    The candidate patch is applied strictly (``git apply`` then ``patch --fuzz=5`` as the harness does);
++    The candidate patch is applied strictly with ``git apply``;
+     a patch that does not apply is a real verdict about the patch, reported through ``PATCH_FAILED``
+     rather than by exiting, so the caller still gets the log. The install step is advisory (``set +e``)
+     because on a prebuilt image it mostly re-confirms what is already there.
+@@ -157,11 +163,9 @@ def build_eval_script(inputs: VerificationInputs) -> str:
+     apply_patch = ""
+     if inputs.patch.strip():
+         apply_patch = (
+-            "if ! git apply -v /tmp/nemo_gym_patch.diff; then\n"
+-            "    if ! patch --batch --fuzz=5 -p1 -i /tmp/nemo_gym_patch.diff; then\n"
+-            f"        echo {PATCH_FAILED}\n"
+-            "        exit 0\n"
+-            "    fi\n"
++            "if ! git apply --check /tmp/nemo_gym_patch.diff || ! git apply /tmp/nemo_gym_patch.diff; then\n"
++            f"    echo {PATCH_FAILED}\n"
++            "    exit 0\n"
+             "fi"
+         )
+     apply_test_patch = ""
+@@ -177,6 +181,13 @@ source /opt/miniconda3/bin/activate >/dev/null 2>&1 || exit {EXIT_NO_CONDA}
+ conda activate {CONDA_ENV} >/dev/null 2>&1 || exit {EXIT_NO_CONDA}
+ cd {REPO_DIRECTORY} || exit {EXIT_NO_REPO}
+ git config --global --add safe.directory {REPO_DIRECTORY} >/dev/null 2>&1
++python3 -I /tmp/nemo_gym_preflight.py /tmp/nemo_gym_preflight.json
++__preflight_exit=$?
++case $__preflight_exit in
++    0) ;;
++    {EXIT_UNSAFE_PATH}|{EXIT_WRONG_BASE}) exit $__preflight_exit ;;
++    *) exit {EXIT_PREFLIGHT_FAILED} ;;
++esac
+ {eval_commands}
+ git -c core.fileMode=false status --short | head -20
+ 
+@@ -233,7 +244,14 @@ def grade(statuses: dict[str, str], fail_to_pass: Iterable[str], pass_to_pass: I
+ 
+ def verification_files(inputs: VerificationInputs) -> dict[str, str]:
+     """Files the grading sandbox is created with (one provider round trip, large patches included)."""
+-    files = {"/tmp/nemo_gym_eval.sh": build_eval_script(inputs)}
++    paths = validate_patch(inputs.patch, protected_paths=trusted_test_paths(inputs.test_patch))
++    files = {
++        "/tmp/nemo_gym_eval.sh": build_eval_script(inputs),
++        "/tmp/nemo_gym_preflight.py": Path(__file__).with_name("patch_preflight.py").read_text(encoding="utf-8"),
++        "/tmp/nemo_gym_preflight.json": json.dumps(
++            {"repo": REPO_DIRECTORY, "base_commit": inputs.base_commit, "paths": paths}
++        ),
++    }
+     if inputs.patch.strip():
+         files["/tmp/nemo_gym_patch.diff"] = inputs.patch
+     if inputs.test_patch.strip():
+@@ -262,20 +280,38 @@ async def run_verification(
+ 
+         await asyncio.to_thread(_persist_log)
+ 
++    if getattr(result, "error_type", None) is not None or result.return_code in {None, 124, 137}:
++        return VerificationResult(False, False, False, None, output, "provider did not report a process exit")
++    if result.return_code == EXIT_UNSAFE_PATH:
++        return VerificationResult(
++            True,
++            False,
++            False,
++            None,
++            output,
++            "patch targets a symlink or special file",
++            failure_kind=AGENT_INVALID_OUTPUT,
++        )
++    if result.return_code == EXIT_PREFLIGHT_FAILED:
++        return VerificationResult(False, False, False, None, output, "trusted patch preflight failed")
++    if result.return_code == EXIT_WRONG_BASE:
++        return VerificationResult(False, False, False, None, output, "verifier image does not match task base")
+     if result.return_code == EXIT_NO_REPO:
+         return VerificationResult(False, False, False, None, output, f"{REPO_DIRECTORY} is not present in the image")
+     if result.return_code == EXIT_NO_CONDA:
+         return VerificationResult(False, False, False, None, output, f"conda env {CONDA_ENV!r} missing in the image")
+     if PATCH_FAILED in output:
+         # A verdict, not an infrastructure fault: the patch does not apply to base_commit.
+-        return VerificationResult(True, False, False, None, output, "patch does not apply")
++        return VerificationResult(
++            True, False, False, None, output, "patch does not apply", failure_kind=AGENT_INVALID_OUTPUT
++        )
+ 
+     statuses = await asyncio.to_thread(parse_log_pytest, slice_test_output(output))
+     report = grade(statuses, inputs.fail_to_pass, inputs.pass_to_pass)
+     test_patch_failed = TEST_PATCH_FAILED in output
+     return VerificationResult(
+         completed=not test_patch_failed,
+-        resolved=bool(report["resolved"]) and not test_patch_failed,
++        resolved=bool(report["resolved"]) and not test_patch_failed and result.return_code == 0,
+         patch_applied=True,
+         test_results=report,
+         test_output=output,
+diff --git a/resources_servers/swebench/patch_capture.py b/resources_servers/swebench/patch_capture.py
+index f7670e367..c518899e0 100644
+--- a/resources_servers/swebench/patch_capture.py
++++ b/resources_servers/swebench/patch_capture.py
+@@ -196,8 +196,44 @@ class CaptureCommandError(RuntimeError):
+         self.error_type = error_type
+ 
+ 
+-async def _exec(sandbox: Any, command: str, *, timeout_s: int = 300) -> Any:
++class PatchSizeError(ValueError):
++    """The agent produced more patch bytes than the declared submission limit."""
++
++
++# Limit bytes before the provider sends stdout to the resources server. This command
++# runs in the untrusted agent sandbox; the verifier MUST independently validate it.
++_BOUNDED_CAPTURE = """
++import os, signal, subprocess, sys
++p = subprocess.Popen(["bash", "-c", sys.argv[1]], stdout=subprocess.PIPE,
++                     stderr=subprocess.DEVNULL, start_new_session=True)
++try:
++    output = p.stdout.read(int(sys.argv[2]) + 1)
++    if len(output) > int(sys.argv[2]):
++        sys.exit(90)
++    code = p.wait()
++    if code:
++        sys.exit(91)
++    sys.stdout.buffer.write(output)
++finally:
++    try:
++        os.killpg(p.pid, signal.SIGKILL)
++    except ProcessLookupError:
++        pass
++    except PermissionError:
++        # Some execution backends permit killing a child but not a process group.
++        # The owning session must still stop the sandbox after capture.
++        p.kill()
++    p.wait()
++"""
++
++
++async def _exec(sandbox: Any, command: str, *, timeout_s: int = 300, max_output_bytes: int | None = None) -> Any:
++    if max_output_bytes is not None:
++        command = f"python3 -I -c {shlex.quote(_BOUNDED_CAPTURE)} {shlex.quote(command)} {max_output_bytes}"
+     result = await sandbox.exec(command, timeout_s=timeout_s)
++    if max_output_bytes is not None and getattr(result, "error_type", None) is None:
++        if result.return_code == 90 or len((result.stdout or "").encode("utf-8")) > max_output_bytes:
++            raise PatchSizeError(f"patch exceeds {max_output_bytes} bytes")
+     if result.return_code != 0 or getattr(result, "error_type", None) is not None:
+         raise CaptureCommandError(
+             result.stderr or result.stdout or f"exit {result.return_code}",
+@@ -215,14 +251,25 @@ async def capture_model_patch(
+     mode: str = "worktree",
+     pristine_untracked: frozenset[str] | set[str] = frozenset(),
+     drop_sections: Callable[[str, Iterable[str]], str] | None = None,
++    *,
++    max_patch_bytes: int | None = None,
+ ) -> PatchCapture:
+     """Capture the agent's patch from its sandbox per ``mode``. ``drop_sections(patch, paths)``
+     strips files that were already untracked before the agent started. Raises ``CaptureCommandError``
+-    (a ``RuntimeError``) when git fails; an agent that left nothing yields an empty patch."""
++    (a ``RuntimeError``) when git fails; an agent that left nothing yields an empty patch.
++    ``max_patch_bytes`` bounds each diff stream and raises ``PatchSizeError`` if the
++    selected submission exceeds it. Oversized diagnostics do not discard a valid
++    selected patch. Other capture output and provider transport quotas are separate.
++    """
+     if mode not in PATCH_CAPTURE_MODES:
+         raise ValueError(f"unknown patch_capture_mode {mode!r}; expected one of {PATCH_CAPTURE_MODES}")
+     started = time()
+     wd, base = shlex.quote(workdir), shlex.quote(base_commit)
++    diff_command = f"git -C {wd} --no-pager diff"
++    if max_patch_bytes is not None:
++        if max_patch_bytes <= 0:
++            raise ValueError("max_patch_bytes must be positive")
++        diff_command += " --no-ext-diff --no-textconv --no-renames"
+     cap = PatchCapture(patch="", mode=mode, source="none", base_commit=base_commit)
+ 
+     def _clean(patch: str) -> str:
+@@ -248,16 +295,27 @@ async def capture_model_patch(
+         cap.tip_commit, cap.branch, cap.commits = tip.sha, tip.ref, tip.commits_since_base
+         if not tip.is_descendant:
+             cap.warnings.append(f"tip {tip.sha[:12]} ({tip.ref}) does not descend from base; history was rewritten")
+-        diff = await _exec(sandbox, f"git -C {wd} --no-pager diff {base} {shlex.quote(tip.sha)}")
+-        committed_patch = drop_sections_under(_clean(diff.stdout or ""), pristine_dirs)
++        try:
++            diff = await _exec(
++                sandbox, f"{diff_command} {base} {shlex.quote(tip.sha)}", max_output_bytes=max_patch_bytes
++            )
++            committed_patch = drop_sections_under(_clean(diff.stdout or ""), pristine_dirs)
++        except PatchSizeError:
++            if mode == "committed":
++                raise
++            cap.warnings.append("committed diff exceeded size limit (diagnostic only)")
+     cap.committed_patch_bytes = len(committed_patch.encode("utf-8", errors="replace"))
+ 
+     # Working tree vs base; intent-to-add so new files appear. Diagnostic only in `committed` mode,
+     # so a failure there must not throw away a committed patch that was already captured.
+     try:
+-        diff = await _exec(sandbox, f"git -C {wd} add -N . && git -C {wd} --no-pager diff {base}")
++        diff = await _exec(
++            sandbox,
++            f"git -C {wd} add -N . && {diff_command} {base}",
++            max_output_bytes=max_patch_bytes,
++        )
+         worktree_patch = _clean(diff.stdout or "")
+-    except RuntimeError as exc:
++    except (RuntimeError, PatchSizeError) as exc:
+         if mode == "committed" and tip is not None:
+             worktree_patch = ""
+             cap.warnings.append(f"worktree diff failed (diagnostic only): {exc}")
+diff --git a/resources_servers/swebench/tests/test_patch_capture.py b/resources_servers/swebench/tests/test_patch_capture.py
+index 19eaac74c..80d08a7dc 100644
+--- a/resources_servers/swebench/tests/test_patch_capture.py
++++ b/resources_servers/swebench/tests/test_patch_capture.py
+@@ -253,3 +253,23 @@ def test_response_fields_are_minimal_and_gate_the_patch():
+     }
+     assert cap.response_fields(include_patch=True)["model_patch"] == "x" * 10
+     assert PatchCapture.static("p", "worktree", "golden").response_fields(True)["patch_source"] == "golden"
++
++
++@pytest.mark.parametrize("mode", ["worktree", "committed"])
++async def test_bounded_capture_ignores_oversized_diagnostic_diff(mode):
++    sb = _FakeSandbox(
++        listing=_listing(("fix", C2, 1, 1), head=C2),
++        committed_diff="ok" if mode == "committed" else "too big",
++        worktree_diff="ok" if mode == "worktree" else "too big",
++    )
++    cap = await capture_model_patch(sb, "/testbed", BASE, mode=mode, max_patch_bytes=2)
++    assert cap.patch == "ok" and cap.warnings
++
++
++@pytest.mark.parametrize("mode", ["worktree", "committed"])
++async def test_bounded_capture_rejects_oversized_selected_diff(mode):
++    from resources_servers.swebench.patch_capture import PatchSizeError
++
++    sb = _FakeSandbox(listing=_listing(("fix", C2, 1, 1), head=C2), committed_diff="too big", worktree_diff="too big")
++    with pytest.raises(PatchSizeError):
++        await capture_model_patch(sb, "/testbed", BASE, mode=mode, max_patch_bytes=2)
