@@ -329,3 +329,64 @@ def test_actor_rejects_a_secret_for_a_missing_field(custom, tmp_path):
     initial = dict(gym, policy_base_url=["https://example.test/v1"], policy_model_name="m")
     with pytest.raises(ValueError, match="judge_model is missing"):
         actor_config(initial, {})
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"evaluation_completed": False},
+        {"agent_error": "provider failed"},
+        {"_ng_no_persist": True},
+        {"mask_sample": "false"},
+    ],
+)
+def test_rejects_inconclusive_or_inconsistent_gym_outcomes(fields):
+    from cwtrain.integrations.nemo_rl.gym import validate_training_output
+
+    result = {
+        "response": {
+            "output": [
+                {
+                    "prompt_token_ids": [0],
+                    "generation_token_ids": [1],
+                    "generation_log_probs": [-0.1],
+                }
+            ]
+        },
+        **fields,
+    }
+    with pytest.raises(ValueError, match="mask"):
+        validate_training_output(result)
+
+
+@pytest.mark.parametrize("top_level, legacy", [(True, True), (True, False), (False, True)])
+def test_masked_gym_outcome_with_real_tokens_is_preserved(top_level, legacy):
+    from cwtrain.integrations.nemo_rl.gym import validate_training_output
+
+    result = {
+        "reward": 0.0,
+        "failure_kind": "provider_unavailable",
+        "evaluation_completed": False,
+        "mask_sample": top_level,
+        "instance_config": {"mask_sample": legacy, "other": "preserved"},
+        "response": {
+            "output": [
+                {
+                    "prompt_token_ids": [0],
+                    "generation_token_ids": [1],
+                    "generation_log_probs": [-0.1],
+                }
+            ]
+        },
+    }
+    validate_training_output(result)
+    assert result["mask_sample"] and result["instance_config"]["mask_sample"]
+    result["response"]["output"] = []
+    with pytest.raises(ValueError, match="no trainable tokens"):
+        validate_training_output(result)
+
+
+def test_gym_training_cannot_disable_environment_failure_masks(config):
+    config["env"]["should_mask_flagged_samples"] = False
+    with pytest.raises(ValueError, match="should_mask_flagged_samples"):
+        prepare_config(config, rows=[])

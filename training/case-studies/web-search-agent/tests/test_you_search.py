@@ -85,7 +85,7 @@ def test_search_returns_tavily_shaped_results_without_excluded_domains():
     assert params["query"] == "q" and params["count"] == "3" and params["livecrawl"] == "web"
 
 
-def test_extract_splits_fetched_and_failed_pages():
+def test_partial_failed_browsing_preserves_successful_pages():
     def handler(request):
         assert request.url.path == "/v1/contents"
         return httpx.Response(
@@ -96,9 +96,48 @@ def test_extract_splits_fetched_and_failed_pages():
             ],
         )
 
-    result = asyncio.run(client_for(handler).extract(urls=["a", "b"], query="hint"))
+    result = asyncio.run(
+        client_for(handler).extract(
+            urls=["https://example.com/a", "https://example.com/b", "https://example.com/c"],
+        )
+    )
     assert result["results"] == [{"url": "https://example.com/a", "raw_content": "text"}]
-    assert [r["url"] for r in result["failed_results"]] == ["https://example.com/b"]
+    assert result["failed_results"] == [{"url": "https://example.com/b", "raw_content": ""}]
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_auth_rejection_invokes_fatal_handler_without_raw_response(status):
+    calls = []
+    rejected = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(status, json={"error": "PRIVATE_PROVIDER_RESPONSE"})
+
+    with pytest.raises(PermissionError, match=f"HTTP {status}") as error:
+        asyncio.run(client_for(handler, abort_on_auth=rejected.append).search("q"))
+
+    assert len(calls) == 1
+    assert rejected == [status]
+    assert "PRIVATE_PROVIDER_RESPONSE" not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "item",
+    [
+        {},
+        {"url": " "},
+        {"url": "https://example.com", "snippets": "Paris"},
+        {"url": "https://example.com", "snippets": ["Paris", 1]},
+    ],
+)
+def test_malformed_search_entries_are_provider_failures(item):
+    def handler(request):
+        return httpx.Response(200, json={"results": {"web": [item]}})
+
+    with pytest.raises(you_search.SearchProviderError) as error:
+        asyncio.run(client_for(handler).search("q"))
+    assert error.value.failure_kind == "search:provider_response_invalid"
 
 
 def test_retries_rate_limits_but_not_bad_requests(monkeypatch):
@@ -118,7 +157,7 @@ def test_retries_rate_limits_but_not_bad_requests(monkeypatch):
         calls.append(request)
         return httpx.Response(401, json={"error": "bad key"})
 
-    with pytest.raises(httpx.HTTPStatusError):
+    with pytest.raises(PermissionError):
         asyncio.run(client_for(bad).search("q"))
     assert len(calls) == 1
 
@@ -149,7 +188,11 @@ def test_install_copies_a_self_contained_entrypoint(tmp_path):
     harness = tmp_path / you_search.HARNESS
     harness.mkdir(parents=True)
     (harness / "app.py").write_text("")
+    agent = tmp_path / "responses_api_agents" / "browsecomp_agent"
+    agent.mkdir(parents=True)
+    (agent / "app.py").write_text("")
     target = you_search.install(tmp_path)
+    assert (agent / "you_search.py").read_text() == target.read_text()
     assert target.name == "you_search.py"
     source = target.read_text()
     # The harness venv has no cwtrain, so the copy must not import it.

@@ -58,11 +58,34 @@ These guards leave these gaps:
   guarantee that the judge will resist every injection.
 - The web is live, so new copies of the questions keep appearing. A dated, frozen search index
   would close this gap and would also make runs repeatable.
-- A failed `browse` call returns its error to the agent as text. A You.com outage during browsing
-  can therefore score 0 instead of failing the rollout. A failed `search` call fails the rollout,
-  except when You.com rejects the query itself (400 or 422, which it returns for some long
-  queries). The agent then sees `Search failed`, as it would from Tavily, and can search again.
 - Neither config turns on the harness's `bash_command` tool (Gym v0.6.0 and later, with
   `workspace: per_session`), so the agent cannot run code. Without code it cannot, for example,
   decrypt BrowseComp's published CSV.
 
+## Verification and failure handling
+
+The shared Gym agent and resources server keep the question and reference bound to a trusted
+session. Policy requests exclude arbitrary metadata and opaque resume state. Verification
+returns the rollout, verdict and operational fields without echoing reference answers or judge
+inputs/outputs. The process-local session cache holds at most 8,192 sessions for up to one hour.
+Verification fails closed on expiry or eviction. Restart a task in a fresh session after state loss.
+
+| Event | Handling |
+| --- | --- |
+| Incorrect or malformed answer | Completed, reward 0 |
+| Missing/empty pages, rejected requests (400/422), or filtered results | Ordinary feedback or empty evidence |
+| Search API credentials rejected (401/403) | Fail fast using Gym's fatal key handler |
+| Provider outage, exhausted 429s, or malformed responses | Mask the rollout across resets and verification retries |
+| Judge failure or unparseable verdict | Mask this verdict and allow verification of the same rollout again |
+| Agent failure | Mask and record the exception class without exposing its message |
+
+The trainer normalizes Gym's two mask fields before token conversion. Its synchronous GRPO
+path excludes masked rewards from the prompt-group baseline and standard deviation as well as
+the sample's own loss. Tokenless rollouts still surface as an error. CLI and W&B reports publish
+scored-only mean reward, scored and masked task counts, and `correct_over_attempted` across
+recorded rollouts. Gym sidecar failures count once unless the retry produced a main result.
+The CLI report exits nonzero if no tasks could be scored.
+
+The verification boundary assumes trusted dataset construction and seed/verify routes.
+A cached evaluation can reuse completed outcomes. Partial trajectories without server state require
+a fresh rollout.

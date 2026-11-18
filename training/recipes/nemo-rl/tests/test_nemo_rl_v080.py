@@ -229,3 +229,72 @@ def test_span_timer_accepts_actual_v080_timer_options(monkeypatch):
     timer.start("generation", should_log=False)
     timer.stop("generation", should_log=False)
     assert timer.pop_spans().keys() == {"timeline/rollout/start", "timeline/rollout/end"}
+
+
+def test_pinned_rollout_mask_propagation_uses_verifier_legacy_field(patched):
+    # Execute the pinned trainer's implementation rather than a parallel mask adapter.
+    scope = {
+        "torch": SimpleNamespace(tensor=lambda flags, **_: flags, bool=bool),
+        "MASK_SAMPLE": "mask_sample",
+    }
+    execute([function(patched, "nemo_rl/experience/rollouts.py", "_mask_sample_flags")], scope)
+    assert scope["_mask_sample_flags"](
+        [
+            {"reward": 1, "mask_sample": False, "instance_config": {"mask_sample": False}},
+            {"reward": 0, "mask_sample": True, "instance_config": {"mask_sample": True}},
+        ]
+    ) == [False, True]
+    # A top-level-only flag is lost by this version; the cookbook guard rejects that shape.
+    assert scope["_mask_sample_flags"]([{"mask_sample": True}]) == [False]
+
+
+def test_masked_gym_reward_cannot_change_sibling_advantages(patched):
+    torch = pytest.importorskip("torch")
+    upstream = Path(SOURCE)
+    grpo_path = "nemo_rl/algorithms/grpo.py"
+    estimator_path = upstream / "nemo_rl/algorithms/advantage_estimator.py"
+    estimator = next(
+        node
+        for node in ast.parse(estimator_path.read_text()).body
+        if isinstance(node, ast.ClassDef) and node.name == "GRPOAdvantageEstimator"
+    )
+    train = function(patched, grpo_path, "_grpo_train_impl")
+    assignment = next(
+        node
+        for node in ast.walk(train)
+        if isinstance(node, ast.Assign)
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Attribute)
+        and node.value.func.attr == "compute_advantage"
+    )
+    scope = {"torch": torch}
+    execute(
+        [
+            function(
+                upstream, "nemo_rl/algorithms/utils.py", "calculate_baseline_and_std_per_prompt"
+            ),
+            estimator,
+            function(patched, grpo_path, "_valid_reward_mask"),
+        ],
+        scope,
+    )
+    adv_estimator = scope["GRPOAdvantageEstimator"](
+        SimpleNamespace(use_leave_one_out_baseline=True, normalize_rewards=True), None
+    )
+    prompts = torch.ones((4, 1), dtype=torch.long)
+    rewards = torch.tensor([1.0, 0.0, 0.5, 0.0])
+    mask = torch.ones((4, 1))
+    mask[-1] = 0
+    train_data = {"prev_logprobs": None}
+    scope.update(
+        adv_estimator=adv_estimator,
+        prompt_ids_for_adv=prompts,
+        rewards=rewards,
+        mask=mask,
+        repeated_batch={"mask_sample": [False, False, False, True]},
+        train_data=train_data,
+    )
+    execute([assignment], scope)
+    expected = adv_estimator.compute_advantage(prompts[:3], rewards[:3], mask[:3])
+    torch.testing.assert_close(train_data["advantages"][:3], expected)
+    assert not torch.allclose(adv_estimator.compute_advantage(prompts, rewards, mask)[:3], expected)

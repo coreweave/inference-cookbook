@@ -7,6 +7,9 @@ GitHub. Versions follow [Semantic Versioning](https://semver.org/).
 
 - Initialize and reset the hot-load mirror from numbered full snapshots, including Slime 0.4.0’s first publication.
 
+- **Gym reward integrity:** normalize top-level and legacy sample masks and reject unmasked inconclusive rollouts before NeMo-RL token conversion; refuse configs
+  that disable exclusion of environment-flagged samples.
+
 - **NeMo-RL v0.8.0:** the recipe pins the release container with Gym v0.7.0 and Ray 2.58.0,
   ports its backend and Gym patches, and uses the renamed AutoModel config and worker.
   Checkpoint export preserves stored tensor dtypes and phase timing supports the new Timer API.

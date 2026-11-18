@@ -397,7 +397,7 @@ The study's settings for the recipe's
   You.com keys from `GYM_SECRET`.
 - Gym's BrowseComp harness calls Tavily. The kit carries the evaluation's
   [`you_search.py`](eval/you_search.py), and the config's
-  `coreweave_files` copies it into the harness, which runs it as its entrypoint. It serves the
+  `coreweave_files` copies it into both the harness and agent directories as their entrypoint. It serves the
   same `search` and `browse` tools from the You.com Search API (with live-crawled page text) and
   Contents API. The harness's page handling stays unchanged. The adapter drops
   results that quote the benchmarks and validates the final answer before grading it
@@ -431,6 +431,11 @@ See [reward guards](eval/reward-guards.md) for the contract, filter behavior, va
 Regenerate training data and rerun evaluation preparation after updating the answer contract;
 compare scores only between runs using the same grading rules. The filters can miss unnamed
 answer-key mirrors, and semantic manipulation still depends on the LLM judge following its rules.
+
+Verification keeps reference answers private, masks provider and judge failures, and reports both
+scored-only reward and the fraction of all attempts scored correct. See
+[verification and failure handling](eval/reward-guards.md#verification-and-failure-handling).
+
 
 ## Evaluation
 
@@ -587,7 +592,9 @@ IDs and log-probs.
 A completed run has one trajectory with a reward per task. A reward of 1 means that the judge found
 the final `Exact Answer:` equivalent to the ground truth. A zero reward can mean a wrong answer, or a
 trajectory that ran out of turns or context; it does not mean a connection error. Read the tool
-calls and the judge's response before you interpret the mean. The judge's input holds only the
+calls and the server-side judge logs before you interpret the mean. Inspect
+`mask_sample`, `evaluation_completed` and `failure_kind` first: masked outcomes have
+a placeholder zero and are excluded from Gym quality metrics. The judge's input holds only the
 final `Exact Answer:` line ([Guarding the reward](#guarding-the-reward)). Count the dropped
 contaminated results with `grep -c '\[browsecomp\]\[contamination\]'` over the eval pod's log, or the trainer's for training. A count
 that grows from one checkpoint to the next means the policy is learning to look for the answer key.

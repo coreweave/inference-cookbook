@@ -136,9 +136,15 @@ def test_prepared_eval_keeps_tasks_but_uses_the_training_tools(tmp_path, monkeyp
     recipe = Path(launch.RECIPE)
     monkeypatch.setattr(launch, "RECIPE", recipe.parent)
     rows = [
-        {"question": "q1", "ground_truth": "a1", "extra": 7,
-         "responses_create_params": {"input": [{"role": "system", "content": "Use bash"}],
-                                     "tools": [{"name": "bash_command"}]}},
+        {
+            "question": "q1",
+            "ground_truth": "a1",
+            "extra": 7,
+            "responses_create_params": {
+                "input": [{"role": "system", "content": "Use bash"}],
+                "tools": [{"name": "bash_command"}],
+            },
+        },
         {"question": "q2", "ground_truth": "a2", "responses_create_params": {}},
     ]
     original = copy.deepcopy(rows)
@@ -257,7 +263,10 @@ ROWS = [
         "_ng_task_index": 9,
         "reward": 0.0,
         "response": {
-            "output": [{"type": "function_call", "name": "search"}, {"type": "function_call_output"}]
+            "output": [
+                {"type": "function_call", "name": "search"},
+                {"type": "function_call_output"},
+            ]
             * 3
         },
     },
@@ -279,8 +288,8 @@ def test_scores_count_tool_calls_and_the_turn_cap():
     assert [t["turns"] for t in tasks] == [1, 3]
     assert [t["reached_turn_cap"] for t in tasks] == [False, True]
     assert summary == {
-        "tasks": 2, "mean_reward": 0.5, "correct": 1, "tasks_at_turn_cap": 1,
-        "mean_tool_calls": 2.0,
+        "tasks": 2, "scored_tasks": 2, "masked_tasks": 0, "mean_reward": 0.5, "correct": 1, "tasks_at_turn_cap": 1,
+        "mean_tool_calls": 2.0, "correct_over_attempted": 0.5,
     }  # fmt: skip
 
 
@@ -306,7 +315,7 @@ def test_the_report_prints_the_scores_and_leaves_wandb_alone(monkeypatch, capsys
     assert out == [
         "task=7 reward=1.0 tool_calls=1",
         "task=9 reward=0.0 tool_calls=3",
-        "tasks=2 mean_reward=0.500",
+        "tasks=2 scored_tasks=2 masked_tasks=0 mean_reward=0.500 correct_over_attempted=0.5",
     ]
 
 
@@ -382,3 +391,58 @@ def test_the_eval_job_takes_the_wandb_key_from_an_optional_secret():
     assert "WANDB_GROUP=${RUN_ID:-}" in example
     script = (K8S / "run-eval.sh").read_text()
     assert "launch.py report" in script and "WANDB_API_KEY" in script
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        {"mask_sample": True, "failure_kind": "provider_unavailable"},
+        {"instance_config": {"mask_sample": True}},
+        {"evaluation_completed": False},
+        {"agent_error": "legacy provider failure"},
+        {"_ng_no_persist": True},
+    ],
+)
+def test_report_excludes_failed_evidence_including_cached_legacy_rows(failure, capsys):
+    rows = [{"reward": 1.0}, {"reward": 0.0, **failure}]
+    tasks, summary = launch.scores(rows, max_steps=3)
+    assert summary["tasks"] == 2 and summary["scored_tasks"] == 1 and summary["masked_tasks"] == 1
+    assert summary["mean_reward"] == 1.0 and summary["correct"] == 1
+    assert summary["correct_over_attempted"] == 0.5
+    assert tasks[1]["reward"] is None and tasks[1]["mask_sample"]
+    launch.report(rows, report_args(), {})
+    assert "reward=excluded" in capsys.readouterr().out
+
+
+def test_no_measured_eval_tasks_is_unavailable_rather_than_zero(capsys):
+    summary = launch.report([{"reward": 0, "mask_sample": True}], report_args(), {})
+    assert summary["mean_reward"] is None and summary["scored_tasks"] == 0
+    assert "mean_reward=unavailable" in capsys.readouterr().out
+
+
+def test_cli_report_fails_when_all_tasks_are_masked(monkeypatch, tmp_path, capsys):
+    path = tmp_path / "all-masked.jsonl"
+    path.write_text(json.dumps({"reward": 0.0, "mask_sample": True}) + "\n")
+    monkeypatch.setattr(sys, "argv", ["launch.py", "report", "--output", str(path)])
+    monkeypatch.setattr(launch, "wandb_settings", lambda _: None)
+    with pytest.raises(SystemExit) as result:
+        launch.main()
+    assert result.value.code == 1
+    output = capsys.readouterr()
+    assert "correct_over_attempted=0.0" in output.out
+    assert "No evaluation tasks could be scored" in output.err
+
+
+def test_report_counts_sidecar_only_failures_once(tmp_path):
+    path = tmp_path / "browsecomp.jsonl"
+    path.write_text('{"_ng_task_index": 1, "_ng_rollout_index": 0, "reward": 1}\n')
+    sidecar = tmp_path / "browsecomp_failures.jsonl"
+    sidecar.write_text(
+        '{"_ng_task_index": 1, "_ng_rollout_index": 0, "failure_kind": "judge_failed"}\n'
+        '{"_ng_task_index": 2, "_ng_rollout_index": 0, "failure_kind": "judge_failed"}\n'
+        '{"_ng_task_index": 2, "_ng_rollout_index": 0, "failure_kind": "provider_unavailable"}\n'
+    )
+    tasks, summary = launch.scores(launch.report_rows(path), max_steps=3)
+    assert [task["task"] for task in tasks] == [1, 2]
+    assert tasks[1]["failure_kind"] == "provider_unavailable"
+    assert summary["correct_over_attempted"] == 0.5

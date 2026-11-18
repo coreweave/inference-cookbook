@@ -1,0 +1,60 @@
+--- a/nemo_rl/algorithms/grpo.py
++++ b/nemo_rl/algorithms/grpo.py
+@@ -2600,6 +2600,14 @@
+     return train_data
+
+
++def _valid_reward_mask(repeated_batch, rewards):
++    # Exclude environment-masked rows from sibling baselines as well as their own loss.
++    if "mask_sample" not in repeated_batch:
++        return torch.ones_like(rewards)
++    masked = torch.as_tensor(repeated_batch["mask_sample"], dtype=torch.bool, device=rewards.device)
++    return (~masked).to(rewards.dtype)
++
++
+ def _apply_mask_sample_filter(repeated_batch: BatchedDataDict[DatumSpec]) -> int:
+     """Zero loss_multiplier where mask_sample is True and return the count."""
+     if "mask_sample" not in repeated_batch:
+@@ -3528,6 +3536,7 @@
+                 ):
+                     # Extract rewards from final_batch
+                     rewards = repeated_batch["total_reward"]
++                    valid_reward_mask = _valid_reward_mask(repeated_batch, rewards)
+
+                     print("▶ Computing advantages...", flush=True)
+                     # For DAPO with reward shaping, compute std on the raw
+@@ -3545,7 +3554,7 @@
+                         calculate_trivial_reward_distributions(
+                             input_ids,
+                             std_rewards if std_rewards is not None else rewards,
+-                            torch.ones_like(rewards),
++                            valid_reward_mask,
+                         )
+                         if master_config.grpo.use_dynamic_sampling
+                         else None
+@@ -3561,7 +3570,7 @@
+                         ) = calculate_baseline_and_std_per_prompt(
+                             input_ids.cuda(device_id),
+                             rewards.cuda(device_id),
+-                            torch.ones_like(rewards).cuda(device_id),
++                            valid_reward_mask.cuda(device_id),
+                             leave_one_out_baseline=master_config.grpo.use_leave_one_out_baseline,
+                             std_rewards=(
+                                 std_rewards.cuda(device_id)
+@@ -3579,7 +3588,7 @@
+                         ) = calculate_baseline_and_std_per_prompt(
+                             input_ids,
+                             rewards,
+-                            torch.ones_like(rewards),
++                            valid_reward_mask,
+                             leave_one_out_baseline=master_config.grpo.use_leave_one_out_baseline,
+                             std_rewards=std_rewards,
+                         )
+@@ -3846,6 +3855,7 @@
+                         prompt_ids=prompt_ids_for_adv,
+                         rewards=rewards,
+                         mask=mask,
++                        valid_mask=_valid_reward_mask(repeated_batch, rewards),
+                         repeated_batch=repeated_batch,
+                         logprobs_policy=train_data["prev_logprobs"],
+                         logprobs_reference=train_data.get("reference_policy_logprobs"),

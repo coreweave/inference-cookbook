@@ -81,6 +81,8 @@ def prepare_config(config: dict[str, Any], *, rows=None) -> dict[str, Any]:
         return config
     if config["grpo"].get("async_grpo", {}).get("enabled"):
         raise ValueError("CoreWeave Gym requires synchronous GRPO to preserve the refit barrier")
+    if config["env"].get("should_mask_flagged_samples") is False:
+        raise ValueError("CoreWeave Gym requires env.should_mask_flagged_samples=true")
     cw = generation["coreweave_cfg"]
     if cw.get("api_key"):
         raise ValueError("Gym training requires api_key_file, not a key in the logged config")
@@ -259,13 +261,34 @@ def _set_field(config: dict[str, Any], dotted: str, value: Any) -> None:
     node[leaf] = value
 
 
-def validate_training_output(result: Mapping[str, Any]) -> None:
-    """Check Gym's training metadata before loss masks are built.
+def validate_training_output(result: dict[str, Any]) -> None:
+    """Normalize Gym outcome masks and check token metadata before loss masks are built.
 
     Raises:
-        ValueError: Token IDs or log-probs are missing or misaligned, a turn does not keep the
-            previous turn's tokens as its prefix, or there are no generated tokens.
+        ValueError: Outcome masks are malformed or an inconclusive result is unmasked;
+            token IDs/log-probs are missing or misaligned; a turn changes its token prefix;
+            or no tokens were generated. Masking never fabricates trainable tokens.
     """
+    masked = result.get("mask_sample", False)
+    instance = result.get("instance_config")
+    if instance is None:
+        instance = {}
+    if not isinstance(masked, bool) or not isinstance(instance, Mapping):
+        raise ValueError("Gym outcome must carry boolean mask_sample and object instance_config")
+    legacy_mask = instance.get("mask_sample", False)
+    if not isinstance(legacy_mask, bool):
+        raise ValueError("Gym instance_config.mask_sample must be boolean")
+    masked = masked or legacy_mask
+    if masked:
+        result["mask_sample"] = True
+        result["instance_config"] = dict(instance, mask_sample=True)
+    inconclusive = (
+        result.get("evaluation_completed") is False
+        or result.get("agent_error")
+        or result.get("_ng_no_persist")
+    )
+    if inconclusive and not masked:
+        raise ValueError("Inconclusive Gym rollout must be masked before training")
     generated = 0
     previous: list[int] = []
     for item in result["response"]["output"]:

@@ -14,13 +14,15 @@ checks complete provider results before shortening search or page text (``contam
 The judge sees only one validated ``Exact Answer:``
 (``judged_answer``), encoded as data under a separate grading system instruction.
 
-``install`` copies this file into the harness directory. A server whose ``entrypoint`` is
-``you_search.py`` swaps its Tavily clients for You.com clients, one per key in its
-``tavily_api_key`` setting. ``launch.py start`` installs it for the evaluation. For training,
-the case study ships it in the NeMo-RL kit, and grpo_search_agent.yaml's ``coreweave_files``
-copies it the same way. The copy runs in the harness's own venv, which has neither cwtrain
-nor the case study's files, so this module imports only the standard library and httpx,
-which the harness already uses.
+``install`` copies this file into the resources server and agent directories. Both use
+``you_search.py`` as their entrypoint. Provider failures stay in server-side verification
+state; final outcomes include Gym's mask fields without reference answers or judge material.
+The agent strips arbitrary request metadata and normalizes its outer error handler to a
+masked outcome. Existing judge-prompt/answer-contract behavior is unchanged.
+
+``launch.py start`` installs the copies for evaluation; training ships the same file in
+its kit through ``coreweave_files``. Client-only use needs only stdlib/httpx; server factories
+load Gym/FastAPI lazily in their own venv, without importing cwtrain.
 """
 
 from __future__ import annotations
@@ -29,9 +31,12 @@ import asyncio
 import json
 import os
 import re
-from collections.abc import Iterable, Mapping, Sequence
+from collections import OrderedDict
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from contextvars import ContextVar
 from pathlib import Path
-from typing import Any
+from time import monotonic
+from typing import Any, get_type_hints
 from urllib.parse import urlparse
 
 BASE_URL = "https://ydc-index.io/v1"
@@ -40,14 +45,12 @@ ENTRYPOINT = "you_search.py"
 # Characters kept of each result's page text and snippets; unset or 0 keeps all of it. A smaller
 # cap fits more tool calls into a trajectory's tokens.
 MAX_CHARS_ENV = "YOU_SEARCH_MAX_CHARS"
-# Retry rate limits and server errors; a 4xx other than 429 is the request's fault.
+# Retry rate limits and server errors. Only explicit 400/422 request rejections are policy feedback.
 RETRY_STATUS = frozenset({429, 500, 502, 503, 504})
 # A request You.com rejects for its content, such as a query it finds too long (422). The agent
 # wrote it, so the harness shows the agent "Search failed" instead of failing the rollout. Any other
 # error, such as a bad key (401), still fails the rollout: it is not the agent's fault.
 REJECTED_STATUS = frozenset({400, 422})
-# Characters of You.com's error that the agent sees.
-REJECTION_CHARS = 300
 
 try:
     # The error the harness catches from its Tavily client and shows the agent.
@@ -132,6 +135,76 @@ def hardened_judge_template(upstream: str) -> str:
     if not marker:
         raise ValueError("unsupported Gym judge template: ordered grading rules missing")
     return _JUDGE_DATA_TEMPLATE + rules
+
+
+# Gym sessions are process-local and only trusted seed requests can create one.
+_VERIFICATION_TTL_SECONDS = 3600
+_MAX_VERIFICATION_SESSIONS = 8192
+_SEEDED_SESSION_KEY = "cwtrain_search_seeded"
+
+
+class _VerificationState:
+    # Bound only by the trusted /seed_session request, never tool arguments.
+    def __init__(self, question: str | None = None, ground_truth: str | None = None) -> None:
+        self.expires_at = monotonic() + _VERIFICATION_TTL_SECONDS
+        self.question = question
+        self.ground_truth = ground_truth
+        self.failure_kind: str | None = None
+
+
+_ACTIVE_STATE: ContextVar[_VerificationState | None] = ContextVar(
+    "search_verification", default=None
+)
+
+
+class SearchProviderError(RuntimeError):
+    """Provider evidence was unavailable, without exposing private response data."""
+
+    def __init__(self, failure_kind: str) -> None:
+        super().__init__("Search evidence is unavailable")
+        self.failure_kind = failure_kind
+        state = _ACTIVE_STATE.get()
+        if state is not None and state.failure_kind is None:
+            state.failure_kind = failure_kind
+
+
+def policy_params(params: Any) -> dict[str, Any]:
+    """Use Gym's strict public request schema, removing sideband metadata and opaque state.
+
+    References already live outside responses_create_params. Gym rejects unknown
+    request fields; preserve its supported generation fields instead of inventing
+    another request schema. Metadata is arbitrary, unlike the typed messages.
+    """
+    raw = params.model_dump(exclude_none=True)
+    raw.pop("metadata", None)
+    if any(raw.get(key) for key in ("previous_response_id", "conversation", "prompt")):
+        raise ValueError("search requires explicit messages, not opaque resumed model state")
+    if isinstance(raw.get("input"), list) and any(
+        item.get("role") not in {"system", "developer", "user"} for item in raw["input"]
+    ):
+        raise ValueError("resuming a search trajectory requires trusted verification state")
+    return raw
+
+
+def _masked_fields(failure_kind: str) -> dict[str, Any]:
+    return {
+        "reward": 0.0,
+        "evaluation_completed": False,
+        "mask_sample": True,
+        "instance_config": {"mask_sample": True},
+        "failure_kind": failure_kind,
+        "failure_reason": "Search verification was inconclusive",
+    }
+
+
+def _bind_endpoints(cls: type, base: type, **overrides: dict[str, Any]) -> None:
+    # This factory also supports client-only tests without importing Gym. FastAPI
+    # needs real annotation objects from the supplied pinned harness, not strings
+    # resolved against this standalone module's globals.
+    for name, endpoint_types in overrides.items():
+        original = getattr(base, name, None)
+        if original is not None:
+            getattr(cls, name).__annotations__ = get_type_hints(original) | endpoint_types
 
 
 def excluded(url: str, domains: Iterable[str]) -> bool:
@@ -249,6 +322,7 @@ class YouSearchClient:
         base_url: The You.com API root.
         timeout: Seconds per HTTP request.
         attempts: Tries per call for rate limits, server errors and connection errors.
+        abort_on_auth: Runtime fatal handler for a rejected search key.
         client: An ``httpx.AsyncClient`` to use instead of creating one (for tests).
     """
 
@@ -259,6 +333,7 @@ class YouSearchClient:
         timeout: float = 60.0,
         attempts: int = 4,
         client: Any = None,
+        abort_on_auth: Callable[[int], None] | None = None,
     ) -> None:
         if not api_key or not api_key.strip():
             raise ValueError("You.com search requires a nonempty API key")
@@ -271,6 +346,7 @@ class YouSearchClient:
                 timeout=timeout,
             )
         self._client = client
+        self._abort_on_auth = abort_on_auth
         self._attempts = max(1, attempts)
 
     async def _call(self, method: str, path: str, **kwargs: Any) -> Any:
@@ -282,16 +358,32 @@ class YouSearchClient:
                 response = await self._client.request(method, path, **kwargs)
             except httpx.TransportError:
                 if last:
-                    raise
+                    raise SearchProviderError("provider_unavailable") from None
             else:
+                if response.status_code in (401, 403):
+                    if self._abort_on_auth is not None:
+                        self._abort_on_auth(response.status_code)
+                    raise PermissionError(
+                        f"You.com rejected the search API key (HTTP {response.status_code})"
+                    )
                 if response.status_code in REJECTED_STATUS:
+                    # Raw errors can echo credentials, request metadata or internal URLs.
                     raise BadRequestError(
-                        f"You.com rejected the request ({response.status_code}): "
-                        f"{response.text[:REJECTION_CHARS]}"
+                        f"You.com rejected the request ({response.status_code}); "
+                        "revise the query or URLs"
                     )
                 if response.status_code not in RETRY_STATUS or last:
-                    response.raise_for_status()
-                    return response.json()
+                    if response.status_code >= 400:
+                        kind = (
+                            "provider_quota_exhausted"
+                            if response.status_code == 429
+                            else "provider_unavailable"
+                        )
+                        raise SearchProviderError(kind)
+                    try:
+                        return response.json()
+                    except ValueError:
+                        raise SearchProviderError("search:provider_response_invalid") from None
             await asyncio.sleep(0.5 * 2**attempt)
         raise AssertionError("unreachable")
 
@@ -308,31 +400,75 @@ class YouSearchClient:
         if include_raw_content:
             params.update(livecrawl="web", livecrawl_formats="markdown")
         payload = await self._call("GET", "/search", params=params)
-        return {
-            "query": query,
-            "results": search_results(payload, exclude_domains or ()),
-        }
+        if (
+            not isinstance(payload, dict)
+            or not isinstance(payload.get("results"), dict)
+            or not isinstance(payload["results"].get("web", []), list)
+        ):
+            raise SearchProviderError("search:provider_response_invalid")
+        for item in payload["results"].get("web", []):
+            if (
+                not isinstance(item, dict)
+                or not isinstance(item.get("url"), str)
+                or not item["url"].strip()
+            ):
+                raise SearchProviderError("search:provider_response_invalid")
+            snippets = item.get("snippets")
+            if snippets is not None and (
+                not isinstance(snippets, list)
+                or any(not isinstance(snippet, str) for snippet in snippets)
+            ):
+                raise SearchProviderError("search:provider_response_invalid")
+        try:
+            results = search_results(payload, exclude_domains or ())
+        except (TypeError, AttributeError, ValueError):
+            raise SearchProviderError("search:provider_response_invalid") from None
+        return {"query": query, "results": results}
 
     async def extract(self, urls: Sequence[str], **_: Any) -> dict[str, Any]:
         """Fetch the pages' markdown. Tavily's ``query`` hint is ignored."""
         payload = await self._call(
             "POST", "/contents", json={"urls": list(urls), "formats": ["markdown"]}
         )
-        results, failed = contents_results(payload)
+        items = (
+            payload
+            if isinstance(payload, list)
+            else payload.get("results")
+            if isinstance(payload, dict)
+            else None
+        )
+        if not isinstance(items, list) or any(not isinstance(item, dict) for item in items):
+            raise SearchProviderError("search:provider_response_invalid")
+        for item in items:
+            if any(
+                item.get(field) is not None and not isinstance(item[field], str)
+                for field in ("url", "markdown")
+            ):
+                raise SearchProviderError("search:provider_response_invalid")
+            if item.get("markdown") and not (item.get("url") or "").strip():
+                raise SearchProviderError("search:provider_response_invalid")
+        # Individual fetch failures are normal live-web behavior. Successful pages remain usable
+        # even when the provider omits a failed page or reports a different URL after redirection.
+        results, failed = contents_results(items)
         return {"results": results, "failed_results": failed}
 
 
 def install(gym_root: Path) -> Path:
-    """Copy this module into Gym's BrowseComp harness as its You.com entrypoint.
+    """Copy the resources/agent entrypoint into the pinned BrowseComp directories.
 
     Raises:
-        FileNotFoundError: ``gym_root`` has no BrowseComp harness.
+        FileNotFoundError: ``gym_root`` lacks the BrowseComp harness or agent.
     """
     harness = Path(gym_root) / HARNESS
     if not (harness / "app.py").is_file():
         raise FileNotFoundError(f"no BrowseComp harness at {harness}")
     target = harness / ENTRYPOINT
-    target.write_text(Path(__file__).read_text())
+    agent = Path(gym_root) / "responses_api_agents" / "browsecomp_agent"
+    if not (agent / "app.py").is_file():
+        raise FileNotFoundError(f"no BrowseComp agent at {agent}")
+    content = Path(__file__).read_text()
+    target.write_text(content)
+    (agent / ENTRYPOINT).write_text(content)
     return target
 
 
@@ -349,11 +485,142 @@ def server_class(harness: Any) -> type:
         )
 
         def model_post_init(self, context: Any) -> None:
+            if (getattr(self.config, "num_workers", 1) or 1) > 1:
+                raise ValueError("search verification state requires one resources-server worker")
             super().model_post_init(context)
             keys = self.config.tavily_api_key
             keys = [keys] if isinstance(keys, str) else list(keys or [])
-            self._async_tavily_clients = [YouSearchClient(key) for key in keys]
+            self._async_tavily_clients = [
+                YouSearchClient(
+                    key,
+                    abort_on_auth=lambda status: harness._abort_on_invalid_api_key(
+                        "you", status, "<redacted>"
+                    ),
+                )
+                for key in keys
+            ]
+            self._verification_states = OrderedDict()
             print(f"Search provider: you.com ({len(keys)} key(s))", flush=True)
+
+        def _verification_state(self, sid):
+            now = monotonic()
+            while self._verification_states:
+                oldest = next(iter(self._verification_states))
+                if self._verification_states[oldest].expires_at > now:
+                    break
+                self._verification_states.popitem(last=False)
+            return self._verification_states.get(sid)
+
+        async def seed_session(self, request, body):
+            from fastapi import HTTPException
+            from nemo_gym.server_utils import SESSION_ID_KEY
+
+            sid = request.session[SESSION_ID_KEY]
+            state = self._verification_state(sid)
+            if state is not None and (state.question, state.ground_truth) != (
+                body.question,
+                body.ground_truth,
+            ):
+                raise HTTPException(409, "Verification session is already bound")
+            if state is None:
+                if request.session.get(_SEEDED_SESSION_KEY):
+                    raise HTTPException(409, "Verification session expired; start a fresh session")
+                if len(self._verification_states) >= _MAX_VERIFICATION_SESSIONS:
+                    self._verification_states.popitem(last=False)
+                self._verification_states[sid] = _VerificationState(
+                    body.question, body.ground_truth
+                )
+            request.session[_SEEDED_SESSION_KEY] = True
+            # Re-seeding the same task must not erase an earlier provider failure.
+            return await super().seed_session(request, body)
+
+        async def _tool(self, name, request, body):
+            from nemo_gym.server_utils import SESSION_ID_KEY
+
+            state = (
+                self._verification_state(request.session[SESSION_ID_KEY]) or _VerificationState()
+            )
+            token = _ACTIVE_STATE.set(state)
+            try:
+                result = await getattr(super(), name)(request, body)
+            except Exception:  # noqa: BLE001 - tool boundary: retain failure without exposing raw exception
+                state.failure_kind = state.failure_kind or "search:tool_failed"
+                result = None
+            finally:
+                _ACTIVE_STATE.reset(token)
+            if state.failure_kind is not None:
+                response_type = (
+                    harness.TavilySearchResponse if name == "search" else harness.BrowseResponse
+                )
+                return response_type(results_string="Search evidence is unavailable.")
+            return result
+
+        async def search(self, request, body):
+            return await self._tool("search", request, body)
+
+        async def browse(self, request, body):
+            return await self._tool("browse", request, body)
+
+        def _outcome(self, body, *, failure_kind=None, reward=0.0, details=None):
+            fields = (
+                _masked_fields(failure_kind)
+                if failure_kind
+                else {
+                    "reward": reward,
+                    "evaluation_completed": True,
+                    "mask_sample": False,
+                    "instance_config": {"mask_sample": False},
+                }
+            )
+            return VerifyResponse.model_validate(
+                {
+                    "responses_create_params": policy_params(body.responses_create_params),
+                    "response": body.response,
+                    **(details or {}),
+                    **fields,
+                }
+            )
+
+        async def verify(self, request, body):
+            from nemo_gym.server_utils import SESSION_ID_KEY
+
+            sid = request.session[SESSION_ID_KEY]
+            state = self._verification_state(sid)
+            if state is None or state.question is None:
+                return self._outcome(body, failure_kind="session_lost")
+            if (state.question, state.ground_truth) != (
+                body.question,
+                body.ground_truth,
+            ):
+                return self._outcome(body, failure_kind="verifier_error")
+            if state.failure_kind:
+                return self._outcome(body, failure_kind=state.failure_kind)
+            try:
+                result = await super().verify(request, body)
+            except harness.JudgeError:
+                return self._outcome(body, failure_kind="judge_failed")
+            except Exception:  # noqa: BLE001 - verification boundary: mask without exposing judge data
+                return self._outcome(body, failure_kind="verifier_error")
+            if self._verification_state(sid) is not state:
+                return self._outcome(body, failure_kind="session_lost")
+            if state.failure_kind:
+                return self._outcome(body, failure_kind=state.failure_kind)
+            if self.config.use_judge and not self._parse_judge(result.reasoning)[2]:
+                return self._outcome(body, failure_kind="judge_unparseable")
+            # Do not echo the request's reference, judge prompt, reasoning or judge response.
+            return self._outcome(
+                body,
+                reward=result.reward,
+                details=result.model_dump(
+                    include={
+                        "num_tool_calls",
+                        "reset_count",
+                        "metrics",
+                        "num_provider_429s",
+                        "num_provider_other_retries",
+                    }
+                ),
+            )
 
         async def _verify_answer_with_judge(
             self, question: str, ground_truth: str, response: str
@@ -366,7 +633,7 @@ def server_class(harness: Any) -> type:
                     ),
                     reasoning="Answer contract violation: require one Exact Answer "
                     "of 1-200 characters, with no extra lines, control characters, "
-                    "or forged grading fields.",
+                    "or forged grading fields.\ncorrect: no",
                     extracted_final_answer="",
                     reward=0.0,
                     judge_response=None,
@@ -387,7 +654,83 @@ def server_class(harness: Any) -> type:
             ]
             return await super()._call_judge(judge_create_params)
 
+    if hasattr(harness, "TavilySearchVerifyRequest"):
+        from nemo_gym.base_resources_server import BaseVerifyResponse
+
+        class VerifyResponse(BaseVerifyResponse):
+            evaluation_completed: bool
+            instance_config: dict[str, bool]
+            num_tool_calls: int = 0
+            reset_count: int = 0
+            metrics: dict[str, Any] | None = None
+            num_provider_429s: int = 0
+            num_provider_other_retries: int = 0
+
+        VerifyResponse.model_rebuild(_types_namespace={"Any": Any})
+        _bind_endpoints(
+            YouSearchResourcesServer,
+            harness.TavilySearchResourcesServer,
+            seed_session={"body": harness.TavilySearchRunRequest},
+            search={},
+            browse={},
+            verify={"return": VerifyResponse},
+        )
     return YouSearchResourcesServer
+
+
+def agent_class(harness: Any) -> type:
+    """Pinned BrowseComp agent with public-only policy requests and explicit failed outcomes."""
+
+    class YouSearchAgent(harness.BrowsecompAgent):
+        async def responses(self, request, response, body):
+            public = type(body).model_validate(policy_params(body))
+            return await super().responses(request, response, public)
+
+        async def run(self, request, body):
+            public = body.model_copy(deep=True)
+            public.responses_create_params = type(body.responses_create_params).model_validate(
+                policy_params(body.responses_create_params)
+            )
+            result = await super().run(request, public)
+            data = result.model_dump()
+            if raw_error := data.get("agent_error"):
+                # Pinned Gym emits "<ExceptionClass>: <message>". Keep only a valid class token.
+                name, separator, _ = raw_error.partition(":")
+                data["agent_error"] = (
+                    name
+                    if separator and name.isidentifier() and len(name) <= 128
+                    else "UnknownError"
+                )
+                data.update(_masked_fields("agent_error"))
+            elif data.get("_ng_no_persist"):
+                data.update(_masked_fields(data.get("failure_kind") or "agent_error"))
+            # Final outcomes are trusted-server data, not a resume/policy prompt.
+            allowed = {
+                key: data[key]
+                for key in (
+                    "responses_create_params",
+                    "response",
+                    "reward",
+                    "mask_sample",
+                    "failure_kind",
+                    "agent_error",
+                    "failure_reason",
+                    "evaluation_completed",
+                    "instance_config",
+                    "_ng_no_persist",
+                    "_ng_failure_class",
+                    "num_tool_calls",
+                    "reset_count",
+                    "metrics",
+                    "num_provider_429s",
+                    "num_provider_other_retries",
+                )
+                if key in data
+            }
+            return harness.BrowsecompAgentVerifyResponse.model_validate(allowed)
+
+    _bind_endpoints(YouSearchAgent, harness.BrowsecompAgent, responses={}, run={})
+    return YouSearchAgent
 
 
 def run_server() -> None:
@@ -399,4 +742,10 @@ def run_server() -> None:
 
 
 if __name__ == "__main__":
-    run_server()
+    if Path(__file__).parent.name == "browsecomp_agent":
+        import nemo_gym  # noqa: F401
+        from responses_api_agents.browsecomp_agent import app as agent_harness
+
+        agent_class(agent_harness).run_webserver()
+    else:
+        run_server()
