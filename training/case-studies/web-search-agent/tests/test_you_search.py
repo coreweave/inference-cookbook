@@ -188,12 +188,13 @@ def test_install_copies_a_self_contained_entrypoint(tmp_path):
     harness = tmp_path / you_search.HARNESS
     harness.mkdir(parents=True)
     (harness / "app.py").write_text("")
-    agent = tmp_path / "responses_api_agents" / "browsecomp_agent"
+    agent = tmp_path / you_search.AGENT
     agent.mkdir(parents=True)
     (agent / "app.py").write_text("")
     target = you_search.install(tmp_path)
     assert (agent / "you_search.py").read_text() == target.read_text()
     assert target.name == "you_search.py"
+    assert (agent / "you_search.py").read_text() == target.read_text()
     source = target.read_text()
     # The harness venv has no cwtrain, so the copy must not import it.
     assert "import cwtrain" not in source and "from cwtrain" not in source
@@ -204,7 +205,7 @@ def test_max_chars_caps_page_text_and_snippets(monkeypatch):
     monkeypatch.setenv("YOU_SEARCH_MAX_CHARS", "3")
     results = you_search.search_results(SEARCH)
     assert results[0]["raw_content"] == "# A" and results[0]["content"] == "fir"
-    fetched, _ = you_search.contents_results([{"url": "u", "markdown": "abcdef"}])
+    fetched, _ = you_search.contents_results([{"url": "https://example.com/u", "markdown": "abcdef"}])
     assert fetched[0]["raw_content"] == "abc"
     monkeypatch.setenv("YOU_SEARCH_MAX_CHARS", "0")
     assert you_search.search_results(SEARCH)[0]["raw_content"] == "# A page"

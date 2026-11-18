@@ -397,7 +397,7 @@ The study's settings for the recipe's
   You.com keys from `GYM_SECRET`.
 - Gym's BrowseComp harness calls Tavily. The kit carries the evaluation's
   [`you_search.py`](eval/you_search.py), and the config's
-  `coreweave_files` copies it into both the harness and agent directories as their entrypoint. It serves the
+  `coreweave_files` copies it into both the harness and agent directories as their entrypoint. The agent restricts model-produced tool paths. It serves the
   same `search` and `browse` tools from the You.com Search API (with live-crawled page text) and
   Contents API. The harness's page handling stays unchanged. The adapter drops
   results that quote the benchmarks and validates the final answer before grading it
@@ -421,7 +421,8 @@ earlier turns and so changes the trajectory's tokens. A trajectory that reaches
 The shared adapter applies the same guards to ASearcher training and BrowseComp evaluation:
 
 - Drop results that name known benchmarks or come from excluded answer-key hosts, checking
-  complete page text before shortening it.
+  complete page text before shortening it. The [tool-access policy](eval/tool-access.md) also checks
+  browse destinations and reported source URLs and limits the agent to search and browse.
 - Grade exactly one final `Exact Answer:` of 1–200 characters, with optional numeric `Confidence:`.
   Both labels may be bold. Reject malformed submissions without calling the judge.
 - Give the judge JSON-encoded data under a separate system instruction. R0 rejects alternative

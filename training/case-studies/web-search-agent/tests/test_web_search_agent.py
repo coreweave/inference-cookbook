@@ -215,6 +215,9 @@ def test_cwtrain_accepts_the_config_and_the_actor_gets_the_keys(tmp_path, monkey
     harness = result["browsecomp_resources_server"]["resources_servers"]["browsecomp_advanced_harness"]
     assert (judge["api_key"], harness["tavily_api_key"]) == ("judge-key", "you-key")
     assert (root / "resources_servers" / "browsecomp_advanced_harness" / harness["entrypoint"]).is_file()
+    agent = result["browsecomp_agent"]["responses_api_agents"]["browsecomp_agent"]
+    assert agent["entrypoint"] == "you_search.py"
+    assert (root / "responses_api_agents" / "browsecomp_agent" / agent["entrypoint"]).is_file()
     assert __import__("os").environ["YOU_SEARCH_MAX_CHARS"] == "500"
 
 
