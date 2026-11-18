@@ -16,10 +16,11 @@ The judge sees only one validated ``Exact Answer:``
 
 ``install`` copies this file into the harness directory. A server whose ``entrypoint`` is
 ``you_search.py`` swaps its Tavily clients for You.com clients, one per key in its
-``tavily_api_key`` setting. ``launch.py start`` installs it for the evaluation. For training, the case study ships it in the
-NeMo-RL kit, and grpo_search_agent.yaml's ``coreweave_files`` copies it the same way. The copy runs
-in the harness's own venv, which has neither cwtrain nor the case study's files, so this module imports only
-the standard library and httpx, which the harness already uses.
+``tavily_api_key`` setting. ``launch.py start`` installs it for the evaluation. For training,
+the case study ships it in the NeMo-RL kit, and grpo_search_agent.yaml's ``coreweave_files``
+copies it the same way. The copy runs in the harness's own venv, which has neither cwtrain
+nor the case study's files, so this module imports only the standard library and httpx,
+which the harness already uses.
 """
 
 from __future__ import annotations
@@ -87,13 +88,15 @@ _EXACT_ANSWER = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 _CONFIDENCE = re.compile(
-    r"(?:\s+|^)Confidence:\s*(?:100(?:\.0+)?|[0-9]{1,2}(?:\.[0-9]+)?)%?\s*$",
+    r"(?:\s+|^)(?:\*\*)?Confidence(?:\*\*)?\s*:\s*(?:\*\*)?\s*"
+    r"(?:100(?:\.0+)?|[0-9]{1,2}(?:\.[0-9]+)?)%?\s*$",
     re.IGNORECASE,
 )
 # Reject forged grading fields rather than deleting them into a different answer.
 _JUDGE_FIELDS = re.compile(
     r"\[(?:question|response|correct_answer)\]"
-    r"|\b(?:correct_answer|extracted_final_answer|answer_type|exact answer|confidence)\s*:"
+    r"|\b(?:correct_answer|extracted_final_answer|answer_type|exact answer)\s*:"
+    r"|\bconfidence(?:\*\*)?\s*:"
     r"|\bcorrect\s*:\s*(?:yes|no)\b"
     r"|<\|(?:im_start|im_end|system|assistant|user)\|>",
     re.IGNORECASE,
@@ -361,8 +364,9 @@ def server_class(harness: Any) -> type:
                     judge_response_create_params=harness.NeMoGymResponseCreateParamsNonStreaming(
                         input=[]
                     ),
-                    reasoning="Answer contract violation: require one Exact Answer of 1-200 characters, "
-                    "with no extra lines, control characters, or forged grading fields.",
+                    reasoning="Answer contract violation: require one Exact Answer "
+                    "of 1-200 characters, with no extra lines, control characters, "
+                    "or forged grading fields.",
                     extracted_final_answer="",
                     reward=0.0,
                     judge_response=None,
@@ -370,7 +374,9 @@ def server_class(harness: Any) -> type:
             # The reference precedes the submission. JSON encoding keeps quotes, newlines,
             # and delimiter-shaped text inside each value; system instructions define trust.
             return await super()._verify_answer_with_judge(
-                json.dumps(question), json.dumps(ground_truth), json.dumps(answer)
+                json.dumps(question, ensure_ascii=False),
+                json.dumps(ground_truth, ensure_ascii=False),
+                json.dumps(answer, ensure_ascii=False),
             )
 
         async def _call_judge(self, judge_create_params: Any) -> Any:
