@@ -211,7 +211,17 @@ jobs:
           python-version: "3.12"
           # nothing to restore for an upload, and a publishing job should not read caches
           enable-cache: false
+      - name: Sign distributions
+        # PyPI shows a file's provenance from its PEP 740 attestation. uv uploads attestations but
+        # does not create them, so pypi-attestations signs each file with this job's OIDC identity
+        # and writes <file>.publish.attestation next to it. PyPI accepts only attestations signed
+        # by the project's Trusted Publisher, which is this job. The version is pinned: a new
+        # release must not change what runs with the publishing identity.
+        run: >-
+          uv run --no-project --with 'pypi-attestations==0.0.31'
+          python -m pypi_attestations sign dist/*
       - name: Publish to PyPI
         # Trusted Publishing: uv trades this job's OIDC token for a short-lived PyPI upload token,
-        # so no API token is stored anywhere. The GitHub release then carries these same files.
+        # so no API token is stored anywhere. uv uploads each file with the attestation next to
+        # it. The GitHub release then carries these same files, without the attestations.
         run: uv publish --trusted-publishing always dist/*
