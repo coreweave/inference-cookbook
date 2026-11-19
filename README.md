@@ -186,8 +186,8 @@ cwtrain deployment delete <deployment-uuid> --wait
   recipe's README says how, under "Watching in W&B".
   The [post-training dashboard commands](libs/cwtrain/docs/dashboards.md) create
   framework-specific W&B views and export an interactive phase timeline from an existing run.
-  These commands are planned for the next release and are not in `cwtrain 1.0.2`; once
-  released, they are included with `python -m pip install --upgrade cwtrain`.
+  These commands need `cwtrain 1.0.3` or later; `python -m pip install --upgrade cwtrain`
+  includes them.
 
 ## How it works
 

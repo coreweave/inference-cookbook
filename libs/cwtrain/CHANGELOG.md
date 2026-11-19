@@ -3,7 +3,7 @@
 The major changes in each `cwtrain` release. A version's section is also its release notes on
 GitHub. Versions follow [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## 1.0.3 - 2026-11-19
 
 - Initialize and reset the hot-load mirror from numbered full snapshots, including Slime 0.4.0’s first publication.
 
