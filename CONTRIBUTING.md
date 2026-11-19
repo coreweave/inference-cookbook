@@ -146,7 +146,9 @@ build metadata.
 
 The workflow runs lint, tests, and builds on every Python version in the CI matrix. When they pass
 and the `pypi` environment's reviewers approve, it publishes the Python 3.12 wheel and source
-distribution to public PyPI. It then creates a GitHub release with the same files. The release
+distribution to public PyPI, each signed with an
+[attestation](https://docs.pypi.org/attestations/) that PyPI shows as the file's provenance. It
+then creates a GitHub release with the same files. The release
 notes are the version's section of [`libs/cwtrain/CHANGELOG.md`](libs/cwtrain/CHANGELOG.md). Pull
 requests and branch pushes run the checks but do not publish or create releases.
 
@@ -184,10 +186,11 @@ releases. Only the publish job has OIDC permission for PyPI Trusted Publishing. 
 for additional setup details.
 
 If publishing fails, fix the publishing configuration and rerun only the failed job. The rerun
-uploads the distributions that this workflow run already built. PyPI accepts a byte-identical
-re-upload, so files that were already published do not block the retry. Do not rebuild (for
-example, with "Re-run all jobs" after the build tools change): a rebuild can produce different
-bytes, and PyPI never lets you replace a published file. Changed artifacts need a new version.
+signs and uploads the distributions that this workflow run already built. PyPI accepts a
+byte-identical re-upload, so files that were already published do not block the retry. Do not
+rebuild (for example, with "Re-run all jobs" after the build tools change): a rebuild can produce
+different bytes, and PyPI never lets you replace a published file. Changed artifacts need a new
+version.
 
 If the GitHub release step fails after the upload, rerun that job. It uploads the files again and
 completes the existing release.
