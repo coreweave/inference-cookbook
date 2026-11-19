@@ -60,6 +60,7 @@ DEFAULT_JUDGE_BASE_URL = "https://api.inference.wandb.ai/v1"
 ANSWER_CHARS = 500
 # Gym's row keys for the task (and its repeat) a trajectory answers.
 TASK_INDEX = "_ng_task_index"
+ROLLOUT_INDEX = "_ng_rollout_index"
 
 
 @dataclass(frozen=True)
@@ -127,9 +128,7 @@ def start_environment(
     environ.setdefault("CWTRAIN_ROLLOUT_MODEL", DEFAULT_MODEL)
     config = RolloutConfig.from_env(environ)
     if environ.get("CWTRAIN_ROLLOUT_API_KEY_FILE") and not config.api_key:
-        raise ValueError(
-            "CWTRAIN_ROLLOUT_API_KEY_FILE must contain a readable, nonempty key"
-        )
+        raise ValueError("CWTRAIN_ROLLOUT_API_KEY_FILE must contain a readable, nonempty key")
     env = dict(
         environ,
         CWTRAIN_ROLLOUT_BASE_URL=config.base_url,
@@ -232,10 +231,20 @@ def scores(rows: Sequence[dict[str, Any]], max_steps: int) -> tuple[list[dict[st
         output = (row.get("response") or {}).get("output") or []
         calls = sum(item.get("type") == "function_call" for item in output)
         turns = tool_turns(output)
+        masked = bool(
+            row.get("mask_sample")
+            or (row.get("instance_config") or {}).get("mask_sample")
+            or row.get("evaluation_completed") is False
+            or row.get("agent_error")
+            or row.get("_ng_no_persist")
+            or row.get("reward") is None
+        )
         tasks.append(
             {
                 "task": row.get(TASK_INDEX, position),
-                "reward": float(row.get("reward") or 0.0),
+                "reward": None if masked else float(row.get("reward") or 0.0),
+                "mask_sample": masked,
+                "failure_kind": row.get("failure_kind") or ("verifier_error" if masked else None),
                 "tool_calls": calls,
                 "turns": turns,
                 "reached_turn_cap": turns >= max_steps,
@@ -243,10 +252,15 @@ def scores(rows: Sequence[dict[str, Any]], max_steps: int) -> tuple[list[dict[st
             }
         )
     count = len(tasks)
+    scored = [task for task in tasks if not task["mask_sample"]]
+    correct = sum(task["reward"] >= 1.0 for task in scored)
     summary = {
         "tasks": count,
-        "mean_reward": sum(t["reward"] for t in tasks) / max(count, 1),
-        "correct": sum(t["reward"] >= 1.0 for t in tasks),
+        "scored_tasks": len(scored),
+        "masked_tasks": count - len(scored),
+        "mean_reward": sum(t["reward"] for t in scored) / len(scored) if scored else None,
+        "correct": correct,
+        "correct_over_attempted": correct / count if count else None,
         "tasks_at_turn_cap": sum(t["reached_turn_cap"] for t in tasks),
         "mean_tool_calls": sum(t["tool_calls"] for t in tasks) / max(count, 1),
     }
@@ -265,8 +279,18 @@ def report(
     tasks, summary = scores(rows, args.max_steps)
     for task in tasks:
         # The task's index in the benchmark's input, so that runs compare task by task.
-        print(f"task={task['task']} reward={task['reward']} tool_calls={task['tool_calls']}", file=out)
-    print(f"tasks={summary['tasks']} mean_reward={summary['mean_reward']:.3f}", file=out)
+        value = "excluded" if task["mask_sample"] else task["reward"]
+        failure = f" failure_kind={task['failure_kind']}" if task["mask_sample"] else ""
+        print(
+            f"task={task['task']} reward={value} tool_calls={task['tool_calls']}{failure}", file=out
+        )
+    mean = f"{summary['mean_reward']:.3f}" if summary["mean_reward"] is not None else "unavailable"
+    print(
+        f"tasks={summary['tasks']} scored_tasks={summary['scored_tasks']} "
+        f"masked_tasks={summary['masked_tasks']} mean_reward={mean} "
+        f"correct_over_attempted={summary['correct_over_attempted']}",
+        file=out,
+    )
     settings = wandb_settings(environ)
     if settings is None:
         return summary
@@ -291,7 +315,16 @@ def report(
         **settings,
     )
     try:
-        columns = ["task", "reward", "tool_calls", "turns", "reached_turn_cap", "answer"]
+        columns = [
+            "task",
+            "reward",
+            "tool_calls",
+            "turns",
+            "reached_turn_cap",
+            "answer",
+            "mask_sample",
+            "failure_kind",
+        ]
         table = wandb.Table(columns=columns, data=[[t[c] for c in columns] for t in tasks])
         run.log({**{f"eval/{k}": v for k, v in summary.items()}, "eval/task_results": table})
         run.summary.update({f"eval/{k}": v for k, v in summary.items()})
@@ -360,6 +393,28 @@ def inline_browsecomp(path: Path) -> None:
     prepare.write(rows, path)
 
 
+def report_rows(path: Path) -> list[dict[str, Any]]:
+    """Include recorded sidecar failures once per rollout, unless a later attempt scored."""
+    failures = path.with_name(f"{path.stem}_failures.jsonl")
+    rows = (
+        [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+        if path.exists() or not failures.is_file()
+        else []
+    )
+    if not failures.is_file():
+        return rows
+    seen = {(row.get(TASK_INDEX), row.get(ROLLOUT_INDEX)) for row in rows if TASK_INDEX in row}
+    failed = {}
+    for line in failures.read_text().splitlines():
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        key = row[TASK_INDEX], row[ROLLOUT_INDEX]
+        if key not in seen:
+            failed[key] = {**row, "mask_sample": True}
+    return rows + list(failed.values())
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("prepare", "start", "collect", "report"))
@@ -409,10 +464,11 @@ def main() -> None:
         args.output = Path(f"results/coreweave_{args.benchmark}.jsonl")
     if args.action == "report":
         try:
-            rows = [json.loads(line) for line in args.output.read_text().splitlines() if line]
-            report(rows, args, os.environ)
-        except (OSError, ValueError) as error:
+            summary = report(report_rows(args.output), args, os.environ)
+        except (OSError, ValueError, KeyError) as error:
             parser.error(str(error))
+        if summary["scored_tasks"] == 0:
+            parser.exit(1, "No evaluation tasks could be scored.\n")
         return
     if args.gym_dir is None:
         parser.error(f"{args.action} needs --gym-dir")

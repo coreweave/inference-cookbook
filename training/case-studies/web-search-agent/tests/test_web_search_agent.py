@@ -205,6 +205,7 @@ def test_cwtrain_accepts_the_config_and_the_actor_gets_the_keys(tmp_path, monkey
     assert "judge-key" not in json.dumps(prepared) and "you-key" not in json.dumps(prepared)
     root = tmp_path / "gym"
     (root / "resources_servers" / "browsecomp_advanced_harness").mkdir(parents=True)
+    (root / "responses_api_agents" / "browsecomp_agent").mkdir(parents=True)
     monkeypatch.setitem(sys.modules, "nemo_gym", SimpleNamespace(PARENT_DIR=root))
     monkeypatch.delenv("YOU_SEARCH_MAX_CHARS", raising=False)
     prepared.pop("coreweave_tokenizer")
