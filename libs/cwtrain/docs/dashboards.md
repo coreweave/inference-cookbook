@@ -7,8 +7,7 @@ telemetry. Miles and Slime also include a native run Overview and an interactive
 
 ## Install and authenticate
 
-The dashboard commands are planned for the next release; they are not included in
-`cwtrain 1.0.2`. Once released, install the standard package:
+The dashboard commands need `cwtrain 1.0.3` or later. Install the standard package:
 
 ```bash
 python -m pip install cwtrain

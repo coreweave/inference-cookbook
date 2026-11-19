@@ -131,8 +131,8 @@ The deployment holds its GPUs until you delete it. `cwtrain --help` lists the co
 
 ## W&B dashboards
 
-The dashboard commands are planned for the next release and are not included in
-`cwtrain 1.0.2`. Once released, the standard package includes them and their W&B dependencies:
+The dashboard commands need `cwtrain 1.0.3` or later. The standard package includes them and
+their W&B dependencies:
 
 ```bash
 python -m pip install --upgrade cwtrain

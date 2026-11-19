@@ -3,7 +3,7 @@
 The major changes in each `cwtrain` release. A version's section is also its release notes on
 GitHub. Versions follow [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## 1.0.3 - 2026-11-19
 
 - **NeMo-RL v0.8.0:** the recipe pins the release container with Gym v0.7.0 and Ray 2.58.0,
   ports its backend and Gym patches, and uses the renamed AutoModel config and worker.
