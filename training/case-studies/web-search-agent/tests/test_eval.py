@@ -153,6 +153,8 @@ def test_prepared_eval_keeps_tasks_but_uses_the_training_tools(tmp_path, monkeyp
         assert [tool["name"] for tool in params["tools"]] == ["search", "browse"]
         assert "workspace" not in params["input"][0]["content"]
         assert params["input"][1]["content"].startswith(after["question"])
+        assert "1-200" in params["input"][1]["content"]
+        assert "not alternative guesses" in params["input"][1]["content"]
 
 
 def test_recipe_configs_override_the_gym_benchmark():
