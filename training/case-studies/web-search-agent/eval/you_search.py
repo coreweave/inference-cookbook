@@ -23,6 +23,9 @@ masked outcome. Existing judge-prompt/answer-contract behavior is unchanged.
 ``launch.py start`` installs the copies for evaluation; training ships the same file in
 its kit through ``coreweave_files``. Client-only use needs only stdlib/httpx; server factories
 load Gym/FastAPI lazily in their own venv, without importing cwtrain.
+
+Search and browse inputs and source results share URL admission checks.
+The crawler operates within the provider's own network.
 """
 
 from __future__ import annotations
@@ -30,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import posixpath
 import re
 from collections import OrderedDict
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -37,11 +41,13 @@ from contextvars import ContextVar
 from pathlib import Path
 from time import monotonic
 from typing import Any, get_type_hints
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, unquote, urljoin, urlsplit, urlunsplit
 
 BASE_URL = "https://ydc-index.io/v1"
 HARNESS = Path("resources_servers") / "browsecomp_advanced_harness"
 ENTRYPOINT = "you_search.py"
+AGENT = Path("responses_api_agents") / "browsecomp_agent"
+_POLICY_TOOL_SERVER: ContextVar[str | None] = ContextVar("search_policy_tool_server", default=None)
 # Characters kept of each result's page text and snippets; unset or 0 keeps all of it. A smaller
 # cap fits more tool calls into a trajectory's tokens.
 MAX_CHARS_ENV = "YOU_SEARCH_MAX_CHARS"
@@ -208,9 +214,8 @@ def _bind_endpoints(cls: type, base: type, **overrides: dict[str, Any]) -> None:
 
 
 def excluded(url: str, domains: Iterable[str]) -> bool:
-    """Whether ``url``'s host is one of ``domains`` or a subdomain of one."""
-    host = (urlparse(url).hostname or "").lower()
-    return any(host == d.lower() or host.endswith("." + d.lower()) for d in domains)
+    """Whether a URL fails the same destination policy used for both search and browse."""
+    return allowed_url(url, domains) is None
 
 
 def contaminated(item: Mapping[str, Any]) -> bool:
@@ -225,6 +230,197 @@ def contaminated(item: Mapping[str, Any]) -> bool:
     )
 
 
+# URL policy is applied to provider envelopes, not links mentioned in research page text.
+# In particular, ordinary PDFs/CSV/JSON and papers linking to datasets remain usable.
+_MAX_URL_LENGTH = 8192
+_MAX_URL_DEPTH = 4
+_BAD_ESCAPE = re.compile(r"%(?![0-9a-fA-F]{2})")
+_UNSAFE_URL_CHAR = re.compile(r"[\x00-\x20\x7f\\]")
+_HOST_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
+_EMBEDDED_URL = re.compile(r"(?:https?|file|ftp|gopher)://", re.IGNORECASE)
+_URL_TARGET_KEYS = frozenset({"url", "u", "redirect_url", "redirect_uri"})
+_SOURCE_URL_FIELDS = (
+    "url",
+    "original_url",
+    "requested_url",
+    "source_url",
+    "final_url",
+    "resolved_url",
+    "redirect_url",
+)
+_DATASET_HOSTS = ("huggingface.co", "hf.co", "hf-mirror.com")
+_DATASET_PATH = re.compile(r"^/(?:datasets(?:/|$)|api/(?:datasets|resolve-cache/datasets)(?:/|$))")
+
+
+def _domain(host: str, domain: str) -> bool:
+    return host == domain or host.endswith("." + domain)
+
+
+def _host(value: str) -> str:
+    # Reject escaped authorities rather than guessing which URL parser the remote crawler uses.
+    if "%" in value:
+        raise ValueError("encoded host")
+    import httpx
+
+    try:
+        host = httpx.URL(scheme="https", host=value).raw_host.decode("ascii").lower().rstrip(".")
+    except httpx.InvalidURL as exc:
+        raise ValueError("invalid host") from exc
+    labels = host.split(".")
+    if (
+        len(host) > 253
+        or len(labels) < 2
+        or not all(_HOST_LABEL.fullmatch(p) for p in labels)
+        or labels[-1].isdigit()
+        or all(re.fullmatch(r"(?:[0-9]+|0x[0-9a-f]+)", label) for label in labels)
+        or _domain(host, "localhost")
+        or host.endswith((".local", ".internal"))
+    ):
+        raise ValueError("not a public DNS hostname")
+    return host
+
+
+def _normalize_domains(domains: Iterable[str]) -> tuple[str, ...]:
+    normalized = []
+    for domain in domains:
+        if not isinstance(domain, str) or re.search(r"[\s/:@\\?#*%]", domain):
+            raise ValueError("Search exclusions must be bare DNS hostnames")
+        try:
+            normalized.append(_host(domain))
+        except ValueError as exc:
+            raise ValueError("Search exclusions must be bare DNS hostnames") from exc
+    return tuple(normalized)
+
+
+def _decoded(value: str) -> str:
+    # A bounded policy view only: reserved characters are not decoded in the URL sent to You.com.
+    for _ in range(_MAX_URL_DEPTH):
+        decoded = unquote(value, errors="strict")
+        if decoded == value:
+            if _UNSAFE_URL_CHAR.search(value.replace(" ", "")):
+                raise ValueError("ambiguous URL encoding")
+            return value
+        value = decoded
+    raise ValueError("too many encoding layers")
+
+
+def _canonical_url(url: str, domains: Iterable[str], depth: int = 0) -> str:
+    if (
+        not isinstance(url, str)
+        or not url
+        or len(url) > _MAX_URL_LENGTH
+        or _UNSAFE_URL_CHAR.search(url)
+        or _BAD_ESCAPE.search(url)
+        or depth > _MAX_URL_DEPTH
+    ):
+        raise ValueError("invalid URL")
+    parts = urlsplit(url)
+    if (
+        parts.scheme.lower() not in ("http", "https")
+        or not parts.netloc
+        or parts.username is not None
+        or parts.password is not None
+    ):
+        raise ValueError("only unauthenticated HTTP(S) URLs are supported")
+    host = _host(parts.hostname or "")
+    # No literal/numeric IP spellings, credentials or non-web ports are accepted. This does not
+    # resolve DNS or establish network isolation of the remote provider.
+    if ":" in parts.netloc and parts.port not in (80, 443):
+        raise ValueError("non-web port")
+    if parts.port is not None and parts.port != (443 if parts.scheme.lower() == "https" else 80):
+        raise ValueError("non-default port")
+    for domain in domains:
+        if _domain(host, domain) or (domain == "huggingface.co" and _domain(host, "hf.co")):
+            raise ValueError("excluded destination")
+    decoded_path = _decoded(parts.path)
+    path = decoded_path
+    # Encoded dot/slash segments can otherwise hide a dataset endpoint from a prefix check.
+    path = posixpath.normpath("/" + path.lstrip("/"))
+    query = _decoded(parts.query)
+    if contaminated({"url": urlunsplit((parts.scheme, host, path, query, ""))}):
+        raise ValueError("benchmark destination")
+    if (
+        any(_domain(host, d) for d in _DATASET_HOSTS) and _DATASET_PATH.match(path.lower())
+    ) or _domain(host, "datasets-server.hf.co"):
+        raise ValueError("dataset transport")
+    # Inspect visible proxy/archive/redirect targets in the path and query. This is deliberately
+    # not a scan of page hyperlinks and cannot reveal an opaque server-side redirect target.
+    for key, value in [
+        (None, decoded_path),
+        *parse_qsl(query, keep_blank_values=True, max_num_fields=100),
+    ]:
+        match = _EMBEDDED_URL.search(value)
+        if match:
+            _canonical_url(value[match.start() :].replace(" ", "%20"), domains, depth + 1)
+        elif key is not None and value.startswith("//"):
+            _canonical_url(parts.scheme + ":" + value, domains, depth + 1)
+        elif re.match(r"(?i)^(?:file|data|javascript|ftp|gopher):", value):
+            raise ValueError("non-web target")
+        elif key and key.lower() in _URL_TARGET_KEYS and "." in value and not value.startswith("/"):
+            # Explicit redirect parameters sometimes omit the scheme. Do not treat arbitrary
+            # search terms or page links as destinations.
+            _canonical_url("https://" + value, domains, depth + 1)
+    return urlunsplit((parts.scheme.lower(), host, parts.path or "/", parts.query, ""))
+
+
+def allowed_url(url: str, domains: Iterable[str] = ()) -> str | None:
+    return _allowed_url(url, _normalize_domains(domains))
+
+
+def _allowed_url(url: str, domains: Sequence[str]) -> str | None:
+    """Return a canonical allowed URL, or None. This validates text, not DNS or remote fetches."""
+    try:
+        return _canonical_url(url, domains)
+    except (ValueError, UnicodeError):
+        return None
+
+
+def _result_url(item: Mapping[str, Any], domains: Sequence[str]) -> str | None:
+    """Validate every reported source URL before any snippets/content are returned to the policy.
+
+    The published schemas guarantee only `url`; additional source/redirect fields are checked if
+    present, not assumed to exist. Thumbnails, favicons and page hyperlinks are not source URLs.
+    """
+    url = _allowed_url(item.get("url"), domains)
+    if url is None:
+        return None
+    envelopes = [item]
+    for field in ("contents", "metadata"):
+        if isinstance(item.get(field), Mapping):
+            envelopes.append(item[field])
+    for envelope in envelopes:
+        for field in _SOURCE_URL_FIELDS:
+            if (
+                envelope.get(field) not in (None, "")
+                and _allowed_url(envelope[field], domains) is None
+            ):
+                return None
+        if "redirects" in envelope:
+            redirects = envelope["redirects"]
+            if not isinstance(redirects, list) or len(redirects) > 10:
+                return None
+            previous = url
+            for hop in redirects:
+                targets = (
+                    [hop[key] for key in ("url", "location") if key in hop]
+                    if isinstance(hop, Mapping)
+                    else [hop]
+                )
+                if not targets:
+                    return None
+                for target in targets:
+                    if (
+                        not isinstance(target, str)
+                        or _UNSAFE_URL_CHAR.search(target)
+                        or _BAD_ESCAPE.search(target)
+                    ):
+                        return None
+                    previous = _allowed_url(urljoin(previous, target), domains)
+                    if previous is None:
+                        return None
+    return url
+
+
 def _report_drops(function: str, dropped: int, kept: int) -> None:
     # The same line as Gym v0.7.0's filter, so one grep counts all drops.
     if dropped:
@@ -232,6 +428,11 @@ def _report_drops(function: str, dropped: int, kept: int) -> None:
             f"[browsecomp][contamination] fn={function} provider=you dropped={dropped} kept={kept}",
             flush=True,
         )
+
+
+def _report_access_drops(function: str, dropped: int) -> None:
+    if dropped:
+        print(f"[browsecomp][tool_access] fn={function} provider=you dropped={dropped}", flush=True)
 
 
 def judged_answer(response: str) -> str:
@@ -274,13 +475,14 @@ def search_results(payload: dict, exclude_domains: Sequence[str] = ()) -> list[d
     did not crawl it). Results on excluded domains and ``contaminated`` results are dropped, the
     latter before the character cap, so a quote past the cap still drops its result.
     """
-    results, dropped = [], 0
+    results, dropped, access_dropped = [], 0, 0
     for item in (payload.get("results") or {}).get("web") or []:
-        url = item.get("url") or ""
-        if not url or excluded(url, exclude_domains):
-            continue
         if contaminated(item):
             dropped += 1
+            continue
+        url = _result_url(item, exclude_domains)
+        if url is None:
+            access_dropped += 1
             continue
         snippets = item.get("snippets") or []
         results.append(
@@ -292,25 +494,33 @@ def search_results(payload: dict, exclude_domains: Sequence[str] = ()) -> list[d
             }
         )
     _report_drops("search", dropped, len(results))
+    _report_access_drops("search", access_dropped)
     return results
 
 
-def contents_results(payload: Any) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+def contents_results(
+    payload: Any, exclude_domains: Sequence[str] = ()
+) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
     """Convert a You.com contents response into Tavily's ``results`` and ``failed_results``.
 
     ``contaminated`` pages are in neither, so when every page is dropped the harness answers as it
     does for pages it could not fetch, and the agent is not told that the benchmark is nearby.
     """
     items = payload if isinstance(payload, list) else (payload or {}).get("results") or []
-    results, failed, dropped = [], [], 0
+    results, failed, dropped, access_dropped = [], [], 0, 0
     for item in items:
         if contaminated(item):
             dropped += 1
             continue
+        url = _result_url(item, exclude_domains)
+        if url is None:
+            access_dropped += 1
+            continue
         text = item.get("markdown") or ""
         target = results if text else failed
-        target.append({"url": item.get("url") or "", "raw_content": _cap(text)})
+        target.append({"url": url, "raw_content": _cap(text)})
     _report_drops("browse", dropped, len(results))
+    _report_access_drops("browse_result", access_dropped)
     return results, failed
 
 
@@ -324,6 +534,7 @@ class YouSearchClient:
         attempts: Tries per call for rate limits, server errors and connection errors.
         abort_on_auth: Runtime fatal handler for a rejected search key.
         client: An ``httpx.AsyncClient`` to use instead of creating one (for tests).
+        exclude_domains: Trusted server exclusions shared by all search and browse calls.
     """
 
     def __init__(
@@ -334,9 +545,11 @@ class YouSearchClient:
         attempts: int = 4,
         client: Any = None,
         abort_on_auth: Callable[[int], None] | None = None,
+        exclude_domains: Sequence[str] = (),
     ) -> None:
         if not api_key or not api_key.strip():
             raise ValueError("You.com search requires a nonempty API key")
+        self._exclude_domains = _normalize_domains(exclude_domains)
         if client is None:
             import httpx
 
@@ -355,11 +568,15 @@ class YouSearchClient:
         for attempt in range(self._attempts):
             last = attempt == self._attempts - 1
             try:
-                response = await self._client.request(method, path, **kwargs)
+                response = await self._client.request(
+                    method, path, follow_redirects=False, **kwargs
+                )
             except httpx.TransportError:
                 if last:
                     raise SearchProviderError("provider_unavailable") from None
             else:
+                if 300 <= response.status_code < 400:
+                    raise SearchProviderError("provider_redirect_refused")
                 if response.status_code in (401, 403):
                     if self._abort_on_auth is not None:
                         self._abort_on_auth(response.status_code)
@@ -419,16 +636,26 @@ class YouSearchClient:
                 or any(not isinstance(snippet, str) for snippet in snippets)
             ):
                 raise SearchProviderError("search:provider_response_invalid")
+        domains = self._exclude_domains
+        extra = tuple(exclude_domains or ())
+        if extra and extra != domains:
+            domains += _normalize_domains(extra)
         try:
-            results = search_results(payload, exclude_domains or ())
+            results = search_results(payload, domains)
         except (TypeError, AttributeError, ValueError):
             raise SearchProviderError("search:provider_response_invalid") from None
         return {"query": query, "results": results}
 
     async def extract(self, urls: Sequence[str], **_: Any) -> dict[str, Any]:
         """Fetch the pages' markdown. Tavily's ``query`` hint is ignored."""
+        approved = [
+            canonical for url in urls if (canonical := _allowed_url(url, self._exclude_domains))
+        ]
+        _report_access_drops("browse_request", len(urls) - len(approved))
+        if not approved:
+            return {"results": [], "failed_results": []}
         payload = await self._call(
-            "POST", "/contents", json={"urls": list(urls), "formats": ["markdown"]}
+            "POST", "/contents", json={"urls": approved, "formats": ["markdown"]}
         )
         items = (
             payload
@@ -449,27 +676,24 @@ class YouSearchClient:
                 raise SearchProviderError("search:provider_response_invalid")
         # Individual fetch failures are normal live-web behavior. Successful pages remain usable
         # even when the provider omits a failed page or reports a different URL after redirection.
-        results, failed = contents_results(items)
+        results, failed = contents_results(items, self._exclude_domains)
         return {"results": results, "failed_results": failed}
 
 
 def install(gym_root: Path) -> Path:
-    """Copy the resources/agent entrypoint into the pinned BrowseComp directories.
+    """Install the resource URL gate and agent dispatch gate together in pinned Gym.
 
     Raises:
-        FileNotFoundError: ``gym_root`` lacks the BrowseComp harness or agent.
+        FileNotFoundError: ``gym_root`` lacks either required BrowseComp component.
     """
-    harness = Path(gym_root) / HARNESS
-    if not (harness / "app.py").is_file():
-        raise FileNotFoundError(f"no BrowseComp harness at {harness}")
-    target = harness / ENTRYPOINT
-    agent = Path(gym_root) / "responses_api_agents" / "browsecomp_agent"
-    if not (agent / "app.py").is_file():
-        raise FileNotFoundError(f"no BrowseComp agent at {agent}")
-    content = Path(__file__).read_text()
-    target.write_text(content)
-    (agent / ENTRYPOINT).write_text(content)
-    return target
+    components = [Path(gym_root) / directory for directory in (HARNESS, AGENT)]
+    for component in components:
+        if not (component / "app.py").is_file():
+            raise FileNotFoundError(f"no BrowseComp component at {component}")
+    source = Path(__file__).read_text()
+    for component in components:
+        (component / ENTRYPOINT).write_text(source)
+    return components[0] / ENTRYPOINT
 
 
 def server_class(harness: Any) -> type:
@@ -485,14 +709,22 @@ def server_class(harness: Any) -> type:
         )
 
         def model_post_init(self, context: Any) -> None:
+            if getattr(self.config, "workspace", "none") != "none":
+                raise ValueError(
+                    "You.com search adapter requires inline search/browse without a shell"
+                )
+            if getattr(self.config, "search_provider", "tavily") != "tavily":
+                raise ValueError("You.com search adapter requires the adapted Tavily tool path")
             if (getattr(self.config, "num_workers", 1) or 1) > 1:
                 raise ValueError("search verification state requires one resources-server worker")
             super().model_post_init(context)
+            self._exclude_domains = list(_normalize_domains(self._exclude_domains))
             keys = self.config.tavily_api_key
             keys = [keys] if isinstance(keys, str) else list(keys or [])
             self._async_tavily_clients = [
                 YouSearchClient(
                     key,
+                    exclude_domains=self._exclude_domains,
                     abort_on_auth=lambda status: harness._abort_on_invalid_api_key(
                         "you", status, "<redacted>"
                     ),
@@ -622,6 +854,9 @@ def server_class(harness: Any) -> type:
                 ),
             )
 
+        def _is_url_excluded(self, url: str) -> bool:
+            return _allowed_url(url, self._exclude_domains) is None
+
         async def _verify_answer_with_judge(
             self, question: str, ground_truth: str, response: str
         ) -> Any:
@@ -678,7 +913,7 @@ def server_class(harness: Any) -> type:
     return YouSearchResourcesServer
 
 
-def agent_class(harness: Any) -> type:
+def _integrity_agent_class(harness: Any) -> type:
     """Pinned BrowseComp agent with public-only policy requests and explicit failed outcomes."""
 
     class YouSearchAgent(harness.BrowsecompAgent):
@@ -733,12 +968,68 @@ def agent_class(harness: Any) -> type:
     return YouSearchAgent
 
 
-def run_server() -> None:
-    """Start the BrowseComp harness as ``server_class`` changes it."""
-    import nemo_gym  # noqa: F401 - adds the Gym install root to sys.path
-    from resources_servers.browsecomp_advanced_harness import app as harness
+class _UnsupportedToolResponse:
+    """The existing tool loop expects status/cookies/content.read, not a thrown infra error."""
 
-    server_class(harness).run_webserver()
+    status = 400
+
+    def __init__(self, cookies: Any) -> None:
+        self.cookies = cookies
+        self.content = self
+
+    async def read(self) -> bytes:
+        return b'{"results_string":"Unsupported tool. Use search or browse."}'
+
+
+def agent_class(harness: Any) -> type:
+    """Limit model-originated resource requests before the pinned Gym dispatcher sends HTTP.
+
+    The context is task-local: the host's seed/verify calls retain the normal ServerClient path.
+    No generic tool proxy or file-reading interface is exposed to policy code.
+    """
+    from nemo_gym.server_utils import ServerClient
+
+    if not callable(getattr(harness.BrowsecompAgent, "_responses_impl", None)):
+        raise TypeError("Pinned BrowseComp tool-loop hook is unavailable")
+
+    class SearchToolClient(ServerClient):
+        async def request(self, server_name: str, url_path: str, method: str, **kwargs: Any) -> Any:
+            if server_name == _POLICY_TOOL_SERVER.get() and (
+                method != "POST" or url_path not in ("/search", "/browse")
+            ):
+                return _UnsupportedToolResponse(kwargs.get("cookies"))
+            return await super().request(server_name, url_path, method, **kwargs)
+
+    class SearchOnlyAgent(_integrity_agent_class(harness)):
+        def model_post_init(self, context: Any) -> None:
+            super().model_post_init(context)
+            self.server_client = SearchToolClient(
+                head_server_config=self.server_client.head_server_config,
+                global_config_dict=self.server_client.global_config_dict,
+            )
+
+        async def _responses_impl(self, request: Any, response: Any, body: Any) -> Any:
+            token = _POLICY_TOOL_SERVER.set(self.config.resources_server.name)
+            try:
+                return await super()._responses_impl(request, response, body)
+            finally:
+                _POLICY_TOOL_SERVER.reset(token)
+
+    return SearchOnlyAgent
+
+
+def run_server() -> None:
+    """Start the resource or agent role according to its installed component directory."""
+    import nemo_gym  # noqa: F401 - adds the Gym install root to sys.path
+
+    if Path(__file__).parent.name == "browsecomp_agent":
+        from responses_api_agents.browsecomp_agent import app as harness
+
+        agent_class(harness).run_webserver()
+    else:
+        from resources_servers.browsecomp_advanced_harness import app as harness
+
+        server_class(harness).run_webserver()
 
 
 if __name__ == "__main__":

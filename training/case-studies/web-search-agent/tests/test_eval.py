@@ -174,6 +174,7 @@ def test_recipe_configs_override_the_gym_benchmark():
     policy = OmegaConf.load(Path(launch.RECIPE) / "coreweave.yaml").policy_model
     assert policy.responses_api_models.vllm_model.entrypoint == "cwtrain_tool_app.py"
     agent = config.browsecomp_benchmark_agent.responses_api_agents.browsecomp_agent
+    assert agent.entrypoint == "you_search.py"
     assert agent.save_model_call_using_vllm_tokenize_endpoint is False
     raw = OmegaConf.to_container(agent, resolve=False)
     assert raw["context_reset_tokens"] == "${oc.env:CWTRAIN_CONTEXT_RESET_TOKENS}"

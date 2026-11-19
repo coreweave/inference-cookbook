@@ -61,6 +61,9 @@ env:
         browsecomp_advanced_harness:
           # The eval's You.com client (eval/you_search.py), which coreweave_files copies into the harness.
           entrypoint: you_search.py
+          # Keep the same inline-only tool boundary as evaluation; no shell workspace or alternate provider.
+          workspace: none
+          search_provider: tavily
           domain: agent
           verified: false
           debug: false
@@ -73,6 +76,7 @@ env:
     browsecomp_agent:
       responses_api_agents:
         browsecomp_agent:
+          # The same entrypoint also guards model-produced tool names before resource dispatch.
           entrypoint: you_search.py
           resources_server: {type: resources_servers, name: browsecomp_resources_server}
           model_server: {type: responses_api_models, name: policy_model}
