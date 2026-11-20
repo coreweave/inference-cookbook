@@ -53,10 +53,20 @@ def _run_id_argument(value):
 class Mailbox:
     """One prefix per run; JSON markers commit completed uploads, never partial snapshots."""
 
-    def __init__(self, s3, bucket, run_id, *, session=None, timeout=1800, poll_interval=2):
+    def __init__(
+        self,
+        s3,
+        bucket,
+        run_id,
+        *,
+        prefix_root="cwtrain-molab",
+        session=None,
+        timeout=1800,
+        poll_interval=2,
+    ):
         self.s3, self.bucket = s3, bucket
         self.run_id = validate_run_id(run_id)
-        self.prefix = f"cwtrain-molab/{run_id}"
+        self.prefix = f"{prefix_root}/{run_id}"
         self.session = session
         self.timeout, self.poll_interval = timeout, poll_interval
 
@@ -225,6 +235,11 @@ def create_deployment(client, mailbox, args, state, state_path):
     lifecycle.wait_for_gateway(client, state["gateway_id"], timeout=args.timeout)
     state["deployment_id"] = str(uuid.uuid4())
     save_state(state_path, state)
+    autoscaling = {"min": 1, "max": 1, "concurrency": 64}
+    if args.capacity_class:
+        autoscaling["capacityClasses"] = [
+            f"CAPACITY_CLASS_{args.capacity_class.upper().replace('-', '_')}"
+        ]
     client.create_deployment(
         {
             "id": state["deployment_id"],
@@ -241,7 +256,7 @@ def create_deployment(client, mailbox, args, state, state_path):
                 "bucket": args.bucket,
                 "path": f"{mailbox.prefix}/models/base",
             },
-            "autoscaling": {"min": 1, "max": 1, "concurrency": 64},
+            "autoscaling": autoscaling,
             "traffic": {"weight": 100},
             "hotLoad": {
                 "bucket": args.bucket,
@@ -279,8 +294,14 @@ def parser():
     p.add_argument("--run-id", required=True, type=_run_id_argument)
     p.add_argument("--bucket", default=os.environ.get("CWTRAIN_BUCKET"))
     p.add_argument("--zone", default=os.environ.get("AWS_REGION", "US-EAST-02A"))
+    p.add_argument("--prefix-root", default="cwtrain-molab", help="S3 prefix before the run ID")
     p.add_argument("--region", default=os.environ.get("CWTRAIN_REGION", "US-WEST-04A"))
     p.add_argument("--instance-type", default=os.environ.get("CWTRAIN_INSTANCE_TYPE", "h100-2x"))
+    p.add_argument(
+        "--capacity-class",
+        choices=("on-demand", "reserved"),
+        help="restrict the deployment to one capacity class",
+    )
     p.add_argument("--runtime", default=os.environ.get("CWTRAIN_RUNTIME_VERSION", "0.32.0+crwv.5"))
     p.add_argument("--steps", type=int, choices=range(1, 11), default=3)
     p.add_argument(
@@ -343,7 +364,11 @@ def main(argv=None):
                 retries={"max_attempts": 3, "mode": "standard"},
             ),
         )
-        mailbox = Mailbox(s3, args.bucket, args.run_id, timeout=args.timeout)
+        if not re.fullmatch(r"[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*", args.prefix_root):
+            raise ValueError("Use a slash-separated prefix such as cookbook/cwtrain-molab")
+        mailbox = Mailbox(
+            s3, args.bucket, args.run_id, prefix_root=args.prefix_root, timeout=args.timeout
+        )
         LOG.info("waiting for Molab to upload s3://%s/%s/ready.json", args.bucket, mailbox.prefix)
         ready = mailbox.ready()
         state = dict(

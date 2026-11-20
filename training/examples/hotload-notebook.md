@@ -27,6 +27,11 @@ Use a bucket that Dedicated Inference can read, in its own CAIOS zone. Bucket zo
 region are separate settings. Choose a fresh run ID, such as `molab-demo-001`; the shared prefix
 will be `cwtrain-molab/molab-demo-001/`.
 
+If the bucket policy limits inference reads to a prefix, set **S3 prefix root** inside that path.
+For example, use `cookbook/cwtrain-molab` if Dedicated Inference can read `cookbook/*`.
+The generated laptop command uses the same prefix root. The rule must cover the base model and
+the hot-load snapshots. See [Grant inference access to your bucket](https://docs.coreweave.com/products/inference/models#grant-inference-access-to-your-bucket).
+
 Molab's S3 credentials need:
 
 - `s3:GetObject` and `s3:PutObject` for objects under that prefix, including control messages,
@@ -76,6 +81,8 @@ weight-sync metrics between updates.
    Molab's ready marker. Follow the storage authentication instructions beside the command.
    Set `--region`, `--instance-type`, and `--runtime` if your organization needs different
    deployment settings from the defaults.
+   Use `--capacity-class on-demand` to restrict the deployment to on-demand capacity, or
+   `--capacity-class reserved` when you have a reservation for this run.
 4. In the model cell, set `run_id_to_load` to your run ID and run the cell. It loads Qwen3-0.6B
    and builds the weight mirror. Change `prompt_seed` in the prompt exercise to see another task.
 5. Read the upload cell, set `publish_weights = True`, and run it. Molab uploads both checkpoints

@@ -249,6 +249,8 @@ def _(mo):
     A **bucket** holds objects. A **prefix** is the run's folder-like path inside that bucket.
     The bucket zone is its storage location; it can differ from the inference deployment region.
     S3 keys need GetObject, PutObject, and prefix-scoped ListBucket access, plus upload permissions.
+    Set **S3 prefix root** to a path the Dedicated Inference service can read, such as
+    `cookbook/cwtrain-molab` if the bucket policy grants access under `cookbook/`.
 
 
     Enable a GPU from Molab's Compute menu. In the Secrets panel, set `AWS_ACCESS_KEY_ID` and
@@ -270,6 +272,8 @@ def _(mo, os):
         mo.md("""
     {bucket} {zone}
 
+    {prefix_root}
+
     {run_id}
 
     {access}
@@ -283,6 +287,7 @@ def _(mo, os):
                 value=_env("CWTRAIN_BUCKET", "gradient-hotloading"), label="CAIOS bucket"
             ),
             zone=mo.ui.text(value=_env("AWS_REGION", "us-east-02a"), label="Bucket zone"),
+            prefix_root=mo.ui.text(value="cwtrain-molab", label="S3 prefix root"),
             run_id=mo.ui.text(
                 value=_env("CWTRAIN_RUN_ID", ""), label="Fresh run ID (same as laptop --run-id)"
             ),
@@ -314,6 +319,8 @@ def _(Path, json, mo, re, settings, uuid):
         raise ValueError("Set a fresh run ID: 1–63 lowercase letters, digits or hyphens.")
     if not cfg["bucket"] or not cfg["zone"]:
         raise ValueError("Bucket and zone are required.")
+    if not re.fullmatch(r"[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*", cfg["prefix_root"]):
+        raise ValueError("Use a slash-separated prefix such as cookbook/cwtrain-molab")
     if bool(cfg["access"]) != bool(cfg["secret"]):
         raise ValueError(
             "Supply both S3 access and secret keys, or leave both blank "
@@ -338,7 +345,7 @@ def _(Path, json, mo, re, settings, uuid):
             retries={"max_attempts": 3, "mode": "standard"},
         ),
     )
-    PREFIX = f"cwtrain-molab/{cfg['run_id']}"
+    PREFIX = f"{cfg['prefix_root']}/{cfg['run_id']}"
     WORK = Path.home() / "cwtrain-notebook" / cfg["run_id"] / uuid.uuid4().hex
     WORK.mkdir(parents=True, exist_ok=True)
     trainer_cache = {}
@@ -757,6 +764,8 @@ def _(mo):
     Run `source ~/.profile` separately first if your CoreWeave key is set there.
     The command uses `cwic` for temporary S3 credentials. Change to `--storage-auth aws`
     if you already configured S3 credentials.
+    If the default serving GPU is outside your quota, set `--region` and `--instance-type`
+    to an available combination. Use `--capacity-class` to select on-demand or reserved capacity.
 
     The command waits for `ready.json`, creates a gateway and deployment, and installs the root.
     Resource creation and later hot-load calls stay on the laptop. Molab only sends rollout
@@ -784,6 +793,8 @@ def _(cfg, mo):
             cfg["bucket"],
             "--zone",
             cfg["zone"].upper(),
+            "--prefix-root",
+            cfg["prefix_root"],
             "--run-id",
             cfg["run_id"],
             "--steps",
@@ -1275,6 +1286,8 @@ def _(mo):
 
     Read the cell below. `process_request()` waits for a request from the laptop, runs one
     training step, and returns its metrics after the laptop checks the new serving version.
+    Before the first rollout, the notebook can sit at zero while the laptop creates the
+    deployment and verifies the starting weights. Check the laptop terminal for setup errors.
 
     **Try it.** Set `target_step = 1` and run the cell. Check the first point in **Training
     progress** and the serving version in the laptop log. Then change the target to 2 and 3.
