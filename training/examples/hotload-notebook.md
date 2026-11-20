@@ -87,18 +87,18 @@ weight-sync metrics between updates.
    self-contained, so uploading the rest of this repository is unnecessary.
 3. Enter the same bucket, zone, and run ID in **Set up your Dedicated Inference run**.
    Submit the settings. Keep the CoreWeave platform key on the laptop.
-4. Click **Download Qwen3-0.6B and build the mirror**.
-5. Click **Upload base model and chain root**. Molab uploads both checkpoints and writes
-   `ready.json` last. The laptop then creates the deployment and installs the chain root.
-6. Click **Serve laptop requests** for each of the three steps, or set the notebook's maximum
-   steps to 3 to run them together. It waits for the
-   laptop to authorize the first step, then repeats sample → train → verify → upload → await served ack.
-   Set `WANDB_API_KEY` in Molab before this step, through Secrets or the W&B form.
+4. In the model cell, set `run_id_to_load` to your run ID and run the cell. It loads Qwen3-0.6B
+   and builds the weight mirror. Change `prompt_seed` in the prompt exercise to see another task.
+5. Read the upload cell, set `publish_weights = True`, and run it. Molab uploads both checkpoints
+   and writes `ready.json` last. The laptop then creates the deployment and installs the chain root.
+6. Set `WANDB_API_KEY` in Molab through Secrets or the W&B form. In the training cell, set
+   `target_step = 1` and run it. Inspect the charts and serving version, then raise the target
+   to 2 and 3 one at a time. Use the laptop's `--steps` argument for the final target.
 7. Check the notebook's metrics and the laptop's verified served identities. By default the
    laptop deletes the deployment and any gateway it created when it finishes or fails. Stop
    Molab's GPU from the Compute menu when finished.
 
-Marimo's lazy execution mode may require **Run stale cells** after a button or form submission.
+Use the Run control on each code cell. Marimo may also ask you to run stale cells after a form submission.
 Both sides time out after 30 minutes per mailbox wait by default; the laptop timeout can be
 changed with `--timeout`.
 
@@ -119,9 +119,8 @@ After submitting the notebook's main settings:
 3. Train normally. Molab logs reward, loss, gradient norm, log-probability gap, delta compression,
    verified tensor counts, GPU/machine stats and stage timings. The laptop returns hot-load and
    full-step timings in its CAIOS acknowledgments, so those are visible here too.
-4. Click **Finish W&B run** after the last training step to save the final verified-step table
-   and flush the run. Multiple training-button clicks can share the same W&B run. To log further
-   steps after finishing, start a new W&B run first.
+4. After the last step, set `finish_wandb = True` and run the final code cell to save the
+   verified-step table. Set it back to `False` before starting another W&B run.
 
 `WANDB_PROJECT` defaults to `cwtrain-molab`; `WANDB_ENTITY` is optional. The form can override
 both. Logging begins when its form is submitted. Gateway rollout sampling still requires a W&B key
@@ -165,9 +164,9 @@ cwtrain-molab/<run-id>/
   control/trainer-error.json   # training/export failed; restart with a fresh run
 ```
 
-An empty delta is acknowledged without triggering a hot-load; its predecessor identity remains
-unchanged. If upload or acknowledgment waiting fails, keep the kernel alive and retry **Serve
-laptop requests**: it retains the pending delta and never trains that batch twice. The upload
+For an empty delta, the laptop acknowledges the same version. If upload or acknowledgment
+waiting fails, keep the kernel alive and rerun the training cell with the same target.
+The notebook reuses the pending delta and trains each batch once. The upload
 helper checks existing files for matching content before reusing them. Retrying after a failed
 training/export is deliberately refused because optimizer/model mutation may already have
 happened.

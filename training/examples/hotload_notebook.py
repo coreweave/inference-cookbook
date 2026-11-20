@@ -88,9 +88,10 @@ def _(mo):
     3. Load the model, sample answers, train, and inspect the loss and reward charts.
     4. Follow one delta from the trainer to the serving replicas. Then clean up.
 
-    Code cells marked **Try it** are meant to be edited and run. In Molab, show code with
-    the pencil icon. Select a cell and use its Run control. The larger implementation
-    helpers stay folded so you can focus on one idea at a time.
+    Open code with the pencil icon in Molab. Read each visible Python cell, change the line
+    marked **Try it**, and use that cell's Run control. Use the forms to enter settings and
+    secrets. The Python cells below control when you load weights, upload files, and train.
+    On a fresh copy, the cloud action cells start disabled so you can read and experiment first.
     """)
     return
 
@@ -338,6 +339,7 @@ def _(Path, json, mo, re, settings, uuid):
     PREFIX = f"cwtrain-molab/{cfg['run_id']}"
     WORK = Path.home() / "cwtrain-notebook" / cfg["run_id"] / uuid.uuid4().hex
     WORK.mkdir(parents=True, exist_ok=True)
+    trainer_cache = {}
 
     def read_message(relative):
         try:
@@ -377,6 +379,7 @@ def _(Path, json, mo, re, settings, uuid):
         put_message,
         read_message,
         s3,
+        trainer_cache,
     )
 
 
@@ -414,11 +417,14 @@ def _(os):
         def __init__(self, sdk, run):
             (self.sdk, self.run) = (sdk, run)
             self.rows = []
+            self.finished = False
             run.define_metric("step")
             for prefix in ("train", "delta", "timing", "hotload"):
                 run.define_metric(f"{prefix}/*", step_metric="step")
 
         def log_step(self, step, identity, metrics, *, empty):
+            if self.finished:
+                return
             try:
                 row = {"step": step, "hotload/skipped": int(empty)}
                 for source, target in WANDB_METRICS.items():
@@ -461,6 +467,9 @@ def _(os):
                 LOG.warning("W&B step logging failed; training continues")
 
         def finish(self, exit_code):
+            if self.finished:
+                return
+            self.finished = True
             try:
                 if self.rows:
                     columns = [
@@ -668,26 +677,23 @@ def _(mo):
     Training uses fp32 weights and AdamW. The serving copy uses bf16 weights to reduce memory.
     The mirror tracks those bf16 bytes, rather than the optimizer state.
 
-    Read the next code cell before running it. Find `WeightMirror.create` and the learning rate
-    in `torch.optim.AdamW`. The run button is a guard: it prevents a normal notebook rerun from
-    downloading and initializing the model again. Run it once, then inspect your first prompt.
-
-    **Expected result:** the output reports the loaded model and the number of mirrored tensors.
-    Reloading the model starts a new optimizer, so use a new run ID after a restart.
+    Read the cell below and find `WeightMirror.create`. Its version starts at `000000`.
+    Set `run_id_to_load` to the run ID you entered above, then run the cell.
+    The output shows the model name and how many weight tensors are in the mirror.
+    Rerunning this cell with the same settings reuses the trainer and its optimizer.
+    Start with a fresh run ID if you restart the kernel.
     """)
     return
 
 
-@app.cell(hide_code=True)
-def _(mo):
-    load_model = mo.ui.run_button(label="Download Qwen3-0.6B and build the mirror")
-    load_model
-    return (load_model,)
-
-
 @app.cell
-def _(DEVICE, SimpleNamespace, WORK, cfg, load_model, mo, time, torch, uuid):
-    mo.stop(not load_model.value)
+def _(DEVICE, SimpleNamespace, WORK, cfg, mo, time, torch, trainer_cache, uuid):
+    # Try it: enter the same run ID you submitted in the settings form.
+    run_id_to_load = ""
+    mo.stop(
+        run_id_to_load != cfg["run_id"],
+        mo.md("Set `run_id_to_load` to your run ID to load the model."),
+    )
     from cwtrain.hotload import WeightMirror, inspect_snapshot, upload_snapshot
     from cwtrain.hotload.mirror import tensor_locations
     from huggingface_hub import snapshot_download
@@ -695,39 +701,43 @@ def _(DEVICE, SimpleNamespace, WORK, cfg, load_model, mo, time, torch, uuid):
 
     MODEL = "Qwen/Qwen3-0.6B"
     REVISION = "c1899de289a04d12100db370d81485cdf75e47ca"
-    _t = time.monotonic()
-    # WORK is unique to this model initialization; do not reuse an optimizer from another session.
-    _base = snapshot_download(
-        MODEL,
-        revision=REVISION,
-        local_dir=WORK / "base",
-        allow_patterns=["*.json", "*.safetensors", "*.txt", "merges.txt"],
-    )
-    from pathlib import Path as _Path
+    if "run" not in trainer_cache:
+        _t = time.monotonic()
+        # Each settings submission gets its own work directory and trainer.
+        _base = snapshot_download(
+            MODEL,
+            revision=REVISION,
+            local_dir=WORK / "base",
+            allow_patterns=["*.json", "*.safetensors", "*.txt", "merges.txt"],
+        )
+        from pathlib import Path as _Path
 
-    _base = _Path(_base)
-    _tok = AutoTokenizer.from_pretrained(_base)
-    _model = AutoModelForCausalLM.from_pretrained(_base, dtype=torch.float32).to(DEVICE)
-    _model.gradient_checkpointing_enable()
-    _model.config.use_cache = False
-    _mirror = WeightMirror.create(_base, WORK / "mirror", version="000000")
-    run = SimpleNamespace(
-        session=uuid.uuid4().hex,
-        name=cfg["run_id"],
-        work=WORK,
-        base=_base,
-        tok=_tok,
-        model=_model,
-        opt=torch.optim.AdamW(_model.parameters(), lr=1e-5, weight_decay=0.0),
-        mirror=_mirror,
-        names=sorted(tensor_locations(_base)),
-        step=0,
-        pending=None,
-        failed=False,
-        bootstrapped=False,
-        last_identity=f"{cfg['run_id']}-v000000",
-    )
-    mo.md(f"Loaded {MODEL} and mirrored {len(run.names)} tensors in {time.monotonic() - _t:.1f}s.")
+        _base = _Path(_base)
+        _tok = AutoTokenizer.from_pretrained(_base)
+        _model = AutoModelForCausalLM.from_pretrained(_base, dtype=torch.float32).to(DEVICE)
+        _model.gradient_checkpointing_enable()
+        _model.config.use_cache = False
+        _mirror = WeightMirror.create(_base, WORK / "mirror", version="000000")
+        trainer_cache["run"] = SimpleNamespace(
+            session=uuid.uuid4().hex,
+            name=cfg["run_id"],
+            work=WORK,
+            base=_base,
+            tok=_tok,
+            model=_model,
+            opt=torch.optim.AdamW(_model.parameters(), lr=1e-5, weight_decay=0.0),
+            mirror=_mirror,
+            names=sorted(tensor_locations(_base)),
+            step=0,
+            pending=None,
+            failed=False,
+            bootstrapped=False,
+            last_identity=f"{cfg['run_id']}-v000000",
+        )
+        _load_time = time.monotonic() - _t
+        mo.md(f"Loaded {MODEL} in {_load_time:.1f}s.")
+    run = trainer_cache["run"]
+    mo.md(f"Trainer ready with **{len(run.names)} mirrored tensors**.")
     return MODEL, REVISION, inspect_snapshot, run, upload_snapshot
 
 
@@ -756,26 +766,19 @@ def _(mo):
     requests to the gateway and exchanges files and messages through S3.
 
 
-    This writes the base checkpoint and a checksummed full snapshot, then writes `ready.json`
-    **last**. The laptop waits for that marker before creating the deployment. Upload retries are
-    safe. Once ready, start the laptop driver and click **Serve laptop requests** below.
+    Read the two calls to `upload_snapshot`. The first puts the base model in S3. The second
+    puts the full chain root where the serving deployment can load it.
+    Set `publish_weights = True` and run the cell. Look for the ready message. The cell writes
+    `ready.json` only after both uploads finish. If an upload fails, run the same cell again.
     """)
     return
 
 
-@app.cell(hide_code=True)
-def _(mo):
-    bootstrap = mo.ui.run_button(label="Upload base model and chain root")
-    bootstrap
-    return (bootstrap,)
-
-
-@app.cell(hide_code=True)
+@app.cell
 def _(
     MODEL,
     PREFIX,
     REVISION,
-    bootstrap,
     cfg,
     inspect_snapshot,
     mo,
@@ -785,7 +788,10 @@ def _(
     s3,
     upload_snapshot,
 ):
-    mo.stop(not bootstrap.value)
+    # Try it: read the upload order, then change False to True.
+    publish_weights = False
+    mo.stop(not publish_weights, mo.md("Set `publish_weights = True` to upload the weights."))
+    mo.stop(run.bootstrapped, mo.md("The starting weights are already in S3."))
     _existing = read_message("ready.json")
     if _existing is not None and _existing.get("session") != run.session:
         raise ValueError(
@@ -817,7 +823,7 @@ def _(
 
 
 @app.cell(hide_code=True)
-def _(DEVICE, asyncio, random, re, run, shutil, time, torch):
+def _(DEVICE, asyncio, random, reward, run, shutil, time, torch):
     PROMPTS, GROUP, MAX_TOKENS, TEMPERATURE = 8, 4, 384, 1.0
 
     async def sample_remote(tasks, *, base_url, model, token):
@@ -884,13 +890,6 @@ def _(DEVICE, asyncio, random, re, run, shutil, time, torch):
             )
             tasks.append({"question": question, "answer": a * b + c, "prompt_ids": list(ids)})
         return tasks
-
-    def reward(text, answer):
-        found = re.findall("\\\\boxed\\{\\s*([-\\d,\\.]+)\\s*\\}", text)
-        try:
-            return float(bool(found) and float(found[-1].replace(",", "")) == answer)
-        except ValueError:
-            return 0.0
 
     def train_step(batch):
         """GRPO with group-normalized advantages. Returns the step's metrics."""
@@ -1161,15 +1160,17 @@ def _(mo):
 
     The prompt includes token IDs, not just text. Exact token IDs and per-token log-probabilities
     let the trainer compare its policy with the policy that sampled the answers.
-    After loading the model, edit `prompt_seed` below and run the cell. This only builds prompts;
-    it does not sample, update weights, or call the inference service.
+    After loading the model, set `prompt_seed = 1` and run the cell. Try seed 2 to get a
+    different prompt. This cell builds prompts using the model's tokenizer.
     """)
     return
 
 
 @app.cell
 def _(make_prompts, mo):
-    prompt_seed = 1  # Try 2. Why should a fixed seed give the same arithmetic task?
+    # Try it: set 1 after loading the model. Then try 2 for a different problem.
+    prompt_seed = 0
+    mo.stop(prompt_seed == 0, mo.md("Load the model, then set `prompt_seed = 1`."))
     example_task = make_prompts(prompt_seed)[0]
     mo.md(
         f"**Prompt:** {example_task['question']}\n\n"
@@ -1177,6 +1178,33 @@ def _(make_prompts, mo):
         f"**Prompt tokens:** {len(example_task['prompt_ids'])}"
     )
     return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### Try it · Score a sample answer
+
+    This is the reward function used by the training loop. It reads the last number inside
+    `\boxed{}` and compares it with the expected answer. Predict the score, then run the
+    cell. Try changing the number or removing the box. This exercise sends no requests.
+    """)
+    return
+
+
+@app.cell
+def _(re):
+    def reward(text, answer):
+        found = re.findall("\\\\boxed\\{\\s*([-\\d,\\.]+)\\s*\\}", text)
+        try:
+            return float(bool(found) and float(found[-1].replace(",", "")) == answer)
+        except ValueError:
+            return 0.0
+
+    # Try it: change the sample answer and see how the score changes.
+    sample_answer = r"The result is \boxed{42}."
+    print("Reward:", reward(sample_answer, answer=42))
+    return (reward,)
 
 
 @app.cell(hide_code=True)
@@ -1223,30 +1251,37 @@ def _(mo):
     **Predict first:** should each step upload the full model again? Should it sample again
     as soon as the upload ends? Use the two opening experiments to explain your answers.
 
-    Read the code below the run control. Start with **one step** so you can inspect the result.
-    Give the laptop command the same total number of steps you plan to run here. For example,
-    use three notebook clicks of one step for `--steps 3`. After an upload failure, retry
-    with the same kernel to reuse the pending delta.
+    Read the cell below. `process_request()` waits for a request from the laptop, runs one
+    training step, and returns its metrics after the laptop checks the new serving version.
+
+    **Try it.** Set `target_step = 1` and run the cell. Check the first point in **Training
+    progress** and the serving version in the laptop log. Then change the target to 2 and 3.
+    The target is the total number of steps to finish. Match the final target to the laptop's
+    `--steps` argument. To retry an interrupted upload, run the cell with the same target.
     """)
     return
 
 
-@app.cell(hide_code=True)
-def _(mo):
-    steps = mo.ui.slider(1, 10, value=1, label="Maximum steps this click", show_value=True)
-    run_steps = mo.ui.run_button(label="Serve laptop requests")
-    mo.hstack([steps, run_steps])
-    return run_steps, steps
-
-
 @app.cell
-async def _(mo, process_request, run, run_steps, set_history, steps, wandb_tracker):
-    mo.stop(not run_steps.value)
+async def _(mo, os, process_request, run, set_history, wandb_tracker):
+    # Try it: set 1 first, then 2 and 3 as you inspect each result.
+    target_step = 0
+    mo.stop(target_step == 0, mo.md("Set `target_step = 1` to run the first training step."))
+    if type(target_step) is not int or not 1 <= target_step <= 10:
+        raise ValueError("Set target_step to a whole number from 1 to 10.")
     mo.stop(
         not run.bootstrapped,
         mo.callout("Upload the base model and chain root first.", kind="warn"),
     )
-    for _ in mo.status.progress_bar(range(steps.value), title="Training", remove_on_exit=True):
+    mo.stop(
+        not os.environ.get("WANDB_API_KEY", "").strip(),
+        mo.callout("Set WANDB_API_KEY in Molab for gateway access.", kind="warn"),
+    )
+    # While a delta is pending, its step still needs a serving acknowledgment.
+    completed_steps = run.step - int(run.pending is not None)
+    for _ in mo.status.progress_bar(
+        range(completed_steps, target_step), title="Training", remove_on_exit=True
+    ):
         # Sample, train, upload the delta, and wait for the laptop to verify the serving version.
         _metrics = await process_request()
         if _metrics is None:
@@ -1259,7 +1294,8 @@ async def _(mo, process_request, run, run_steps, set_history, steps, wandb_track
                 _metrics,
                 empty=_metrics["tensors_changed"] == 0,
             )
-    mo.md(f"Done: now at step {run.step}.")
+    _completed = run.step - int(run.pending is not None)
+    mo.md(f"**Completed {_completed} training steps.** Serving version: `{run.last_identity}`.")
     return
 
 
@@ -1286,21 +1322,6 @@ def _(get_history, mo):
 
 @app.cell(hide_code=True)
 def _(mo):
-    finish_tracking = mo.ui.run_button(label="Finish W&B run")
-    finish_tracking
-    return (finish_tracking,)
-
-
-@app.cell(hide_code=True)
-def _(finish_tracking, mo, wandb_tracker):
-    mo.stop(not finish_tracking.value or wandb_tracker is None)
-    wandb_tracker.finish(0)
-    mo.md("W&B run finished. Start a new W&B run before logging more training steps.")
-    return
-
-
-@app.cell(hide_code=True)
-def _(mo):
     mo.md(r"""
     ## 5 · Finish the experiment
 
@@ -1308,15 +1329,25 @@ def _(mo):
     Before leaving, explain the loop in your own words: **upload → trigger → wait → verify**.
     Which step would be missing if you only copied files to S3?
 
-    Finish the W&B run above to flush metrics. Then release the compute resources below.
+    If you started W&B logging, set `finish_wandb = True` and run the cell below to save the
+    metric table and finish the run. Reset the flag before opening another W&B run.
+    When you are done, stop the Molab GPU in the Compute menu.
 
 
     The laptop driver deletes the deployment and any gateway it created when it exits, including
     on failure. Molab never creates or deletes Dedicated Inference resources. If the laptop process
     was killed, run its `--cleanup` command using the saved local state. Uploaded run data remains
-    in CAIOS for inspection; remove that run prefix when you no longer need it. Release Molab's GPU
-    from the Compute menu when finished.
+    in CAIOS for inspection. Remove the run prefix when you no longer need those files.
     """)
+    return
+
+
+@app.cell
+def _(mo, wandb_tracker):
+    finish_wandb = False
+    mo.stop(not finish_wandb or wandb_tracker is None)
+    wandb_tracker.finish(0)
+    mo.md("W&B run finished.")
     return
 
 

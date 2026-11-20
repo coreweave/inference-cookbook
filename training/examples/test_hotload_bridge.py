@@ -500,3 +500,64 @@ def test_wandb_real_sdk_offline_recording(tmp_path, monkeypatch):
         tracker.finish(0)
     recordings = list(run_dir.glob("run-*.wandb"))
     assert recordings and recordings[0].stat().st_size > 0
+
+
+def test_tutorial_target_counts_acknowledged_steps_across_cell_reruns():
+    """Run the editable cell against a pending upload and the next laptop request."""
+    source = (ROOT / "hotload_notebook.py").read_text()
+    tree = ast.parse(source)
+    cell = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.AsyncFunctionDef)
+        and any(arg.arg == "process_request" for arg in node.args.args)
+    )
+    cell.decorator_list = []
+    # Simulate the learner changing target_step in the first line from 0 to 2.
+    assert isinstance(cell.body[0], ast.Assign)
+    cell.body[0].value = ast.Constant(2)
+    scope = {}
+    exec(compile(ast.fix_missing_locations(ast.Module([cell], [])), "tutorial", "exec"), scope)
+
+    class Paused(Exception):
+        pass
+
+    def stop(condition, *_):
+        if condition:
+            raise Paused
+
+    mo = SimpleNamespace(
+        stop=stop,
+        callout=lambda *args, **kwargs: None,
+        md=lambda message: None,
+        status=SimpleNamespace(progress_bar=lambda values, **kwargs: values),
+    )
+    run = SimpleNamespace(bootstrapped=True, step=1, pending={"step": 1}, last_identity="root")
+    completed = []
+    history = {}
+
+    async def process_request():
+        if run.pending:
+            run.pending = None
+        else:
+            run.step += 1
+        run.last_identity = f"v{run.step}"
+        completed.append(run.step)
+        return {"tensors_changed": 1, "reward": 0.5}
+
+    def set_history(update):
+        history.update(update(history))
+
+    args = dict(
+        mo=mo,
+        os=SimpleNamespace(environ={"WANDB_API_KEY": "test-key"}),
+        process_request=process_request,
+        run=run,
+        set_history=set_history,
+        wandb_tracker=None,
+    )
+    asyncio.run(scope["_"](**args))
+    assert completed == [1, 2]
+    assert list(history) == [1, 2]
+    asyncio.run(scope["_"](**args))
+    assert completed == [1, 2]
