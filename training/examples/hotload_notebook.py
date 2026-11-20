@@ -84,7 +84,7 @@ def _(mo):
     **Your route through the tutorial**
 
     1. Explore weights and serving versions with two experiments. No credentials or GPU required.
-    2. Choose Local mode to try the trainer, or Dedicated Inference to try the full system.
+    2. Set up Molab, Dedicated Inference, and CAIOS for your run.
     3. Load the model, sample answers, train, and inspect the loss and reward charts.
     4. Follow one delta from the trainer to the serving replicas. Then clean up.
 
@@ -233,14 +233,10 @@ def _(mo, os):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## 1 · Choose your run
+    ## 1 · Set up your Dedicated Inference run
 
-    **Local** runs sampling and training on Molab's GPU. It needs no S3 credentials and makes
-    no Dedicated Inference deployment. Start here if you want to learn the trainer first.
-
-    **Laptop-managed Dedicated Inference** follows the diagram above. Molab trains, while
-    a separate GPU serves rollouts. This uses Molab compute, Dedicated Inference capacity,
-    and object storage. You need access to all three before starting the full run.
+    You need a training GPU in Molab, capacity for a serving GPU in Dedicated Inference,
+    and a CAIOS bucket both programs can access.
 
     | Credential | Put it where? | What is it for? |
     | --- | --- | --- |
@@ -269,8 +265,6 @@ def _(mo, os):
     _env = os.environ.get
     settings = (
         mo.md("""
-    {mode}
-
     {bucket} {zone}
 
     {run_id}
@@ -282,11 +276,6 @@ def _(mo, os):
     {session_token}
     """)
         .batch(
-            mode=mo.ui.radio(
-                ["Laptop-managed Dedicated Inference", "Local"],
-                value="Laptop-managed Dedicated Inference",
-                label="Mode",
-            ),
             bucket=mo.ui.text(
                 value=_env("CWTRAIN_BUCKET", "gradient-hotloading"), label="CAIOS bucket"
             ),
@@ -318,40 +307,36 @@ def _(mo, os):
 def _(Path, json, mo, re, settings, uuid):
     mo.stop(settings.value is None, mo.md("_Submit settings to continue._"))
     cfg = dict(settings.value)
-    REMOTE = cfg["mode"] != "Local"
-    if REMOTE:
-        if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", cfg["run_id"]):
-            raise ValueError("Set a fresh run ID: 1–63 lowercase letters, digits or hyphens.")
-        if not cfg["bucket"] or not cfg["zone"]:
-            raise ValueError("Bucket and zone are required.")
-        if bool(cfg["access"]) != bool(cfg["secret"]):
-            raise ValueError(
-                "Supply both S3 access and secret keys, or leave both blank "
-                "for the AWS credential chain."
-            )
-        import boto3
-        from botocore.config import Config
-
-        _keys = {}
-        if cfg["access"]:
-            _keys = dict(aws_access_key_id=cfg["access"], aws_secret_access_key=cfg["secret"])
-            if cfg["session_token"]:
-                _keys["aws_session_token"] = cfg["session_token"]
-        s3 = boto3.Session(**_keys).client(
-            "s3",
-            endpoint_url="https://cwobject.com",
-            region_name=cfg["zone"].upper(),
-            config=Config(
-                s3={"addressing_style": "virtual"},
-                connect_timeout=15,
-                read_timeout=120,
-                retries={"max_attempts": 3, "mode": "standard"},
-            ),
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", cfg["run_id"]):
+        raise ValueError("Set a fresh run ID: 1–63 lowercase letters, digits or hyphens.")
+    if not cfg["bucket"] or not cfg["zone"]:
+        raise ValueError("Bucket and zone are required.")
+    if bool(cfg["access"]) != bool(cfg["secret"]):
+        raise ValueError(
+            "Supply both S3 access and secret keys, or leave both blank "
+            "for the AWS credential chain."
         )
-    else:
-        s3 = None
-    PREFIX = f"cwtrain-molab/{cfg['run_id']}" if REMOTE else ""
-    WORK = Path.home() / "cwtrain-notebook" / (cfg["run_id"] or "local") / uuid.uuid4().hex
+    import boto3
+    from botocore.config import Config
+
+    _keys = {}
+    if cfg["access"]:
+        _keys = dict(aws_access_key_id=cfg["access"], aws_secret_access_key=cfg["secret"])
+        if cfg["session_token"]:
+            _keys["aws_session_token"] = cfg["session_token"]
+    s3 = boto3.Session(**_keys).client(
+        "s3",
+        endpoint_url="https://cwobject.com",
+        region_name=cfg["zone"].upper(),
+        config=Config(
+            s3={"addressing_style": "virtual"},
+            connect_timeout=15,
+            read_timeout=120,
+            retries={"max_attempts": 3, "mode": "standard"},
+        ),
+    )
+    PREFIX = f"cwtrain-molab/{cfg['run_id']}"
+    WORK = Path.home() / "cwtrain-notebook" / cfg["run_id"] / uuid.uuid4().hex
     WORK.mkdir(parents=True, exist_ok=True)
 
     def read_message(relative):
@@ -383,14 +368,9 @@ def _(Path, json, mo, re, settings, uuid):
         if step is not None and message.get("step") != step:
             raise ValueError("S3 message has an unexpected training step.")
 
-    mo.md(
-        f"Run prefix: `s3://{cfg['bucket']}/{PREFIX}/`"
-        if REMOTE
-        else "Local mode: sampling and training on this GPU."
-    )
+    mo.md(f"Run prefix: `s3://{cfg['bucket']}/{PREFIX}/`")
     return (
         PREFIX,
-        REMOTE,
         WORK,
         cfg,
         check_message,
@@ -578,9 +558,7 @@ def _(mo, os):
 def _(WORK, cfg, start_notebook_tracking, wandb_settings):
     wandb_tracker = None
     if wandb_settings.value is not None and wandb_settings.value["enabled"]:
-        wandb_tracker = start_notebook_tracking(
-            wandb_settings.value, WORK, cfg["run_id"] or "molab-local"
-        )
+        wandb_tracker = start_notebook_tracking(wandb_settings.value, WORK, cfg["run_id"])
     return (wandb_tracker,)
 
 
@@ -735,7 +713,7 @@ def _(DEVICE, SimpleNamespace, WORK, cfg, load_model, mo, time, torch, uuid):
     _mirror = WeightMirror.create(_base, WORK / "mirror", version="000000")
     run = SimpleNamespace(
         session=uuid.uuid4().hex,
-        name=cfg["run_id"] or "local",
+        name=cfg["run_id"],
         work=WORK,
         base=_base,
         tok=_tok,
@@ -762,10 +740,9 @@ def _(mo):
     snapshot called the **chain root**. Every later delta refers to an exact predecessor.
     The chain is valid only when the trainer and service agree on that starting version.
 
-    Local mode skips this section. For Dedicated Inference, run this command in a terminal
-    **on the laptop**, from this repository. Use the same bucket, zone, run ID, and step count
-    as this notebook. `cwic` is a locally installed tool that exchanges the platform key for
-    temporary S3 credentials. Use `--storage-auth aws` if you already configured S3 credentials.
+    Run this command in a terminal **on the laptop**, from this repository. Match the bucket,
+    zone, run ID, and step count in this notebook. `cwic` exchanges the platform key for temporary
+    S3 credentials. Use `--storage-auth aws` if you already configured S3 credentials.
 
     ```bash
     source ~/.profile
@@ -787,8 +764,7 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(REMOTE, mo):
-    mo.stop(not REMOTE)
+def _(mo):
     bootstrap = mo.ui.run_button(label="Upload base model and chain root")
     bootstrap
     return (bootstrap,)
@@ -798,7 +774,6 @@ def _(REMOTE, mo):
 def _(
     MODEL,
     PREFIX,
-    REMOTE,
     REVISION,
     bootstrap,
     cfg,
@@ -810,7 +785,6 @@ def _(
     s3,
     upload_snapshot,
 ):
-    mo.stop(not REMOTE)
     mo.stop(not bootstrap.value)
     _existing = read_message("ready.json")
     if _existing is not None and _existing.get("session") != run.session:
@@ -861,15 +835,17 @@ def _(DEVICE, asyncio, random, re, run, shutil, time, torch):
         try:
             groups = await asyncio.gather(
                 *(
-                    sampler.sample(t["prompt_ids"], 4, max_tokens=384, temperature=1.0)
-                    for t in tasks
+                    sampler.sample(
+                        task["prompt_ids"], GROUP, max_tokens=MAX_TOKENS, temperature=TEMPERATURE
+                    )
+                    for task in tasks
                 )
             )
         finally:
             await sampler.aclose()
         result = []
         for group in groups:
-            if len(group) != 4:
+            if len(group) != GROUP:
                 raise ValueError("deployment did not return four completions per prompt")
             row = []
             for completion in group:
@@ -915,57 +891,6 @@ def _(DEVICE, asyncio, random, re, run, shutil, time, torch):
             return float(bool(found) and float(found[-1].replace(",", "")) == answer)
         except ValueError:
             return 0.0
-
-    @torch.no_grad()
-    def sample_local(tasks):
-        """The same groups, sampled with this GPU: what the deployment does in remote mode."""
-        (tok, model) = (run.tok, run.model)
-        model.eval()
-        width = max((len(t["prompt_ids"]) for t in tasks))
-        pad = tok.pad_token_id if tok.pad_token_id is not None else tok.eos_token_id
-        ids = torch.tensor(
-            [[pad] * (width - len(t["prompt_ids"])) + t["prompt_ids"] for t in tasks], device=DEVICE
-        )
-        mask = (
-            torch.arange(width, device=DEVICE)[None]
-            >= (width - torch.tensor([len(t["prompt_ids"]) for t in tasks], device=DEVICE))[:, None]
-        ).long()
-        with torch.autocast(DEVICE, dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
-            out = model.generate(
-                input_ids=ids,
-                attention_mask=mask,
-                do_sample=True,
-                temperature=TEMPERATURE,
-                top_p=1.0,
-                top_k=0,
-                max_new_tokens=MAX_TOKENS,
-                num_return_sequences=GROUP,
-                output_logits=True,
-                return_dict_in_generate=True,
-                pad_token_id=pad,
-                use_cache=True,
-            )
-        model.train()
-        new = out.sequences[:, width:]
-        logp = torch.stack(out.logits, 1).float().log_softmax(-1).gather(-1, new[..., None])[..., 0]
-        eos = model.generation_config.eos_token_id
-        stops = {tok.eos_token_id, *(eos if isinstance(eos, list) else [eos])}
-        groups = []
-        for i in range(len(tasks)):
-            group = []
-            for j in range(GROUP):
-                row = new[i * GROUP + j].tolist()
-                end = next((k + 1 for (k, t) in enumerate(row) if t in stops), len(row))
-                group.append(
-                    {
-                        "ids": row[:end],
-                        "logprobs": logp[i * GROUP + j, :end].tolist(),
-                        "text": tok.decode(row[:end], skip_special_tokens=True),
-                        "cached": None,
-                    }
-                )
-            groups.append(group)
-        return groups
 
     def train_step(batch):
         """GRPO with group-normalized advantages. Returns the step's metrics."""
@@ -1067,7 +992,7 @@ def _(DEVICE, asyncio, random, re, run, shutil, time, torch):
             },
         )
 
-    return export_delta, make_prompts, sample_local, sample_remote, train_step
+    return export_delta, make_prompts, sample_remote, train_step
 
 
 @app.cell(hide_code=True)
@@ -1289,7 +1214,7 @@ def _(mo):
     2. Score each answer: 1 for a correct boxed number, 0 otherwise.
     3. Normalize rewards within each group and update the model.
     4. Save serving weights, encode a delta, and check it against the mirror.
-    5. In Dedicated Inference mode, upload the delta and wait for the laptop to verify it is served.
+    5. Upload the delta and wait for the laptop to verify that the replicas serve it.
 
     If all rewards within every group are equal, all advantages are zero and the optimizer
     update is skipped. An empty delta needs no hot-load. A zero loss alone does not prove
@@ -1299,72 +1224,38 @@ def _(mo):
     as soon as the upload ends? Use the two opening experiments to explain your answers.
 
     Read the code below the run control. Start with **one step** so you can inspect the result.
-    For Dedicated Inference, give the laptop command the same total number of steps you plan
-    to run here. For example, use three notebook clicks of one step for `--steps 3`.
-
-
-    In laptop-managed mode, this waits for permission in CAIOS, samples with W&B gateway auth,
-    trains, uploads each verified delta,
-    and waits for the laptop's served-version acknowledgment. Start the laptop driver with the same
-    step count. A retry after an upload timeout reuses the pending delta without training twice.
-
-    In Local mode, the same button samples and trains here, then verifies deltas without uploading.
+    Give the laptop command the same total number of steps you plan to run here. For example,
+    use three notebook clicks of one step for `--steps 3`. After an upload failure, retry
+    with the same kernel to reuse the pending delta.
     """)
     return
 
 
 @app.cell(hide_code=True)
-def _(REMOTE, mo):
+def _(mo):
     steps = mo.ui.slider(1, 10, value=1, label="Maximum steps this click", show_value=True)
-    run_steps = mo.ui.run_button(label="Serve laptop requests" if REMOTE else "Run local steps")
+    run_steps = mo.ui.run_button(label="Serve laptop requests")
     mo.hstack([steps, run_steps])
     return run_steps, steps
 
 
 @app.cell
-async def _(
-    REMOTE,
-    export_delta,
-    make_prompts,
-    mo,
-    process_request,
-    run,
-    run_steps,
-    sample_local,
-    set_history,
-    steps,
-    time,
-    train_step,
-    wandb_tracker,
-):
+async def _(mo, process_request, run, run_steps, set_history, steps, wandb_tracker):
     mo.stop(not run_steps.value)
     mo.stop(
-        REMOTE and not run.bootstrapped,
+        not run.bootstrapped,
         mo.callout("Upload the base model and chain root first.", kind="warn"),
     )
     for _ in mo.status.progress_bar(range(steps.value), title="Training", remove_on_exit=True):
-        _step_started = time.monotonic()
-        if REMOTE:
-            _metrics = await process_request()
-            if _metrics is None:
-                break
-        else:
-            _tasks = make_prompts(run.step + 1)
-            _t = time.monotonic()
-            _groups = sample_local(_tasks)
-            _sample_s = time.monotonic() - _t
-            _t = time.monotonic()
-            _metrics = train_step({"tasks": _tasks, "groups": _groups})
-            _metrics.update(sample_s=_sample_s, train_s=time.monotonic() - _t)
-            _delta, _stats, _delta_metrics = export_delta(run.step + 1)
-            run.step += 1
-            _metrics.update(_delta_metrics)
-            _metrics["step_s"] = time.monotonic() - _step_started
+        # Sample, train, upload the delta, and wait for the laptop to verify the serving version.
+        _metrics = await process_request()
+        if _metrics is None:
+            break
         set_history(lambda h, s=run.step, m=_metrics: {**h, s: m})
         if wandb_tracker is not None:
             wandb_tracker.log_step(
                 run.step,
-                run.last_identity if REMOTE else f"local-v{run.step:06d}",
+                run.last_identity,
                 _metrics,
                 empty=_metrics["tensors_changed"] == 0,
             )
@@ -1386,7 +1277,7 @@ def _(get_history, mo):
 
     - Open **Step metrics** in Training progress. Did the model update when you expected it to?
     - Compare the changed-weight size with the uploaded delta size. Is compression useful here?
-    - In Dedicated Inference mode, compare the served identity in the laptop log with this step.
+    - Compare the served identity in the laptop log with this step.
     - Run one more step. Does reward improve? A few stochastic batches can fluctuate;
       loss and reward do not have to move together on every step.
     """)

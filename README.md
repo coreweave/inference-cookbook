@@ -66,8 +66,7 @@ with the [laptop driver](training/examples/hotload_laptop.py). The laptop handle
 creation, deletion and all hot-load control; Molab samples through a W&B-authenticated gateway,
 trains Qwen3-0.6B, displays native training charts, and exchanges verified delta weights through CAIOS.
 The CoreWeave API token stays on the laptop. Follow the [two-process walkthrough](training/examples/hotload-notebook.md) for setup,
-credential scope and cleanup. The notebook's Local mode samples and trains on its GPU without
-CAIOS or a CoreWeave account. Set `WANDB_API_KEY` in Molab and start the notebook’s W&B run
+credential scope and cleanup. Set `WANDB_API_KEY` in Molab and start the notebook’s W&B run
 to record the same metrics shown in the native loss, reward, and gradient charts.
 
 ## Case studies

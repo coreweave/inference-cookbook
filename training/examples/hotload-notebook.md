@@ -3,7 +3,7 @@
 Run the training GPU in Molab while keeping Dedicated Inference management and all hot-load control on your laptop.
 The two processes communicate through CoreWeave AI Object Storage (CAIOS), using one fresh
 prefix per run. Molab uses S3 credentials and a W&B key for gateway rollout access and inline visualization;
-the CoreWeave platform API token stays on the laptop. Local mode remains available for a demo without either CAIOS or Dedicated Inference.
+the CoreWeave platform API token stays on the laptop.
 
 | Component | Runs where | Access it needs |
 | --- | --- | --- |
@@ -64,8 +64,7 @@ no GPU or account. Edit the inputs and rerun each cell to check your predictions
 
 The later exercises inspect a real tokenized prompt and ask you to read the training loop and
 laptop hot-load calls. The step control defaults to one so you can inspect loss, reward, and
-weight-sync metrics between updates. Local mode teaches the trainer without cloud inference;
-it does not verify the remote hot-load path.
+weight-sync metrics between updates.
 
 ## Run both sides
 
@@ -86,13 +85,13 @@ it does not verify the remote hot-load path.
 
 2. Import `training/examples/hotload_notebook.py` into Molab and attach a GPU. The file is
    self-contained, so uploading the rest of this repository is unnecessary.
-3. Choose **Laptop-managed Dedicated Inference**, enter the same bucket, zone and run ID, and
-   submit the settings. Do not set a CoreWeave API token in Molab; remove any old one you added
-   while testing the previous notebook.
+3. Enter the same bucket, zone, and run ID in **Set up your Dedicated Inference run**.
+   Submit the settings. Keep the CoreWeave platform key on the laptop.
 4. Click **Download Qwen3-0.6B and build the mirror**.
 5. Click **Upload base model and chain root**. Molab uploads both checkpoints and writes
    `ready.json` last. The laptop then creates the deployment and installs the chain root.
-6. Set the notebook's maximum steps to 3 and click **Serve laptop requests**. It waits for the
+6. Click **Serve laptop requests** for each of the three steps, or set the notebook's maximum
+   steps to 3 to run them together. It waits for the
    laptop to authorize the first step, then repeats sample → train → verify → upload → await served ack.
    Set `WANDB_API_KEY` in Molab before this step, through Secrets or the W&B form.
 7. Check the notebook's metrics and the laptop's verified served identities. By default the
@@ -126,7 +125,7 @@ After submitting the notebook's main settings:
 
 `WANDB_PROJECT` defaults to `cwtrain-molab`; `WANDB_ENTITY` is optional. The form can override
 both. Logging begins when its form is submitted. Gateway rollout sampling still requires a W&B key
-when tracking is disabled; Local mode can run without one.
+when tracking is disabled.
 Choose **offline** in the form to record in the Molab filesystem without uploading, and sync
 that saved run before the notebook's ephemeral storage is lost.
 
@@ -141,8 +140,8 @@ that saved run before the notebook's ephemeral storage is lost.
 | `tables/verified_steps` | Numeric metrics for every successfully served step |
 
 Automatic W&B machine/GPU statistics now describe the Molab worker. Full-step timing includes
-CAIOS transfer and waiting; upload timing accumulates retry attempts. In Local mode there are
-no upload or hot-load timings. The run summary records the completed step count and last served
+CAIOS transfer and waiting. Upload timing accumulates retry attempts. The run summary records
+the completed step count and last served
 snapshot identity. Credentials, rollout text and model weights are excluded from this
 integration's logged data; automatic code/git/console capture is disabled. Logging failures do
 not interrupt training or the CAIOS acknowledgment barrier.
