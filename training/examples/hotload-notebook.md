@@ -1,4 +1,4 @@
-# Molab training with laptop-managed Dedicated Inference
+# Reinforcement Learning with Hot-Load APIs on CoreWeave Forge
 
 Run the training GPU in Molab while keeping Dedicated Inference management and all hot-load control on your laptop.
 The two processes communicate through CoreWeave AI Object Storage (CAIOS), using one fresh
@@ -54,6 +54,18 @@ credential chain. With `--storage-auth cwic`, the driver uses the locally instal
 accesskey api-token` credential process instead. That exchange happens only on the laptop.
 Credentials are never included in the S3 messages or local resource-state JSON. The cwic cache
 is under the ignored `.cwtrain-laptop/` directory; treat it as local credential material.
+
+## Learn the system first
+
+The notebook opens with a system diagram and explanations of Dedicated Inference, gateways,
+replicas, cwtrain, snapshots, and hot-loads. Run the two visible code experiments before setting
+credentials: rebuild a small XOR delta and test a simulated serving-version barrier. They need
+no GPU or account. Edit the inputs and rerun each cell to check your predictions.
+
+The later exercises inspect a real tokenized prompt and ask you to read the training loop and
+laptop hot-load calls. The step control defaults to one so you can inspect loss, reward, and
+weight-sync metrics between updates. Local mode teaches the trainer without cloud inference;
+it does not verify the remote hot-load path.
 
 ## Run both sides
 

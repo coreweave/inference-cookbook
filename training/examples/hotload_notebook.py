@@ -30,7 +30,10 @@ See hotload-notebook.md for the two-process walkthrough.
 import marimo
 
 __generated_with = "0.25.2"
-app = marimo.App(width="medium", app_title="cwtrain CAIOS training worker")
+app = marimo.App(
+    width="medium",
+    app_title="Reinforcement Learning with Hot-Load APIs on CoreWeave Forge",
+)
 
 
 @app.cell(hide_code=True)
@@ -66,27 +69,150 @@ def _():
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    # Train in Molab, manage inference on your laptop
+    # Reinforcement Learning with Hot-Load APIs on CoreWeave Forge
 
-    The laptop creates and deletes Dedicated Inference resources and runs **all hot-load control**:
-    trigger, status polling, and replica verification. This notebook samples through a
-    **W&B-authenticated gateway**, trains Qwen3-0.6B on its GPU, verifies compressed deltas,
-    uploads them to **CoreWeave AI Object Storage (CAIOS)**, and displays native training charts.
+    **Train a model. Send its new weights to a running inference service. Repeat.**
 
-    | Laptop | CAIOS handoff | Molab GPU |
-    | --- | --- | --- |
-    | Create W&B gateway and deployment; install root | Base + full snapshot ← | Load and upload |
-    | Authorize next step | Endpoint + predecessor → | Sample with W&B key; train |
-    | Trigger hot-load; poll; verify every replica | Verified delta ← | Encode, checksum, upload |
-    | Confirm the served identity | Acknowledgment → | Advance; log and display charts |
+    You may already know the RL loop: sample answers, score them, and update the policy.
+    This tutorial adds one new idea: the trainer and the service that samples answers can
+    run on different GPUs. A **hot-load** lets that service use updated weights without
+    creating a new deployment for every training step.
 
-    The CoreWeave platform key stays on the laptop. Set `WANDB_API_KEY` here for gateway
-    rollout access and notebook charts. S3 credentials need **GetObject, PutObject and
-    prefix-scoped ListBucket** access under this run's prefix. Public model downloads
-    and package installation also need network access.
+    We will train Qwen3-0.6B on small arithmetic tasks with GRPO. The goal is to understand
+    the weight-update loop, rather than to build a strong math model in a few steps.
 
-    Choose **Local** to sample on this GPU too, without S3.
+    **Your route through the tutorial**
+
+    1. Explore weights and serving versions with two experiments. No credentials or GPU required.
+    2. Choose Local mode to try the trainer, or Dedicated Inference to try the full system.
+    3. Load the model, sample answers, train, and inspect the loss and reward charts.
+    4. Follow one delta from the trainer to the serving replicas. Then clean up.
+
+    Code cells marked **Try it** are meant to be edited and run. In Molab, show code with
+    the pencil icon. Select a cell and use its Run control. The larger implementation
+    helpers stay folded so you can focus on one idea at a time.
     """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## The three building blocks
+
+    **Dedicated Inference** is a model-serving deployment with GPUs assigned to it.
+    You send prompts to its gateway and receive completions. A **gateway** is the front door:
+    it checks authentication and routes requests to the deployment. A **replica** is one
+    running copy of the model. This tutorial uses one replica to keep the system small.
+
+    **cwtrain** is the Python library that connects training to Dedicated Inference.
+    It helps sample exact tokens and their log-probabilities, prepare weight snapshots,
+    upload them, and call the hot-load API.
+
+    **The hot-load API** tells an existing deployment to load a weight snapshot already
+    stored in object storage. Uploading a snapshot does **not** change the serving model.
+    You must trigger the load, wait for it, and check which version the replicas serve.
+
+    In this tutorial, the trainer runs in **Molab**. A small control program runs on your
+    **laptop** and makes the management API calls. That program can also run on a devbox.
+    The CoreWeave platform key stays with that program.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.vstack(
+        [
+            mo.md("## Where does each part run?"),
+            mo.mermaid("""
+        flowchart TB
+            M["Molab - training GPU<br/>Sample, score, train<br/>Native training charts"]
+            L["Laptop - CPU<br/>Create and delete deployment<br/>Trigger, wait, verify"]
+            S[("CAIOS / S3<br/>Weights and step messages")]
+            F["CoreWeave Forge - inference GPU<br/>Gateway and serving replicas"]
+            M <-->|Rollouts: W and B key| F
+            M -->|Upload weights| S
+            S -->|Read weights| F
+            L -->|CoreWeave API key| F
+            L <-->|Step messages| S
+        """),
+            mo.md("""
+        **One iteration:** sample from version A → train → upload delta B → hot-load B →
+        verify B on every replica → sample the next batch.
+
+        CAIOS means **CoreWeave AI Object Storage**. It provides an S3-compatible API.
+        Here it stores both model files and small JSON messages between the two programs.
+        W&B records training metrics; the charts inside this notebook are native plots.
+        """),
+        ]
+    )
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Try it · Rebuild new weights from a delta
+
+    A **snapshot** is a versioned set of weight files. The first snapshot contains full weights.
+    Later snapshots can hold a **delta**: the byte changes relative to the previous snapshot.
+
+    cwtrain uses XOR to encode those changes and Zstandard to compress them. It keeps a
+    **weight mirror**, a local copy of the serving weights, and checks that each delta rebuilds
+    the expected bytes. The real serving weights below use bf16.
+
+    Run this tiny example first. It uses ordinary bytes so you can see the XOR operation.
+    **Before running:** what will happen if you change the base used to rebuild the weights?
+    Set `demo_wrong_base = demo_base` and run the cell again. Compare both results.
+    """)
+    return
+
+
+@app.cell
+def _():
+    # Try it: change a byte, then run this cell. This does not touch the real model.
+    demo_base = bytes([10, 20, 30, 40])
+    demo_updated = bytes([10, 21, 30, 42])
+    demo_delta = bytes(old ^ new for old, new in zip(demo_base, demo_updated, strict=True))
+    demo_rebuilt = bytes(old ^ change for old, change in zip(demo_base, demo_delta, strict=True))
+    assert demo_rebuilt == demo_updated
+    print("Base:   ", list(demo_base))
+    print("Delta:  ", list(demo_delta))
+    print("Rebuilt:", list(demo_rebuilt))
+    # Try a wrong base. The same delta no longer rebuilds the intended weights.
+    demo_wrong_base = bytes([11, 20, 30, 40])
+    print(
+        "Wrong base matches:",
+        bytes(a ^ b for a, b in zip(demo_wrong_base, demo_delta)) == demo_updated,
+    )
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Try it · When is it safe to sample again?
+
+    GRPO compares answers from the policy that produced the batch. If the next batch comes
+    from old serving weights, it no longer reflects the latest policy.
+
+    A hot-load request can be accepted before all replicas finish loading. The control program
+    therefore waits and verifies every replica before it allows the next batch.
+    Run the cell below. Then change `replica_versions` so both replicas serve `B`, and run it again.
+    These are simulated versions; no API requests are sent.
+    """)
+    return
+
+
+@app.cell
+def _():
+    # Try it: one replica is still loading. Should the next rollout batch start?
+    requested_version = "B"
+    replica_versions = ["B", "A"]
+    safe_to_sample = all(version == requested_version for version in replica_versions)
+    print("Replica versions:", replica_versions)
+    print("Next action:", "Sample from B" if safe_to_sample else "Wait; a replica still serves A")
     return
 
 
@@ -107,7 +233,25 @@ def _(mo, os):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## 1 · Settings
+    ## 1 · Choose your run
+
+    **Local** runs sampling and training on Molab's GPU. It needs no S3 credentials and makes
+    no Dedicated Inference deployment. Start here if you want to learn the trainer first.
+
+    **Laptop-managed Dedicated Inference** follows the diagram above. Molab trains, while
+    a separate GPU serves rollouts. This uses Molab compute, Dedicated Inference capacity,
+    and object storage. You need access to all three before starting the full run.
+
+    | Credential | Put it where? | What is it for? |
+    | --- | --- | --- |
+    | CoreWeave platform key | Laptop only | Create/delete resources and control hot-loads |
+    | S3 access and secret keys | Molab and laptop | Read/write weights and step messages |
+    | W&B API key | Molab | Authenticate gateway rollouts and optionally log metrics |
+
+    A **bucket** holds objects. A **prefix** is the run's folder-like path inside that bucket.
+    The bucket zone is its storage location; it can differ from the inference deployment region.
+    S3 keys need GetObject, PutObject, and prefix-scoped ListBucket access, plus upload permissions.
+
 
     Enable a GPU from Molab's Compute menu. In the Secrets panel, set `AWS_ACCESS_KEY_ID` and
     `AWS_SECRET_ACCESS_KEY`; add `AWS_SESSION_TOKEN` if the credentials include one. Existing
@@ -540,10 +684,18 @@ def _(get_history, mo):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## 2 · Load the model and build its weight mirror
+    ## 2 · Meet the trainer and its serving-weight mirror
 
-    This keeps fp32 training weights and AdamW on the GPU, plus a byte-exact bf16 mirror on disk.
-    The mirror verifies every delta before it can be uploaded.
+    The model starts from a fixed Qwen3-0.6B revision so both sides have the same base.
+    Training uses fp32 weights and AdamW. The serving copy uses bf16 weights to reduce memory.
+    The mirror tracks those bf16 bytes, rather than the optimizer state.
+
+    Read the next code cell before running it. Find `WeightMirror.create` and the learning rate
+    in `torch.optim.AdamW`. The run button is a guard: it prevents a normal notebook rerun from
+    downloading and initializing the model again. Run it once, then inspect your first prompt.
+
+    **Expected result:** the output reports the loaded model and the number of mirrored tensors.
+    Reloading the model starts a new optimizer, so use a new run ID after a restart.
     """)
     return
 
@@ -555,7 +707,7 @@ def _(mo):
     return (load_model,)
 
 
-@app.cell(hide_code=True)
+@app.cell
 def _(DEVICE, SimpleNamespace, WORK, cfg, load_model, mo, time, torch, uuid):
     mo.stop(not load_model.value)
     from cwtrain.hotload import WeightMirror, inspect_snapshot, upload_snapshot
@@ -604,7 +756,28 @@ def _(DEVICE, SimpleNamespace, WORK, cfg, load_model, mo, time, torch, uuid):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## 3 · Upload the base model and chain root
+    ## 3 · Give the serving service its starting weights
+
+    A serving deployment must first read a full model. We upload the base model and a full
+    snapshot called the **chain root**. Every later delta refers to an exact predecessor.
+    The chain is valid only when the trainer and service agree on that starting version.
+
+    Local mode skips this section. For Dedicated Inference, run this command in a terminal
+    **on the laptop**, from this repository. Use the same bucket, zone, run ID, and step count
+    as this notebook. `cwic` is a locally installed tool that exchanges the platform key for
+    temporary S3 credentials. Use `--storage-auth aws` if you already configured S3 credentials.
+
+    ```bash
+    source ~/.profile
+    uv run training/examples/hotload_laptop.py \
+      --bucket YOUR_BUCKET --zone US-EAST-02A \
+      --run-id YOUR_FRESH_RUN_ID --steps 3 --storage-auth cwic
+    ```
+
+    The command waits for `ready.json`, creates a gateway and deployment, and installs the root.
+    Resource creation and later hot-load calls stay on the laptop. Molab only sends rollout
+    requests to the gateway and exchanges files and messages through S3.
+
 
     This writes the base checkpoint and a checksummed full snapshot, then writes `ready.json`
     **last**. The laptop waits for that marker before creating the deployment. Upload retries are
@@ -1059,7 +1232,76 @@ def _(
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## 4 · Run training steps
+    ### Try it · Inspect a real rollout prompt
+
+    The prompt includes token IDs, not just text. Exact token IDs and per-token log-probabilities
+    let the trainer compare its policy with the policy that sampled the answers.
+    After loading the model, edit `prompt_seed` below and run the cell. This only builds prompts;
+    it does not sample, update weights, or call the inference service.
+    """)
+    return
+
+
+@app.cell
+def _(make_prompts, mo):
+    prompt_seed = 1  # Try 2. Why should a fixed seed give the same arithmetic task?
+    example_task = make_prompts(prompt_seed)[0]
+    mo.md(
+        f"**Prompt:** {example_task['question']}\n\n"
+        f"**Target:** {example_task['answer']} · "
+        f"**Prompt tokens:** {len(example_task['prompt_ids'])}"
+    )
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### What does the laptop do after an upload?
+
+    Read this small part of the laptop program. It runs there because these are management
+    API calls that need the CoreWeave platform key. It does not run in this notebook.
+
+    ```python
+    # Laptop: identity names the uploaded snapshot; previous_identity names its base.
+    hot_load = loader.trigger(identity, previous_identity=previous_identity)
+    loader.wait(hot_load.id)
+    loader.verify_served(hot_load.id, identity)
+    # Only now: send the acknowledgment that allows Molab to advance.
+    ```
+
+    `loader` is a cwtrain `HotLoader` connected to the deployment. Trigger asks for the load;
+    wait checks request progress; verify checks the replicas' actual serving identities.
+    The real program also resets the prompt cache for a changed model. Open
+    `hotload_laptop.py` to follow resource creation, the step loop, and cleanup.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## 4 · Read one iteration, then run it
+
+    The implementation follows the same order as an ordinary GRPO loop:
+
+    1. Build eight arithmetic prompts and sample four answers for each prompt.
+    2. Score each answer: 1 for a correct boxed number, 0 otherwise.
+    3. Normalize rewards within each group and update the model.
+    4. Save serving weights, encode a delta, and check it against the mirror.
+    5. In Dedicated Inference mode, upload the delta and wait for the laptop to verify it is served.
+
+    If all rewards within every group are equal, all advantages are zero and the optimizer
+    update is skipped. An empty delta needs no hot-load. A zero loss alone does not prove
+    that training succeeded: check reward and the `trained` field in the metric table too.
+
+    **Predict first:** should each step upload the full model again? Should it sample again
+    as soon as the upload ends? Use the two opening experiments to explain your answers.
+
+    Read the code below the run control. Start with **one step** so you can inspect the result.
+    For Dedicated Inference, give the laptop command the same total number of steps you plan
+    to run here. For example, use three notebook clicks of one step for `--steps 3`.
+
 
     In laptop-managed mode, this waits for permission in CAIOS, samples with W&B gateway auth,
     trains, uploads each verified delta,
@@ -1073,13 +1315,13 @@ def _(mo):
 
 @app.cell(hide_code=True)
 def _(REMOTE, mo):
-    steps = mo.ui.slider(1, 10, value=3, label="Maximum steps this click", show_value=True)
+    steps = mo.ui.slider(1, 10, value=1, label="Maximum steps this click", show_value=True)
     run_steps = mo.ui.run_button(label="Serve laptop requests" if REMOTE else "Run local steps")
     mo.hstack([steps, run_steps])
     return run_steps, steps
 
 
-@app.cell(hide_code=True)
+@app.cell
 async def _(
     REMOTE,
     export_delta,
@@ -1131,6 +1373,27 @@ async def _(
 
 
 @app.cell(hide_code=True)
+def _(get_history, mo):
+    _observed = get_history()
+    mo.stop(not _observed)
+    _last_step = max(_observed)
+    _last = _observed[_last_step]
+    mo.md(f"""
+    ### Pause and explain step {_last_step}
+
+    Your measured loss is **{_last["loss"]:.4f}** and mean reward is **{_last["reward"]:.3f}**.
+    The optimizer update was **{"applied" if _last.get("trained") else "skipped"}**.
+
+    - Open **Step metrics** in Training progress. Did the model update when you expected it to?
+    - Compare the changed-weight size with the uploaded delta size. Is compression useful here?
+    - In Dedicated Inference mode, compare the served identity in the laptop log with this step.
+    - Run one more step. Does reward improve? A few stochastic batches can fluctuate;
+      loss and reward do not have to move together on every step.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
 def _(mo):
     finish_tracking = mo.ui.run_button(label="Finish W&B run")
     finish_tracking
@@ -1148,7 +1411,14 @@ def _(finish_tracking, mo, wandb_tracker):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## 5 · Cleanup
+    ## 5 · Finish the experiment
+
+    You have now connected a familiar RL trainer to a separate inference service.
+    Before leaving, explain the loop in your own words: **upload → trigger → wait → verify**.
+    Which step would be missing if you only copied files to S3?
+
+    Finish the W&B run above to flush metrics. Then release the compute resources below.
+
 
     The laptop driver deletes the deployment and any gateway it created when it exits, including
     on failure. Molab never creates or deletes Dedicated Inference resources. If the laptop process
