@@ -1066,13 +1066,13 @@ def _(get_history, mo):
         alt.Chart(history)
         .mark_line(point=True)
         .encode(x="step:O", y=alt.Y("reward:Q", scale=alt.Scale(domain=[0, 1])))
-        .properties(title="Reward"),
+        .properties(title="Reward", width=560, height=180),
         alt.Chart(
             history.melt("step", ["changed_mb", "wire_mb"], var_name="size", value_name="MiB")
         )
         .mark_bar()
         .encode(x="step:O", xOffset="size:N", y="MiB:Q", color="size:N")
-        .properties(title="Verified delta size"),
+        .properties(title="Verified delta size", width=560, height=180),
     ]
     for _metric, _title in [
         ("loss", "Training loss"),
@@ -1084,7 +1084,7 @@ def _(get_history, mo):
                 alt.Chart(history)
                 .mark_line(point=True)
                 .encode(x="step:O", y=alt.Y(f"{_metric}:Q", title=_title))
-                .properties(title=_title)
+                .properties(title=_title, width=560, height=180)
             )
     _phases = [
         k
@@ -1096,7 +1096,7 @@ def _(get_history, mo):
             alt.Chart(history.melt("step", _phases, var_name="stage", value_name="seconds"))
             .mark_bar()
             .encode(x="step:O", y="seconds:Q", color="stage:N")
-            .properties(title="Seconds per stage")
+            .properties(title="Seconds per stage", width=560, height=180)
         )
     mo.vstack(
         [
