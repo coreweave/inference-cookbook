@@ -6,32 +6,31 @@
 # requires-python = ">=3.12"
 # dependencies = [
 #     "marimo>=0.25",
-#     "cwtrain>=1.0.2",
+#     "cwtrain>=1.0.3,<2",
 #     "torch>=2.8",
-#     "transformers>=4.56",
+#     "transformers>=4.56,<6",
 #     "safetensors>=0.5",
 #     "huggingface-hub>=0.34",
 #     "altair>=5",
 #     "pandas>=2",
+#     "wandb>=0.19,<1",
 # ]
 # ///
 
-"""Train against a Dedicated Inference deployment from one GPU, with cwtrain.
+"""GPU training worker; Dedicated Inference stays on the laptop.
 
-Sized for a molab notebook (https://molab.marimo.io/notebooks): 4 CPU cores, 32 GiB of memory and
-one RTX PRO 6000. Qwen3-0.6B trains on the notebook's GPU; its rollouts come from a hot-load
-deployment, and every step's new weights go back to it as a verified, compressed delta.
+Run hotload_laptop.py on the laptop and use the same bucket, zone and fresh run ID here.
+Molab uses CAIOS/S3 credentials and a W&B key for rollout access and inline visualizations.
+Verified snapshots and control acknowledgments travel through the run's S3 prefix.
+See hotload-notebook.md for the two-process walkthrough.
 
     uvx marimo edit --sandbox training/examples/hotload_notebook.py
-
-Without a CoreWeave account, pick "Local" mode: the notebook samples on its own GPU instead and
-still writes, verifies and measures every delta, but publishes nothing.
 """
 
 import marimo
 
 __generated_with = "0.25.2"
-app = marimo.App(width="medium", app_title="cwtrain hot-load notebook")
+app = marimo.App(width="medium", app_title="cwtrain CAIOS training worker")
 
 
 @app.cell(hide_code=True)
@@ -41,10 +40,9 @@ def _():
     import os
     import random
     import re
-    import secrets
     import shutil
     import time
-    from datetime import UTC, datetime
+    import uuid
     from pathlib import Path
     from types import SimpleNamespace
 
@@ -53,43 +51,41 @@ def _():
     return (
         Path,
         SimpleNamespace,
-        UTC,
         asyncio,
-        datetime,
         json,
         mo,
         os,
         random,
         re,
-        secrets,
         shutil,
         time,
+        uuid,
     )
 
 
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    # Train against a hot-load deployment with `cwtrain`
+    # Train in Molab, manage inference on your laptop
 
-    An RL trainer that uses [CoreWeave Dedicated Inference](https://docs.coreweave.com/products/inference/rl-rollouts)
-    runs no inference engine of its own. Rollouts come from a deployment's OpenAI-compatible
-    endpoint, and after every training step the trainer **hot-loads** its new weights into that
-    deployment. This notebook runs that loop on one GPU with GRPO on Qwen3-0.6B and shows what
-    `cwtrain` does at each step:
+    The laptop creates and deletes Dedicated Inference resources and runs **all hot-load control**:
+    trigger, status polling, and replica verification. This notebook samples through a
+    **W&B-authenticated gateway**, trains Qwen3-0.6B on its GPU, verifies compressed deltas,
+    uploads them to **CoreWeave AI Object Storage (CAIOS)**, and displays W&B charts.
 
-    | Step | `cwtrain` | What you see |
+    | Laptop | CAIOS handoff | Molab GPU |
     | --- | --- | --- |
-    | Mirror the served weights | `WeightMirror` | a byte-exact copy of what the deployment serves, checksummed per tensor |
-    | Stage and deploy | `upload_snapshot`, `InferenceClient` | the base model in your bucket, a deployment with `hotLoad` |
-    | Publish the chain root | `HotLoader.publish` | a full snapshot, the root every delta chains from |
-    | Sample | `CompletionSampler` | exact token ids and log-probs from the endpoint |
-    | Train | (your loop, here 40 lines of torch) | reward, and how far the trainer's log-probs are from the engine's |
-    | Write the delta | `write_delta`, `WeightMirror.apply_delta` | only the changed tensors, XOR-encoded and zstd-compressed, verified before upload |
-    | Hot-load it | `HotLoader.publish`, `get_hot_load` | each replica switching to the new version |
+    | Create W&B gateway and deployment; install root | Base + full snapshot ← | Load and upload |
+    | Authorize next step | Endpoint + predecessor → | Sample with W&B key; train |
+    | Trigger hot-load; poll; verify every replica | Verified delta ← | Encode, checksum, upload |
+    | Confirm the served identity | Acknowledgment → | Advance; log and display charts |
 
-    Each button does one of these, and most take seconds. Creating the deployment is the slow
-    one: it takes several minutes, and this notebook polls it instead of blocking.
+    The CoreWeave platform key stays on the laptop. Set `WANDB_API_KEY` here for gateway
+    rollout access and notebook charts. S3 credentials need **GetObject, PutObject and
+    prefix-scoped ListBucket** access under this run's prefix. Public model downloads
+    and package installation also need network access.
+
+    Choose **Local** to sample on this GPU too, without S3.
     """)
     return
 
@@ -98,14 +94,13 @@ def _(mo):
 def _(mo, os):
     import torch
 
-    if torch.cuda.is_available():
-        _p = torch.cuda.get_device_properties(0)
-        _gpu = f"**{_p.name}**, {_p.total_memory / 2**30:.0f} GiB"
-        DEVICE = "cuda"
-    else:
-        _gpu = "**none**: training runs on the CPU, slowly"
-        DEVICE = "cpu"
-    mo.md(f"GPU: {_gpu} · CPU cores: {os.cpu_count()}")
+    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+    _gpu = (
+        torch.cuda.get_device_properties(0).name
+        if DEVICE == "cuda"
+        else "none (CPU training is slow)"
+    )
+    mo.md(f"GPU: **{_gpu}** · CPU cores: {os.cpu_count()}")
     return DEVICE, torch
 
 
@@ -114,20 +109,13 @@ def _(mo):
     mo.md(r"""
     ## 1 · Settings
 
-    **Dedicated Inference** needs one secret, `COREWEAVE_API_TOKEN`: an API token with the
-    Inference Admin role in an organization where hot-load is enabled. The same token reaches
-    the AI Object Storage bucket. `cwic auth accesskey api-token` exchanges it for temporary
-    storage keys, which boto3 fetches through `credential_process`, so no long-lived key is
-    involved. The bucket must let the inference service read it (see the
-    [getting-started guide](https://docs.coreweave.com/products/inference/getting-started)).
-    In molab, set the token as a secret so it stays out of the notebook. The other values
-    default to `CWTRAIN_BUCKET`, `AWS_REGION` (the bucket's zone), `CWTRAIN_REGION`,
-    `CWTRAIN_GATEWAY_ID`, `CWTRAIN_INSTANCE_TYPE` and `CWTRAIN_RUNTIME_VERSION` when they are set.
+    Enable a GPU from Molab's Compute menu. In the Secrets panel, set `AWS_ACCESS_KEY_ID` and
+    `AWS_SECRET_ACCESS_KEY`; add `AWS_SESSION_TOKEN` if the credentials include one. Existing
+    AWS credential providers are also supported. Credential values are never written into messages.
 
-    Without a gateway id, the notebook uses a ready gateway in the deployment's region, or
-    creates one there.
-
-    **Local** needs nothing: the notebook samples with its own GPU.
+    Use the **same fresh run ID** in the laptop command and here. Restarting the model or notebook
+    kernel requires a new run ID; optimizer state is not restored from the uploaded deltas.
+    Temporary credentials must remain valid for the entire run.
     """)
     return
 
@@ -136,50 +124,44 @@ def _(mo):
 def _(mo, os):
     _env = os.environ.get
     settings = (
-        mo.md(
-            """
-            {mode}
+        mo.md("""
+    {mode}
 
-            {token}
+    {bucket} {zone}
 
-            {bucket} {zone}
+    {run_id}
 
-            {region} {gateway}
+    {access}
 
-            {instance_type} {runtime}
+    {secret}
 
-            {deployment_id}
-            """
-        )
+    {session_token}
+    """)
         .batch(
             mode=mo.ui.radio(
-                ["Dedicated Inference", "Local"],
-                value="Dedicated Inference" if _env("COREWEAVE_API_TOKEN") else "Local",
-                label="Rollouts from",
-                inline=True,
+                ["Laptop-managed Dedicated Inference", "Local"],
+                value="Laptop-managed Dedicated Inference",
+                label="Mode",
             ),
-            token=mo.ui.text(
-                value=_env("COREWEAVE_API_TOKEN", _env("CW_API_TOKEN", "")),
-                kind="password",
-                label="API token (also used for the bucket)",
-                full_width=True,
+            bucket=mo.ui.text(
+                value=_env("CWTRAIN_BUCKET", "gradient-hotloading"), label="CAIOS bucket"
             ),
-            bucket=mo.ui.text(value=_env("CWTRAIN_BUCKET", "gradient-hotloading"), label="Bucket"),
             zone=mo.ui.text(value=_env("AWS_REGION", "us-east-02a"), label="Bucket zone"),
-            region=mo.ui.text(
-                value=_env("CWTRAIN_REGION", "us-west-04a"), label="Deployment region"
+            run_id=mo.ui.text(
+                value=_env("CWTRAIN_RUN_ID", ""), label="Fresh run ID (same as laptop --run-id)"
             ),
-            gateway=mo.ui.text(value=_env("CWTRAIN_GATEWAY_ID", ""), label="Gateway id (optional)"),
-            instance_type=mo.ui.text(
-                value=_env("CWTRAIN_INSTANCE_TYPE", "h100-2x"), label="Deployment instance type"
+            access=mo.ui.text(
+                value=_env("AWS_ACCESS_KEY_ID", ""), kind="password", label="S3 access key ID"
             ),
-            runtime=mo.ui.text(
-                value=_env("CWTRAIN_RUNTIME_VERSION", "0.32.0+crwv.5"), label="dynamo-vllm version"
+            secret=mo.ui.text(
+                value=_env("AWS_SECRET_ACCESS_KEY", ""),
+                kind="password",
+                label="S3 secret access key",
             ),
-            deployment_id=mo.ui.text(
-                value=_env("CWTRAIN_DEPLOYMENT_ID", ""),
-                label="Existing deployment id (optional: reuse one that serves Qwen3-0.6B with hot-load)",
-                full_width=True,
+            session_token=mo.ui.text(
+                value=_env("AWS_SESSION_TOKEN", ""),
+                kind="password",
+                label="S3 session token (if issued)",
             ),
         )
         .form(submit_button_label="Use these settings", bordered=True)
@@ -189,139 +171,303 @@ def _(mo, os):
 
 
 @app.cell(hide_code=True)
-def _(os, shutil):
-    import hashlib
-    import platform
-    import tarfile
+def _(Path, json, mo, re, settings, uuid):
+    mo.stop(settings.value is None, mo.md("_Submit settings to continue._"))
+    cfg = dict(settings.value)
+    REMOTE = cfg["mode"] != "Local"
+    if REMOTE:
+        if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", cfg["run_id"]):
+            raise ValueError("Set a fresh run ID: 1–63 lowercase letters, digits or hyphens.")
+        if not cfg["bucket"] or not cfg["zone"]:
+            raise ValueError("Bucket and zone are required.")
+        if bool(cfg["access"]) != bool(cfg["secret"]):
+            raise ValueError(
+                "Supply both S3 access and secret keys, or leave both blank "
+                "for the AWS credential chain."
+            )
+        import boto3
+        from botocore.config import Config
 
-    # cwic exchanges COREWEAVE_API_TOKEN for temporary AI Object Storage keys. The version and
-    # checksums are those of the release that the hot-load E2E workflow pins.
-    CWIC_VERSION = "v1.44.0"
-    CWIC_SHA256 = {
-        "Linux_x86_64": "a6d41b550df3b2e4a223c775e574519d5d0f25855f26d036af8c2f629949131d",
-        "Linux_arm64": "ce12a1e09560b392048f3b307de50fcf5f099e9299f410ea480b99d536d25586",
-        "Darwin_x86_64": "a48bc1f1faa20b5ac06f7780c4d8fcb2d466db54fe45dff6f51b42c49fb073ce",
-        "Darwin_arm64": "436251143b063bde2f680f8eb004fc2f610603fe84b6c905459159275e3c311d",
-    }
-
-    def cwic_binary(work):
-        """cwic from PATH, or the pinned release, downloaded once and checked against its hash."""
-        found = shutil.which("cwic")
-        if found:
-            return found
-        target = work / "bin" / "cwic"
-        if target.exists():
-            return str(target)
-        machine = platform.machine().lower()
-        machine = {"aarch64": "arm64", "amd64": "x86_64"}.get(machine, machine)
-        asset = f"{platform.system()}_{machine}"
-        if asset not in CWIC_SHA256:
-            raise RuntimeError(f"no cwic release for {asset}; install cwic and put it on PATH")
-        import io
-
-        import httpx
-
-        url = f"https://github.com/coreweave/cwic/releases/download/{CWIC_VERSION}/cwic_{asset}.tar.gz"
-        data = httpx.get(url, follow_redirects=True, timeout=120).raise_for_status().content
-        if hashlib.sha256(data).hexdigest() != CWIC_SHA256[asset]:
-            raise RuntimeError(f"{url} does not match its pinned SHA-256")
-        with tarfile.open(fileobj=io.BytesIO(data)) as tar:
-            binary = tar.extractfile("cwic").read()
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(binary)
-        target.chmod(0o755)
-        return str(target)
-
-    def storage_from_api_token(work, zone):
-        """Point boto3, and so cwtrain, at the bucket with keys that cwic derives from the token."""
-        config = work / "aws-config"
-        config.parent.mkdir(parents=True, exist_ok=True)
-        config.write_text(
-            f"[default]\ncredential_process = {cwic_binary(work)} auth accesskey api-token\n"
+        _keys = {}
+        if cfg["access"]:
+            _keys = dict(aws_access_key_id=cfg["access"], aws_secret_access_key=cfg["secret"])
+            if cfg["session_token"]:
+                _keys["aws_session_token"] = cfg["session_token"]
+        s3 = boto3.Session(**_keys).client(
+            "s3",
+            endpoint_url="https://cwobject.com",
+            region_name=cfg["zone"].upper(),
+            config=Config(
+                s3={"addressing_style": "virtual"},
+                connect_timeout=15,
+                read_timeout=120,
+                retries={"max_attempts": 3, "mode": "standard"},
+            ),
         )
-        for name in (
-            "AWS_ACCESS_KEY_ID",
-            "AWS_SECRET_ACCESS_KEY",
-            "AWS_SESSION_TOKEN",
-            "AWS_PROFILE",
+    else:
+        s3 = None
+    PREFIX = f"cwtrain-molab/{cfg['run_id']}" if REMOTE else ""
+    WORK = Path.home() / "cwtrain-notebook" / (cfg["run_id"] or "local") / uuid.uuid4().hex
+    WORK.mkdir(parents=True, exist_ok=True)
+
+    def read_message(relative):
+        try:
+            response = s3.get_object(Bucket=cfg["bucket"], Key=f"{PREFIX}/{relative}")
+        except Exception as exc:
+            if getattr(exc, "response", {}).get("Error", {}).get("Code") in ("NoSuchKey", "404"):
+                return None
+            raise
+        with response["Body"] as body:
+            return json.load(body)
+
+    def put_message(relative, session, **fields):
+        message = {"schema": 1, "run_id": cfg["run_id"], "session": session, **fields}
+        s3.put_object(
+            Bucket=cfg["bucket"],
+            Key=f"{PREFIX}/{relative}",
+            Body=json.dumps(message, allow_nan=False).encode(),
+            ContentType="application/json",
+        )
+
+    def check_message(message, session, step=None):
+        if (message.get("schema"), message.get("run_id"), message.get("session")) != (
+            1,
+            cfg["run_id"],
+            session,
         ):
-            os.environ.pop(name, None)  # boto3 would take these over credential_process
-        os.environ.update(
-            AWS_CONFIG_FILE=str(config),
-            AWS_REGION=zone.upper(),
-            CW_S3_ENDPOINT="https://cwobject.com",
-            CWIC_CACHE_DIR=str(work / "cwic-cache"),
-            AWS_EC2_METADATA_DISABLED="true",
-        )
+            raise ValueError("S3 message belongs to a different run/session or protocol version.")
+        if step is not None and message.get("step") != step:
+            raise ValueError("S3 message has an unexpected training step.")
 
-    return (storage_from_api_token,)
+    mo.md(
+        f"Run prefix: `s3://{cfg['bucket']}/{PREFIX}/`"
+        if REMOTE
+        else "Local mode: sampling and training on this GPU."
+    )
+    return (
+        PREFIX,
+        REMOTE,
+        WORK,
+        cfg,
+        check_message,
+        put_message,
+        read_message,
+        s3,
+    )
 
 
 @app.cell(hide_code=True)
-def _(Path, SimpleNamespace, mo, os, settings, storage_from_api_token):
-    from cwtrain.infra import lifecycle
-    from cwtrain.infra.storage import s3_client
+def _(os):
+    import logging
+    import math
 
-    mo.stop(settings.value is None, mo.md("_Submit the settings to continue._"))
-    cfg = dict(settings.value)
-    REMOTE = cfg["mode"] == "Dedicated Inference"
-    WORK = Path.home() / "cwtrain-notebook"
-    infra = SimpleNamespace(gateway_id=cfg["gateway"] or None, created_gateway=False)
-    if REMOTE:
-        _missing = [k for k in ("token", "bucket", "zone", "region") if not cfg[k]]
-        mo.stop(_missing, mo.callout(f"Fill in: {', '.join(_missing)}", kind="warn"))
-        os.environ["COREWEAVE_API_TOKEN"] = cfg["token"]
-        from cwtrain import InferenceClient
+    LOG = logging.getLogger("hotload-notebook")
 
-        client = InferenceClient()
-        storage_from_api_token(WORK, cfg["zone"])
-        s3_client().head_bucket(Bucket=cfg["bucket"])  # the token's storage keys reach the bucket
+    WANDB_METRICS = {
+        "reward": "train/reward",
+        "loss": "train/loss",
+        "grad_norm": "train/grad_norm",
+        "logprob_gap": "train/logprob_gap",
+        "trained": "train/updated",
+        "tensors_changed": "delta/tensors_changed",
+        "tensors_total": "delta/tensors_total",
+        "changed_mb": "delta/changed_mib",
+        "wire_mb": "delta/wire_mib",
+        "verified": "delta/tensors_verified",
+        "sample_s": "timing/sample_s",
+        "train_s": "timing/train_s",
+        "save_s": "timing/save_s",
+        "delta_s": "timing/encode_s",
+        "verify_s": "timing/verify_s",
+        "upload_s": "timing/upload_s",
+        "hotload_s": "timing/hotload_s",
+        "step_s": "timing/step_s",
+    }
 
-        _zone = cfg["region"].upper()
-        if infra.gateway_id:
-            _gw = client.get_gateway(infra.gateway_id)
-        else:
-            _gw = next(
-                (
-                    g
-                    for g in client.list_gateways()
-                    if g.status.name == "READY" and _zone in (z.upper() for z in g.zones)
-                ),
-                None,
-            )
-            infra.gateway_id = _gw.id if _gw else None
-        mo.output.replace(
-            mo.callout(
-                mo.md(
-                    f"Connected. Bucket **{cfg['bucket']}** ({cfg['zone'].upper()}) is reachable "
-                    "with storage keys from the API token. "
-                    + (
-                        f"Gateway **{_gw.name}** ({_gw.status.name}) in {', '.join(_gw.zones)}."
-                        if _gw
-                        else f"No ready gateway in {_zone}: **Create the deployment** creates one."
+    class NotebookTracker:
+        """Notebook telemetry. Logging failures cannot interrupt the served-version barrier."""
+
+        def __init__(self, sdk, run):
+            (self.sdk, self.run) = (sdk, run)
+            self.rows = []
+            run.define_metric("step")
+            for prefix in ("train", "delta", "timing", "hotload"):
+                run.define_metric(f"{prefix}/*", step_metric="step")
+
+        def log_step(self, step, identity, metrics, *, empty):
+            try:
+                row = {"step": step, "hotload/skipped": int(empty)}
+                for source, target in WANDB_METRICS.items():
+                    value = metrics.get(source)
+                    if isinstance(value, (int, float)) and math.isfinite(value):
+                        row[target] = int(value) if isinstance(value, bool) else value
+                (changed, wire) = (row.get("delta/changed_mib", 0), row.get("delta/wire_mib", 0))
+                if wire > 0:
+                    row["delta/compression_ratio"] = changed / wire
+                self.rows.append(row)
+                payload = dict(row)
+                xs = [r["step"] for r in self.rows]
+                if all(("delta/changed_mib" in r and "delta/wire_mib" in r for r in self.rows)):
+                    payload["charts/delta_size"] = self.sdk.plot.line_series(
+                        xs=xs,
+                        ys=[
+                            [r[key] for r in self.rows]
+                            for key in ("delta/changed_mib", "delta/wire_mib")
+                        ],
+                        keys=["Changed bf16 tensors (MiB)", "Compressed delta (MiB)"],
+                        title="Delta size before and after compression",
+                        xname="Training step",
                     )
-                ),
-                kind="success",
-            )
+                phases = [
+                    key
+                    for key in ("sample", "train", "save", "encode", "verify", "upload", "hotload")
+                    if all((f"timing/{key}_s" in r for r in self.rows))
+                ]
+                if phases:
+                    payload["charts/stage_seconds"] = self.sdk.plot.line_series(
+                        xs=xs,
+                        ys=[[r[f"timing/{key}_s"] for r in self.rows] for key in phases],
+                        keys=phases,
+                        title="Seconds per stage",
+                        xname="Training step",
+                    )
+                self.run.log(payload, step=step)
+                self.run.summary.update({"completed_steps": step, "last_served_identity": identity})
+            except Exception:
+                LOG.warning("W&B step logging failed; training continues")
+
+        def finish(self, exit_code):
+            try:
+                if self.rows:
+                    columns = [
+                        "step",
+                        *WANDB_METRICS.values(),
+                        "delta/compression_ratio",
+                        "hotload/skipped",
+                    ]
+                    table = self.sdk.Table(
+                        columns=columns,
+                        data=[[row.get(key) for key in columns] for row in self.rows],
+                    )
+                    self.run.log({"tables/verified_steps": table})
+            except Exception:
+                LOG.warning("W&B metrics table could not be saved")
+            finally:
+                try:
+                    self.run.finish(exit_code=exit_code)
+                except Exception:
+                    LOG.warning("W&B run finalization failed")
+
+    def start_notebook_tracking(options, work_dir, name):
+        import wandb
+
+        key = options["api_key"].strip() or os.environ.get("WANDB_API_KEY", "")
+        if options["mode"] == "online" and not key:
+            raise ValueError("Set WANDB_API_KEY in Molab Secrets or the masked W&B settings field.")
+        if key:
+            os.environ["WANDB_API_KEY"] = key
+        if wandb.run is not None:
+            wandb.run.finish()
+        wb_run = wandb.init(
+            project=options["project"],
+            entity=options["entity"] or None,
+            name=name,
+            mode=options["mode"],
+            dir=str(work_dir),
+            job_type="molab-grpo",
+            save_code=False,
+            settings=wandb.Settings(disable_git=True, disable_code=True, console="off"),
+            config={
+                "model": "Qwen/Qwen3-0.6B",
+                "learning_rate": 1e-5,
+                "training_host": "molab",
+                "management_host": "laptop",
+            },
+        )
+        try:
+            return NotebookTracker(wandb, wb_run)
+        except BaseException:
+            wb_run.finish(exit_code=1)
+            raise
+
+    return (start_notebook_tracking,)
+
+
+@app.cell(hide_code=True)
+def _(mo, os):
+    wandb_settings = (
+        mo.md("""
+    ## W&B visualization
+
+    Set `WANDB_API_KEY` in **Molab Secrets** or enter it below. W&B logging runs on this GPU
+    notebook, and its live dashboard is embedded here. The laptop sends hot-load timing and
+    served-version status back through CAIOS; it needs no W&B key.
+    This key also authenticates rollout sampling through the gateway. Start W&B before
+    training, or set the key in Secrets when logging is disabled. Restarting W&B starts a new run.
+
+    {enabled} {mode}
+
+    {project} {entity}
+
+    {api_key}
+    """)
+        .batch(
+            enabled=mo.ui.checkbox(value=True, label="Enable W&B"),
+            mode=mo.ui.dropdown(["online", "offline"], value="online", label="W&B mode"),
+            project=mo.ui.text(
+                value=os.environ.get("WANDB_PROJECT", "cwtrain-molab"), label="W&B project"
+            ),
+            entity=mo.ui.text(
+                value=os.environ.get("WANDB_ENTITY", ""), label="W&B entity (optional)"
+            ),
+            api_key=mo.ui.text(
+                value=os.environ.get("WANDB_API_KEY", ""), kind="password", label="W&B API key"
+            ),
+        )
+        .form(submit_button_label="Start or restart W&B run", bordered=True)
+    )
+    wandb_settings
+    return (wandb_settings,)
+
+
+@app.cell(hide_code=True)
+def _(WORK, cfg, start_notebook_tracking, wandb_settings):
+    wandb_tracker = None
+    if wandb_settings.value is not None and wandb_settings.value["enabled"]:
+        wandb_tracker = start_notebook_tracking(
+            wandb_settings.value, WORK, cfg["run_id"] or "molab-local"
+        )
+    return (wandb_tracker,)
+
+
+@app.cell(hide_code=True)
+def _(mo, wandb_tracker):
+    if wandb_tracker is None:
+        _wb_display = mo.md(
+            "_Start a W&B run above to show its dashboard here. Live charts remain below._"
+        )
+    elif wandb_tracker.run.url:
+        _wb_display = mo.vstack(
+            [
+                mo.md(f"[Open W&B run in a new tab]({wandb_tracker.run.url})"),
+                mo.Html(wandb_tracker.run.to_html(height=720)),
+            ]
         )
     else:
-        client = None
-        mo.output.replace(
-            mo.callout("Local mode: rollouts on this GPU; nothing is published.", kind="info")
+        _wb_display = mo.md(
+            "**W&B offline recording is active.** Use the live charts below; sync the run later."
         )
-    return REMOTE, WORK, cfg, client, infra, lifecycle, s3_client
+    _wb_display
+    return
 
 
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## 2 · The model and the weight mirror
+    ## 2 · Load the model and build its weight mirror
 
-    The trainer keeps fp32 master weights and an AdamW optimizer on the GPU. What it publishes is
-    bf16, the dtype the deployment serves. `WeightMirror` keeps a byte-exact copy of the
-    **served** weights with an Adler-32 checksum per tensor. Every delta is computed against
-    it and applied to it, so the trainer always knows exactly what the deployment serves, and can
-    cut the chain with a full snapshot at any version.
+    This keeps fp32 training weights and AdamW on the GPU, plus a byte-exact bf16 mirror on disk.
+    The mirror verifies every delta before it can be uploaded.
     """)
     return
 
@@ -334,293 +480,176 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(
-    DEVICE,
-    Path,
-    SimpleNamespace,
-    UTC,
-    WORK,
-    cfg,
-    datetime,
-    load_model,
-    mo,
-    secrets,
-    time,
-    torch,
-):
+def _(DEVICE, SimpleNamespace, WORK, cfg, load_model, mo, time, torch, uuid):
     mo.stop(not load_model.value)
+    from cwtrain.hotload import WeightMirror, inspect_snapshot, upload_snapshot
+    from cwtrain.hotload.mirror import tensor_locations
     from huggingface_hub import snapshot_download
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    from cwtrain.hotload import WeightMirror
-    from cwtrain.hotload.mirror import tensor_locations
-
     MODEL = "Qwen/Qwen3-0.6B"
     REVISION = "c1899de289a04d12100db370d81485cdf75e47ca"
-
     _t = time.monotonic()
-    _base = Path(
-        snapshot_download(
-            MODEL,
-            revision=REVISION,
-            local_dir=WORK / "base",
-            allow_patterns=["*.json", "*.safetensors", "*.txt", "merges.txt"],
-        )
+    # WORK is unique to this model initialization; do not reuse an optimizer from another session.
+    _base = snapshot_download(
+        MODEL,
+        revision=REVISION,
+        local_dir=WORK / "base",
+        allow_patterns=["*.json", "*.safetensors", "*.txt", "merges.txt"],
     )
-    _download = time.monotonic() - _t
+    from pathlib import Path as _Path
 
-    _t = time.monotonic()
+    _base = _Path(_base)
     _tok = AutoTokenizer.from_pretrained(_base)
     _model = AutoModelForCausalLM.from_pretrained(_base, dtype=torch.float32).to(DEVICE)
     _model.gradient_checkpointing_enable()
     _model.config.use_cache = False
-    _load = time.monotonic() - _t
-
-    _t = time.monotonic()
     _mirror = WeightMirror.create(_base, WORK / "mirror", version="000000")
-    _mirror_s = time.monotonic() - _t
-
-    _name = f"molab-{datetime.now(UTC):%m%d-%H%M}-{secrets.token_hex(2)}"
     run = SimpleNamespace(
-        name=_name,
-        prefix=f"cwtrain-molab/{_name}",
+        session=uuid.uuid4().hex,
+        name=cfg["run_id"] or "local",
         work=WORK,
         base=_base,
         tok=_tok,
         model=_model,
-        # lr 1e-5: Adam moves each fp32 weight by about lr per step, so a few percent of the bf16
-        # values the deployment serves cross a rounding step, and the delta stays small
         opt=torch.optim.AdamW(_model.parameters(), lr=1e-5, weight_decay=0.0),
         mirror=_mirror,
-        names=sorted(tensor_locations(_base)),  # the tensors the deployment serves
+        names=sorted(tensor_locations(_base)),
         step=0,
-        published=[],  # identities, oldest first
-        pending=None,  # the hot-load in flight
-        deployment_id=cfg["deployment_id"] or None,
-        rollout_base_url=None,
-        served_model=None,
-        batch=None,
-        delta=None,
+        pending=None,
+        failed=False,
+        bootstrapped=False,
+        last_identity=f"{cfg['run_id']}-v000000",
     )
-    mo.md(
-        f"""
-        Run **`{run.name}`** · download {_download:.1f}s · load {_load:.1f}s · mirror {_mirror_s:.1f}s
-
-        The mirror holds {len(run.names)} tensors at version `{run.mirror.version}`, each with its
-        Adler-32 (`{run.names[0]}` → `{run.mirror.checksums[run.names[0]]}`).
-        """
-    )
-    return (run,)
-
-
-@app.cell(hide_code=True)
-def _(REMOTE, mo):
-    mo.stop(not REMOTE)
-    mo.md(r"""
-    ## 3 · Stage the base model and create the deployment
-
-    The deployment loads its base model from your bucket, under this run's prefix. It enables
-    hot-load at creation: the `hotLoad` section names the bucket and the prefix that the trainer
-    publishes snapshots under. Skip both buttons if you entered an existing deployment.
-    """)
-    return
-
-
-@app.cell(hide_code=True)
-def _(REMOTE, mo, run):
-    mo.stop(not REMOTE)
-    stage = mo.ui.run_button(label="Stage the base model", disabled=bool(run.deployment_id))
-    create = mo.ui.run_button(
-        label="Create the deployment", kind="warn", disabled=bool(run.deployment_id)
-    )
-    mo.hstack([stage, create], justify="start")
-    return create, stage
-
-
-@app.cell(hide_code=True)
-def _(cfg, mo, run, s3_client, stage, time):
-    mo.stop(not stage.value)
-    from cwtrain.hotload import inspect_snapshot, upload_snapshot
-
-    _t = time.monotonic()
-    _info = inspect_snapshot(run.base)
-    upload_snapshot(
-        _info,
-        bucket=cfg["bucket"],
-        path_prefix=f"{run.prefix}/models",
-        identity="base",
-        s3=s3_client(),
-    )
-    mo.md(
-        f"Uploaded {_info.total_bytes / 2**30:.2f} GiB to `s3://{cfg['bucket']}/{run.prefix}/models/base/` "
-        f"in {time.monotonic() - _t:.1f}s. Each object carries its SHA-256, so a retry uploads only "
-        "what is missing."
-    )
-    return
-
-
-@app.cell(hide_code=True)
-def _(cfg, client, create, infra, json, lifecycle, mo, run):
-    mo.stop(not create.value)
-    if infra.gateway_id is None:
-        with mo.status.spinner(f"Creating a gateway in {cfg['region'].upper()}"):
-            _gw = client.create_gateway(
-                {
-                    "name": run.name,
-                    "zones": [cfg["region"].upper()],
-                    "coreWeaveAuth": {},
-                    "bodyBasedRouting": {"apiType": "API_TYPE_OPENAI"},
-                }
-            )
-            infra.gateway_id, infra.created_gateway = _gw.id, True
-            lifecycle.wait_for_gateway(client, _gw.id)
-    deployment_spec = {
-        "name": run.name,
-        "gatewayIds": [infra.gateway_id],
-        "runtime": {
-            "engine": "dynamo-vllm",
-            "version": cfg["runtime"],
-            "engineConfig": {"max-model-len": "4096", "gpu-memory-utilization": "0.80"},
-        },
-        "resources": {"instanceType": cfg["instance_type"], "gpuCount": 1},
-        "model": {"name": run.name, "bucket": cfg["bucket"], "path": f"{run.prefix}/models/base"},
-        "autoscaling": {"min": 1, "max": 1, "concurrency": 64},
-        "traffic": {"weight": 100},
-        "hotLoad": {
-            "bucket": cfg["bucket"],
-            "pathPrefix": f"{run.prefix}/hotload",
-            "transitionMode": "TRANSITION_MODE_ASYNC",
-        },
-    }
-    _created = client.create_deployment(deployment_spec)
-    run.deployment_id = _created.id
-    mo.vstack(
-        [
-            mo.callout(
-                mo.md(
-                    f"Created **{_created.name}** `{_created.id}`. It holds its GPU until **Clean up**."
-                ),
-                kind="warn",
-            ),
-            mo.accordion(
-                {"Request body": mo.md(f"```json\n{json.dumps(deployment_spec, indent=2)}\n```")}
-            ),
-        ]
-    )
-    return
-
-
-@app.cell(hide_code=True)
-def _(REMOTE, mo):
-    mo.stop(not REMOTE)
-    deployment_refresh = mo.ui.refresh(
-        options=["5s", "15s", "30s"], default_interval="15s", label="Poll"
-    )
-    deployment_refresh
-    return (deployment_refresh,)
-
-
-@app.cell(hide_code=True)
-def _(REMOTE, client, create, deployment_refresh, lifecycle, mo, run):
-    mo.stop(not REMOTE)
-    deployment_refresh.value, create.value
-    mo.stop(not run.deployment_id, mo.md("_No deployment yet._"))
-    from cwtrain import HotLoader
-
-    deployment = client.get_deployment(run.deployment_id)
-    if deployment.ready and run.rollout_base_url is None:
-        _endpoints = lifecycle.endpoints(client, deployment)
-        run.rollout_base_url = lifecycle.rollout_base_url(_endpoints[0]) if _endpoints else None
-        run.served_model = deployment.model_name
-        run.loader = HotLoader(client, deployment.id, poll_interval=2.0, timeout=900)
-    _waiting = [
-        f"- {c.type}: {c.message or c.reason}"
-        for c in deployment.conditions
-        if c.status.name != "TRUE"
-    ]
-    mo.vstack(
-        [
-            mo.md(
-                f"Deployment **{deployment.name}**: **{deployment.status.name}**"
-                + (
-                    f" · rollouts at `{run.rollout_base_url}` · model `{run.served_model}`"
-                    if run.rollout_base_url
-                    else ""
-                )
-            ),
-            *([mo.md("\n".join(_waiting))] if _waiting and not deployment.ready else []),
-        ]
-    )
-    return (deployment,)
-
-
-@app.cell(hide_code=True)
-def _(REMOTE, mo):
-    mo.stop(not REMOTE)
-    mo.md(r"""
-    ### Publish the chain root
-
-    A delta is an XOR against the version before it, so the chain needs a full snapshot to start
-    from: the trainer's own copy of the base weights, `<run>-v000000`. The deployment's base
-    model cannot be the root. `write_full_snapshot` adds each tensor's checksum to the shard
-    metadata, so the engine verifies every tensor when it installs the snapshot.
-    """)
-    return
-
-
-@app.cell(hide_code=True)
-def _(REMOTE, deployment, mo):
-    mo.stop(not REMOTE)
-    publish_root = mo.ui.run_button(label="Publish v000000", disabled=not deployment.ready)
-    publish_root
-    return (publish_root,)
-
-
-@app.cell(hide_code=True)
-def _(mo, publish_root, run, shutil, time):
-    mo.stop(not publish_root.value)
-    _identity = f"{run.name}-v000000"
-    _t = time.monotonic()
-    _root = run.mirror.write_full_snapshot(run.work / "root")
-    _staged = time.monotonic() - _t
-    _t = time.monotonic()
-    _hl = run.loader.publish(_root, identity=_identity, wait=False)
-    _uploaded = time.monotonic() - _t
-    shutil.rmtree(_root)
-    run.published.append(_identity)
-    run.pending = _hl.id
-    mo.md(
-        f"Staged the full snapshot in {_staged:.1f}s, uploaded it in {_uploaded:.1f}s, and "
-        f"created hot-load `{_hl.id}`. Watch it below."
-    )
-    return
+    mo.md(f"Loaded {MODEL} and mirrored {len(run.names)} tensors in {time.monotonic() - _t:.1f}s.")
+    return MODEL, REVISION, inspect_snapshot, run, upload_snapshot
 
 
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## 4 · One training step
+    ## 3 · Upload the base model and chain root
 
-    Four buttons, one per stage. **Run steps** below does all four in a loop.
-
-    The task is arithmetic with a checkable answer: the reward is 1 when the last `\boxed{}`
-    holds the right number. Each step samples 8 prompts × 4 completions, and GRPO pushes up the
-    completions that beat their group's mean.
+    This writes the base checkpoint and a checksummed full snapshot, then writes `ready.json`
+    **last**. The laptop waits for that marker before creating the deployment. Upload retries are
+    safe. Once ready, start the laptop driver and click **Serve laptop requests** below.
     """)
     return
 
 
 @app.cell(hide_code=True)
-def _(DEVICE, asyncio, os, random, re, run, shutil, time, torch):
+def _(REMOTE, mo):
+    mo.stop(not REMOTE)
+    bootstrap = mo.ui.run_button(label="Upload base model and chain root")
+    bootstrap
+    return (bootstrap,)
+
+
+@app.cell(hide_code=True)
+def _(
+    MODEL,
+    PREFIX,
+    REMOTE,
+    REVISION,
+    bootstrap,
+    cfg,
+    inspect_snapshot,
+    mo,
+    put_message,
+    read_message,
+    run,
+    s3,
+    upload_snapshot,
+):
+    mo.stop(not REMOTE)
+    mo.stop(not bootstrap.value)
+    _existing = read_message("ready.json")
+    if _existing is not None and _existing.get("session") != run.session:
+        raise ValueError(
+            "This run ID already has a trainer. Use a fresh run ID after any model/kernel restart."
+        )
+    upload_snapshot(
+        inspect_snapshot(run.base),
+        bucket=cfg["bucket"],
+        path_prefix=f"{PREFIX}/models",
+        identity="base",
+        s3=s3,
+    )
+    _root = run.work / "root"
+    if not (_root / "model.safetensors.index.json").exists():
+        run.mirror.write_full_snapshot(_root)
+    upload_snapshot(
+        inspect_snapshot(_root),
+        bucket=cfg["bucket"],
+        path_prefix=f"{PREFIX}/hotload",
+        identity=run.last_identity,
+        s3=s3,
+    )
+    put_message(
+        "ready.json", run.session, model=MODEL, revision=REVISION, root_identity=run.last_identity
+    )
+    run.bootstrapped = True
+    mo.md("**Ready for the laptop driver.** The base model and chain root are uploaded.")
+    return
+
+
+@app.cell(hide_code=True)
+def _(DEVICE, asyncio, random, re, run, shutil, time, torch):
     PROMPTS, GROUP, MAX_TOKENS, TEMPERATURE = 8, 4, 384, 1.0
+
+    async def sample_remote(tasks, *, base_url, model, token):
+        from cwtrain.integrations.rollout import CompletionSampler, RolloutConfig
+
+        sampler = CompletionSampler(
+            RolloutConfig(
+                base_url=base_url,
+                model=model,
+                api_key=token,
+                concurrency=8,
+                require_logprobs=True,
+            )
+        )
+        try:
+            groups = await asyncio.gather(
+                *(
+                    sampler.sample(t["prompt_ids"], 4, max_tokens=384, temperature=1.0)
+                    for t in tasks
+                )
+            )
+        finally:
+            await sampler.aclose()
+        result = []
+        for group in groups:
+            if len(group) != 4:
+                raise ValueError("deployment did not return four completions per prompt")
+            row = []
+            for completion in group:
+                if (
+                    not completion.token_ids
+                    or not completion.token_logprobs
+                    or len(completion.token_ids) != len(completion.token_logprobs)
+                ):
+                    raise ValueError("deployment must return exact token IDs and aligned log-probs")
+                row.append(
+                    dict(
+                        ids=list(completion.token_ids),
+                        logprobs=list(completion.token_logprobs),
+                        text=completion.text,
+                        cached=completion.cached_tokens,
+                    )
+                )
+            result.append(row)
+        return result
 
     def make_prompts(step):
         rng = random.Random(step)
         tasks = []
         for _ in range(PROMPTS):
-            # hard enough that Qwen3-0.6B gets some wrong, so groups disagree and GRPO has signal
-            a, b, c = rng.randint(101, 999), rng.randint(13, 99), rng.randint(100, 999)
-            question = f"What is {a} * {b} + {c}? Think briefly, then put only the final number in \\boxed{{}}."
+            (a, b, c) = (rng.randint(101, 999), rng.randint(13, 99), rng.randint(100, 999))
+            question = (
+                f"What is {a} * {b} + {c}? Think briefly, then put only "
+                "the final number in \\boxed{}."
+            )
             ids = run.tok.apply_chat_template(
                 [{"role": "user", "content": question}],
                 add_generation_prompt=True,
@@ -632,57 +661,18 @@ def _(DEVICE, asyncio, os, random, re, run, shutil, time, torch):
         return tasks
 
     def reward(text, answer):
-        found = re.findall(r"\\boxed\{\s*([-\d,\.]+)\s*\}", text)
+        found = re.findall("\\\\boxed\\{\\s*([-\\d,\\.]+)\\s*\\}", text)
         try:
             return float(bool(found) and float(found[-1].replace(",", "")) == answer)
         except ValueError:
             return 0.0
 
-    async def sample_remote(tasks):
-        """One /v1/completions request per group: exact token ids and log-probs come back."""
-        from cwtrain.integrations.rollout import CompletionSampler, RolloutConfig
-
-        sampler = CompletionSampler(
-            RolloutConfig(
-                base_url=run.rollout_base_url,
-                model=run.served_model,
-                api_key=os.environ["COREWEAVE_API_TOKEN"],
-                concurrency=PROMPTS,
-            )
-        )
-        try:
-            groups = await asyncio.gather(
-                *(
-                    sampler.sample(
-                        t["prompt_ids"], GROUP, max_tokens=MAX_TOKENS, temperature=TEMPERATURE
-                    )
-                    for t in tasks
-                )
-            )
-        finally:
-            await sampler.aclose()
-        eos = run.tok.eos_token_id
-        return [
-            [
-                {
-                    "ids": list(c.token_ids) if c.token_ids else run.tok.encode(c.text) + [eos],
-                    "logprobs": list(c.token_logprobs)
-                    if c.token_ids and c.token_logprobs
-                    else None,
-                    "text": c.text,
-                    "cached": c.cached_tokens,
-                }
-                for c in completions
-            ]
-            for completions in groups
-        ]
-
     @torch.no_grad()
     def sample_local(tasks):
         """The same groups, sampled with this GPU: what the deployment does in remote mode."""
-        tok, model = run.tok, run.model
+        (tok, model) = (run.tok, run.model)
         model.eval()
-        width = max(len(t["prompt_ids"]) for t in tasks)
+        width = max((len(t["prompt_ids"]) for t in tasks))
         pad = tok.pad_token_id if tok.pad_token_id is not None else tok.eos_token_id
         ids = torch.tensor(
             [[pad] * (width - len(t["prompt_ids"])) + t["prompt_ids"] for t in tasks], device=DEVICE
@@ -716,7 +706,7 @@ def _(DEVICE, asyncio, os, random, re, run, shutil, time, torch):
             group = []
             for j in range(GROUP):
                 row = new[i * GROUP + j].tolist()
-                end = next((k + 1 for k, t in enumerate(row) if t in stops), len(row))
+                end = next((k + 1 for (k, t) in enumerate(row) if t in stops), len(row))
                 group.append(
                     {
                         "ids": row[:end],
@@ -730,25 +720,24 @@ def _(DEVICE, asyncio, os, random, re, run, shutil, time, torch):
 
     def train_step(batch):
         """GRPO with group-normalized advantages. Returns the step's metrics."""
-        tok, model, opt = run.tok, run.model, run.opt
+        (tok, model, opt) = (run.tok, run.model, run.opt)
         samples = []
         for task, group in zip(batch["tasks"], batch["groups"], strict=True):
             rewards = torch.tensor([reward(c["text"], task["answer"]) for c in group])
-            adv = (rewards - rewards.mean()) / (rewards.std() + 1e-4)
+            adv = (rewards - rewards.mean()) / (rewards.std() + 0.0001)
             samples += [
                 (task["prompt_ids"], c, float(r), float(a))
-                for c, r, a in zip(group, rewards, adv, strict=True)
+                for (c, r, a) in zip(group, rewards, adv, strict=True)
             ]
-        mean_reward = sum(s[2] for s in samples) / len(samples)
-        if all(a == 0 for *_, a in samples):
+        mean_reward = sum((s[2] for s in samples)) / len(samples)
+        if all((a == 0 for (*_, a) in samples)):
             return {"reward": mean_reward, "loss": 0.0, "logprob_gap": None, "trained": False}
-
-        tokens = sum(len(c["ids"]) for _, c, _, _ in samples)
-        loss_total, gap_sum, gap_n = 0.0, 0.0, 0
+        tokens = sum((len(c["ids"]) for (_, c, _, _) in samples))
+        (loss_total, gap_sum, gap_n) = (0.0, 0.0, 0)
         opt.zero_grad(set_to_none=True)
-        for k in range(0, len(samples), 8):  # micro-batches keep the vocab-sized logits small
+        for k in range(0, len(samples), 8):
             chunk = samples[k : k + 8]
-            seqs = [p + c["ids"] for p, c, _, _ in chunk]
+            seqs = [p + c["ids"] for (p, c, _, _) in chunk]
             width = max(map(len, seqs))
             ids = torch.tensor(
                 [s + [tok.eos_token_id] * (width - len(s)) for s in seqs], device=DEVICE
@@ -780,10 +769,9 @@ def _(DEVICE, asyncio, os, random, re, run, shutil, time, torch):
         }
 
     def export_delta(version):
-        """Save the bf16 weights, write the delta against the mirror, and verify it by applying it."""
-        from safetensors.torch import save_file
-
+        """Save bf16 weights, encode a delta and verify it against the mirror."""
         from cwtrain.hotload.delta import write_delta
+        from safetensors.torch import save_file
 
         timings = {}
         t = time.monotonic()
@@ -798,7 +786,6 @@ def _(DEVICE, asyncio, os, random, re, run, shutil, time, torch):
         )
         shutil.copy(run.base / "config.json", new_dir / "config.json")
         timings["save_s"] = time.monotonic() - t
-
         t = time.monotonic()
         delta_dir = run.work / "deltas" / f"v{version:06d}"
         shutil.rmtree(delta_dir, ignore_errors=True)
@@ -810,13 +797,12 @@ def _(DEVICE, asyncio, os, random, re, run, shutil, time, torch):
             base_version=f"{version - 1:06d}",
         )
         timings["delta_s"] = time.monotonic() - t
-
         t = time.monotonic()
         if stats.is_empty:
             run.mirror.advance(f"{version:06d}")
             verified = 0
         else:
-            verified = run.mirror.apply_delta(delta_dir).tensors_changed  # checks every Adler-32
+            verified = run.mirror.apply_delta(delta_dir).tensors_changed
         timings["verify_s"] = time.monotonic() - t
         shutil.rmtree(new_dir)
         return (
@@ -832,27 +818,7 @@ def _(DEVICE, asyncio, os, random, re, run, shutil, time, torch):
             },
         )
 
-    def wait_for_pending():
-        """Block until the last hot-load is served everywhere, so the next rollouts are on-policy."""
-        if run.pending is None:
-            return None
-        t = time.monotonic()
-        done = run.loader.wait(run.pending)
-        run.pending = None
-        return done, time.monotonic() - t
-
-    return (
-        GROUP,
-        MAX_TOKENS,
-        PROMPTS,
-        export_delta,
-        make_prompts,
-        reward,
-        sample_local,
-        sample_remote,
-        train_step,
-        wait_for_pending,
-    )
+    return export_delta, make_prompts, sample_local, sample_remote, train_step
 
 
 @app.cell(hide_code=True)
@@ -862,238 +828,178 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(REMOTE, mo, run):
-    run  # the buttons appear once the model is loaded
-    sample_button = mo.ui.run_button(label="a · Sample")
-    train_button = mo.ui.run_button(label="b · Train")
-    delta_button = mo.ui.run_button(label="c · Write the delta")
-    publish_button = mo.ui.run_button(label="d · Hot-load it", disabled=not REMOTE)
-    mo.hstack([sample_button, train_button, delta_button, publish_button], justify="start")
-    return delta_button, publish_button, sample_button, train_button
-
-
-@app.cell(hide_code=True)
-async def _(
-    GROUP,
-    MAX_TOKENS,
-    PROMPTS,
-    REMOTE,
+def _(
+    PREFIX,
+    cfg,
+    check_message,
+    export_delta,
+    inspect_snapshot,
     make_prompts,
-    mo,
-    reward,
+    os,
+    put_message,
+    read_message,
     run,
-    sample_button,
-    sample_local,
+    s3,
     sample_remote,
     time,
-    wait_for_pending,
+    train_step,
+    upload_snapshot,
 ):
-    mo.stop(not sample_button.value)
-    mo.stop(REMOTE and not run.published, mo.callout("Publish v000000 first.", kind="warn"))
-    _waited = wait_for_pending() if REMOTE else None
-    _tasks = make_prompts(run.step + 1)
-    _t = time.monotonic()
-    _groups = await sample_remote(_tasks) if REMOTE else sample_local(_tasks)
-    run.batch = {"tasks": _tasks, "groups": _groups, "seconds": time.monotonic() - _t}
-    _rows = [
-        {
-            "question": t["question"].split("?")[0] + "?",
-            "answer": t["answer"],
-            "reward": reward(c["text"], t["answer"]),
-            "tokens": len(c["ids"]),
-            "engine log-probs": c["logprobs"] is not None,
-            "completion": c["text"][-160:],
-        }
-        for t, g in zip(_tasks, _groups, strict=True)
-        for c in g
-    ]
-    mo.vstack(
-        [
-            mo.md(
-                (
-                    f"Hot-load `{_waited[0].identity}` was served after another {_waited[1]:.1f}s. "
-                    if _waited
-                    else ""
+    def wait_message(relative, step, timeout=1800):
+        deadline = time.monotonic() + timeout
+        while True:
+            message = read_message(relative)
+            if message is not None:
+                check_message(message, run.session, step)
+                return message
+            error = read_message("control/error.json")
+            if error is not None:
+                check_message(error, run.session)
+                raise RuntimeError("Laptop driver failed. Check its terminal before retrying.")
+            done = read_message("control/done.json")
+            if done is not None:
+                check_message(done, run.session)
+                if done["step"] <= run.step:
+                    return None
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    "Waiting for laptop S3 message timed out; "
+                    "retry while this kernel is still alive."
                 )
-                + f"Sampled {PROMPTS} × {GROUP} completions (≤ {MAX_TOKENS} tokens) "
-                f"{'from the deployment' if REMOTE else 'on this GPU'} in {run.batch['seconds']:.1f}s · "
-                f"mean reward **{sum(r['reward'] for r in _rows) / len(_rows):.2f}**"
-            ),
-            mo.ui.table(_rows, selection=None, page_size=8),
-        ]
-    )
-    return
+            time.sleep(2)
 
-
-@app.cell(hide_code=True)
-def _(mo, run, set_history, time, train_button, train_step):
-    mo.stop(not train_button.value)
-    mo.stop(run.batch is None, mo.callout("Sample first.", kind="warn"))
-    # each delta is against the version before it, so write this step's delta before the next step
-    mo.stop(
-        run.mirror.version != f"{run.step:06d}", mo.callout("Write the delta first.", kind="warn")
-    )
-    _t = time.monotonic()
-    _m = train_step(run.batch)
-    _m["train_s"] = time.monotonic() - _t
-    _m["sample_s"] = run.batch["seconds"]
-    run.batch = None
-    run.step += 1
-    set_history(lambda h, s=run.step: {**h, s: {**h.get(s, {}), **_m}})
-    mo.md(
-        f"Step **{run.step}** in {_m['train_s']:.1f}s · reward {_m['reward']:.2f} · loss {_m['loss']:.4f}"
-        + (
-            f" · mean \\|Δ log p\\| trainer vs engine **{_m['logprob_gap']:.4f}**"
-            if _m["logprob_gap"] is not None
-            else ""
-        )
-        + ("" if _m["trained"] else " · every group had equal rewards, so nothing changed")
-    )
-    return
-
-
-@app.cell(hide_code=True)
-def _(delta_button, export_delta, mo, run, set_history):
-    mo.stop(not delta_button.value)
-    mo.stop(
-        run.step == 0 or run.mirror.version == f"{run.step:06d}",
-        mo.callout("Train a step first.", kind="warn"),
-    )
-    _dir, _stats, _m = export_delta(run.step)
-    run.delta = (_dir, _stats)
-    set_history(lambda h, s=run.step: {**h, s: {**h.get(s, {}), **_m}})
-    mo.md(
-        f"""
-        Version `{run.step:06d}`: **{_m["tensors_changed"]} of {_m["tensors_total"]}** tensors changed
-        ({_m["changed_mb"]:.0f} MiB of bf16 in the changed tensors), **{_m["wire_mb"]:.1f} MiB** on the wire after XOR + zstd.
-        Saved in {_m["save_s"]:.1f}s, encoded in {_m["delta_s"]:.1f}s, and applied to the mirror in
-        {_m["verify_s"]:.1f}s, where every changed tensor matched its checksum
-        ({_m["verified"]} verified). The mirror is now at `{run.mirror.version}`.
-        """
-    )
-    return
-
-
-@app.cell(hide_code=True)
-def _(mo, publish_button, run, set_history, time):
-    mo.stop(not publish_button.value)
-    mo.stop(run.delta is None, mo.callout("Write the delta first.", kind="warn"))
-    _dir, _stats = run.delta
-    run.delta = None
-    _identity = f"{run.name}-v{run.step:06d}"
-    if _stats.is_empty:
-        mo.stop(
-            True,
-            mo.md(
-                "The delta is empty: the deployment already serves these weights. Nothing to publish."
-            ),
-        )
-    from cwtrain.hotload import PromptCachePolicy
-
-    _t = time.monotonic()
-    _hl = run.loader.publish(
-        _dir,
-        identity=_identity,
-        previous_identity=run.published[-1],
-        prompt_cache_policy=PromptCachePolicy.RESET_ALL,
-        wait=False,
-    )
-    _upload = time.monotonic() - _t
-    run.published.append(_identity)
-    run.pending = _hl.id
-    set_history(
-        lambda h, s=run.step: {**h, s: {**h.get(s, {}), "upload_s": _upload, "hot_load": _hl.id}}
-    )
-    mo.md(
-        f"Uploaded `{_identity}` in {_upload:.1f}s and created hot-load `{_hl.id}`, chained on `{run.published[-2]}`."
-    )
-    return
-
-
-@app.cell(hide_code=True)
-def _(REMOTE, mo):
-    mo.stop(not REMOTE)
-    hot_load_refresh = mo.ui.refresh(
-        options=["2s", "5s", "15s"], default_interval="5s", label="Hot-loads"
-    )
-    hot_load_refresh
-    return (hot_load_refresh,)
-
-
-@app.cell(hide_code=True)
-def _(REMOTE, client, hot_load_refresh, mo, run):
-    mo.stop(not REMOTE)
-    hot_load_refresh.value
-    mo.stop(not run.deployment_id or not run.published, mo.md("_No hot-loads yet._"))
-    from itertools import islice
-
-    _loads = list(islice(client.list_hot_loads(run.deployment_id), 50))
-    _latest = _loads[0] if _loads else None
-    _replicas = client.list_hot_load_replicas(_latest.id) if _latest else []
-    mo.vstack(
-        [
-            mo.md(
-                f"Latest **`{_latest.identity}`** ({_latest.spec.type.name}): **{_latest.state.name}**"
-                if _latest
-                else "_None yet._"
-            ),
-            mo.ui.table(
-                [
-                    {
-                        "replica": r.name,
-                        "zone": r.zone,
-                        "state": r.state.name,
-                        "serving": r.current_snapshot_identity,
-                        "error": r.error_reason,
-                    }
-                    for r in _replicas
-                ],
-                selection=None,
+    async def process_request():
+        if run.failed:
+            raise RuntimeError(
+                "A previous training/export failed. Restart the model with a fresh run ID."
             )
-            if _replicas
-            else mo.md(""),
-            mo.accordion(
-                {
-                    "History": mo.ui.table(
-                        [
-                            {
-                                "identity": h.identity,
-                                "type": h.spec.type.name,
-                                "state": h.state.name,
-                                "seconds": round(
-                                    (h.status.finished_at - h.status.created_at).total_seconds(), 1
-                                )
-                                if h.status.finished_at and h.status.created_at
-                                else None,
-                            }
-                            for h in _loads
-                        ],
-                        selection=None,
-                    )
-                }
-            ),
-        ]
-    )
-    return
+        if run.pending is None:
+            step = run.step + 1
+            request = wait_message(f"requests/{step:06d}.json", step)
+            if request is None:
+                return None
+            if request.get("previous_identity") != run.last_identity:
+                raise ValueError("Request refers to a different served snapshot.")
+            from urllib.parse import urlsplit
+
+            endpoint = request.get("rollout_base_url", "")
+            parsed = urlsplit(endpoint)
+            if (
+                parsed.scheme != "https"
+                or not parsed.hostname
+                or parsed.username is not None
+                or parsed.password is not None
+                or parsed.query
+                or parsed.fragment
+                or parsed.path.rstrip("/") != "/v1"
+                or request.get("model") != run.name
+            ):
+                raise ValueError("Invalid rollout endpoint or model in laptop request.")
+            token = os.environ.get("WANDB_API_KEY", "").strip()
+            if not token:
+                raise ValueError("Set WANDB_API_KEY in Molab for gateway rollout access.")
+            started = time.monotonic()
+            tasks = make_prompts(step)
+            groups = await sample_remote(tasks, base_url=endpoint, model=run.name, token=token)
+            batch = dict(tasks=tasks, groups=groups, sample_s=time.monotonic() - started)
+            if (
+                len(batch.get("tasks", [])) != 8
+                or any(len(g) != 4 for g in batch.get("groups", []))
+                or len(batch.get("groups", [])) != 8
+            ):
+                raise ValueError("Expected 8 prompts with 4 completions each.")
+            for task, group in zip(batch["tasks"], batch["groups"], strict=True):
+                if not task["prompt_ids"] or len(task["prompt_ids"]) > 4096:
+                    raise ValueError("Invalid prompt length.")
+                for completion in group:
+                    if (
+                        not completion["ids"]
+                        or len(completion["ids"]) > 384
+                        or len(completion["logprobs"]) != len(completion["ids"])
+                    ):
+                        raise ValueError("Completion tokens and log-probs must align.")
+            try:
+                started = time.monotonic()
+                metrics = train_step(batch)
+                metrics.update(train_s=time.monotonic() - started, sample_s=batch["sample_s"])
+                delta, stats, delta_metrics = export_delta(step)
+                metrics.update(delta_metrics)
+            except Exception as exc:
+                run.failed = True
+                put_message(
+                    "control/trainer-error.json", run.session, step=step, error=type(exc).__name__
+                )
+                raise
+            run.step = step
+            # Retain this transaction before any upload. A transient S3 failure must not retrain.
+            run.pending = dict(
+                step=step,
+                delta=delta,
+                empty=stats.is_empty,
+                metrics=metrics,
+                identity=run.last_identity if stats.is_empty else f"{run.name}-v{step:06d}",
+                previous_identity=run.last_identity,
+                upload_s=0.0,
+            )
+        pending = run.pending
+        if not pending["empty"]:
+            info = inspect_snapshot(
+                pending["delta"], previous_identity=pending["previous_identity"]
+            )
+            upload_started = time.monotonic()
+            try:
+                upload_snapshot(
+                    info,
+                    bucket=cfg["bucket"],
+                    path_prefix=f"{PREFIX}/hotload",
+                    identity=pending["identity"],
+                    s3=s3,
+                )
+            finally:
+                pending["upload_s"] += time.monotonic() - upload_started
+        pending["metrics"]["upload_s"] = pending["upload_s"]
+        put_message(
+            f"results/{pending['step']:06d}.json",
+            run.session,
+            **{
+                k: pending[k] for k in ("step", "empty", "metrics", "identity", "previous_identity")
+            },
+        )
+        ack = wait_message(f"acks/{pending['step']:06d}.json", pending["step"])
+        if ack is None or ack.get("identity") != pending["identity"]:
+            raise ValueError("Laptop did not acknowledge the expected served identity.")
+        run.last_identity = pending["identity"]
+        metrics = pending["metrics"]
+        for key in ("hotload_s", "step_s"):
+            value = ack.get("metrics", {}).get(key)
+            if isinstance(value, (int, float)) and 0 <= value < 86400:
+                metrics[key] = value
+        run.pending = None
+        return metrics
+
+    return (process_request,)
 
 
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## 5 · Run steps
+    ## 4 · Run training steps
 
-    The same four stages in a loop. In Dedicated Inference mode, each step waits until the
-    previous version is served before it samples, so every rollout comes from the weights it
-    trains.
+    In laptop-managed mode, this waits for permission in CAIOS, samples with W&B gateway auth,
+    trains, uploads each verified delta,
+    and waits for the laptop's served-version acknowledgment. Start the laptop driver with the same
+    step count. A retry after an upload timeout reuses the pending delta without training twice.
+
+    In Local mode, the same button samples and trains here, then verifies deltas without uploading.
     """)
     return
 
 
 @app.cell(hide_code=True)
-def _(mo):
-    steps = mo.ui.slider(1, 10, value=3, label="Steps", show_value=True)
-    run_steps = mo.ui.run_button(label="Run steps")
-    mo.hstack([steps, run_steps], justify="start")
+def _(REMOTE, mo):
+    steps = mo.ui.slider(1, 10, value=3, label="Maximum steps this click", show_value=True)
+    run_steps = mo.ui.run_button(label="Serve laptop requests" if REMOTE else "Run local steps")
+    mo.hstack([steps, run_steps])
     return run_steps, steps
 
 
@@ -1103,55 +1009,47 @@ async def _(
     export_delta,
     make_prompts,
     mo,
+    process_request,
     run,
     run_steps,
     sample_local,
-    sample_remote,
     set_history,
     steps,
     time,
     train_step,
-    wait_for_pending,
+    wandb_tracker,
 ):
     mo.stop(not run_steps.value)
-    mo.stop(REMOTE and not run.published, mo.callout("Publish v000000 first.", kind="warn"))
-    from cwtrain.hotload import PromptCachePolicy as _Policy
-
+    mo.stop(
+        REMOTE and not run.bootstrapped,
+        mo.callout("Upload the base model and chain root first.", kind="warn"),
+    )
     for _ in mo.status.progress_bar(range(steps.value), title="Training", remove_on_exit=True):
-        _m = {}
+        _step_started = time.monotonic()
         if REMOTE:
-            _waited = wait_for_pending()
-            if _waited:
-                set_history(
-                    lambda h, s=run.step, w=_waited: {
-                        **h,
-                        s: {**h.get(s, {}), "served_after_s": w[1]},
-                    }
-                )
-        _tasks = make_prompts(run.step + 1)
-        _t = time.monotonic()
-        _groups = await sample_remote(_tasks) if REMOTE else sample_local(_tasks)
-        _m["sample_s"] = time.monotonic() - _t
-        _t = time.monotonic()
-        _m.update(train_step({"tasks": _tasks, "groups": _groups}))
-        _m["train_s"] = time.monotonic() - _t
-        run.step += 1
-        _dir, _stats, _d = export_delta(run.step)
-        _m.update(_d)
-        if REMOTE and not _stats.is_empty:
-            _identity = f"{run.name}-v{run.step:06d}"
+            _metrics = await process_request()
+            if _metrics is None:
+                break
+        else:
+            _tasks = make_prompts(run.step + 1)
             _t = time.monotonic()
-            _hl = run.loader.publish(
-                _dir,
-                identity=_identity,
-                previous_identity=run.published[-1],
-                prompt_cache_policy=_Policy.RESET_ALL,
-                wait=False,
+            _groups = sample_local(_tasks)
+            _sample_s = time.monotonic() - _t
+            _t = time.monotonic()
+            _metrics = train_step({"tasks": _tasks, "groups": _groups})
+            _metrics.update(sample_s=_sample_s, train_s=time.monotonic() - _t)
+            _delta, _stats, _delta_metrics = export_delta(run.step + 1)
+            run.step += 1
+            _metrics.update(_delta_metrics)
+            _metrics["step_s"] = time.monotonic() - _step_started
+        set_history(lambda h, s=run.step, m=_metrics: {**h, s: m})
+        if wandb_tracker is not None:
+            wandb_tracker.log_step(
+                run.step,
+                run.last_identity if REMOTE else f"local-v{run.step:06d}",
+                _metrics,
+                empty=_metrics["tensors_changed"] == 0,
             )
-            _m["upload_s"] = time.monotonic() - _t
-            run.published.append(_identity)
-            run.pending = _hl.id
-        set_history(lambda h, s=run.step, m=_m: {**h, s: {**h.get(s, {}), **m}})
     mo.md(f"Done: now at step {run.step}.")
     return
 
@@ -1162,118 +1060,80 @@ def _(get_history, mo):
     import pandas as pd
 
     _h = get_history()
-    mo.stop(not _h, mo.md("_The charts fill in as you train._"))
+    mo.stop(not _h, mo.md("_Training metrics appear here._"))
     history = pd.DataFrame([{"step": s, **m} for s, m in sorted(_h.items())])
-    _base = alt.Chart(history).encode(x=alt.X("step:O", title="step"))
     _charts = [
-        _base.mark_line(point=True)
-        .encode(y=alt.Y("reward:Q", title="mean reward", scale=alt.Scale(domain=[0, 1])))
-        .properties(title="Reward", height=180),
-    ]
-    if "wire_mb" in history:
-        _charts.append(
-            alt.Chart(
-                history.melt("step", ["changed_mb", "wire_mb"], var_name="size", value_name="MiB")
-            )
-            .mark_bar()
-            .encode(x="step:O", xOffset="size:N", y="MiB:Q", color=alt.Color("size:N", title=None))
-            .properties(title="Delta: changed tensors vs on the wire", height=180)
-        )
-    if "logprob_gap" in history and history["logprob_gap"].notna().any():
-        _charts.append(
-            _base.mark_line(point=True)
-            .encode(y=alt.Y("logprob_gap:Q", title="mean |Δ log p|"))
-            .properties(title="Trainer vs engine log-probs", height=180)
-        )
-    _timing_cols = [
-        c
-        for c in (
-            "sample_s",
-            "train_s",
-            "save_s",
-            "delta_s",
-            "verify_s",
-            "upload_s",
-            "served_after_s",
-        )
-        if c in history
-    ]
-    _charts.append(
+        alt.Chart(history)
+        .mark_line(point=True)
+        .encode(x="step:O", y=alt.Y("reward:Q", scale=alt.Scale(domain=[0, 1])))
+        .properties(title="Reward"),
         alt.Chart(
-            history.melt("step", _timing_cols, var_name="stage", value_name="seconds").dropna()
+            history.melt("step", ["changed_mb", "wire_mb"], var_name="size", value_name="MiB")
         )
         .mark_bar()
-        .encode(x="step:O", y="seconds:Q", color=alt.Color("stage:N", sort=_timing_cols))
-        .properties(title="Seconds per stage", height=180)
-    )
+        .encode(x="step:O", xOffset="size:N", y="MiB:Q", color="size:N")
+        .properties(title="Verified delta size"),
+    ]
+    for _metric, _title in [
+        ("loss", "Training loss"),
+        ("grad_norm", "Gradient norm"),
+        ("logprob_gap", "Trainer versus engine log-probability gap"),
+    ]:
+        if _metric in history:
+            _charts.append(
+                alt.Chart(history)
+                .mark_line(point=True)
+                .encode(x="step:O", y=alt.Y(f"{_metric}:Q", title=_title))
+                .properties(title=_title)
+            )
+    _phases = [
+        k
+        for k in ("sample_s", "train_s", "save_s", "delta_s", "verify_s", "upload_s", "hotload_s")
+        if k in history
+    ]
+    if _phases:
+        _charts.append(
+            alt.Chart(history.melt("step", _phases, var_name="stage", value_name="seconds"))
+            .mark_bar()
+            .encode(x="step:O", y="seconds:Q", color="stage:N")
+            .properties(title="Seconds per stage")
+        )
     mo.vstack(
-        [mo.hstack(_charts[i : i + 2], widths="equal") for i in range(0, len(_charts), 2)]
-        + [mo.ui.table(history.round(3), selection=None)]
+        [
+            mo.md("### Live metrics — also logged to W&B when enabled"),
+            *_charts,
+            mo.ui.table(history.round(3), selection=None),
+        ]
     )
     return
 
 
 @app.cell(hide_code=True)
-def _(REMOTE, mo):
-    mo.stop(not REMOTE)
-    mo.md(r"""
-    ## 6 · Clean up
+def _(mo):
+    finish_tracking = mo.ui.run_button(label="Finish W&B run")
+    finish_tracking
+    return (finish_tracking,)
 
-    Deletes the deployment, which stops its GPU billing, the gateway if this notebook created
-    it, and every object under this run's prefix in the bucket: the staged base model and the
-    snapshots. Nothing outside the prefix is touched.
-    """)
+
+@app.cell(hide_code=True)
+def _(finish_tracking, mo, wandb_tracker):
+    mo.stop(not finish_tracking.value or wandb_tracker is None)
+    wandb_tracker.finish(0)
+    mo.md("W&B run finished. Start a new W&B run before logging more training steps.")
     return
 
 
 @app.cell(hide_code=True)
-def _(REMOTE, mo):
-    mo.stop(not REMOTE)
-    confirm = mo.ui.checkbox(label="Delete this run's deployment and objects")
-    confirm
-    return (confirm,)
+def _(mo):
+    mo.md(r"""
+    ## 5 · Cleanup
 
-
-@app.cell(hide_code=True)
-def _(confirm, mo):
-    cleanup = mo.ui.run_button(label="Clean up", kind="danger", disabled=not confirm.value)
-    cleanup
-    return (cleanup,)
-
-
-@app.cell(hide_code=True)
-def _(cfg, cleanup, client, infra, lifecycle, mo, run, s3_client):
-    mo.stop(not cleanup.value)
-
-    _done = []
-    # never delete a deployment or gateway that this run did not create
-    if run.deployment_id and not cfg["deployment_id"]:
-        if infra.created_gateway:
-            # a gateway can go only once its deployments are gone, so wait for this one
-            with mo.status.spinner("Deleting the deployment, then the gateway"):
-                lifecycle.delete_deployment(client, run.deployment_id)
-                lifecycle.delete_gateway(client, infra.gateway_id)
-            _done.append(
-                f"Deleted deployment `{run.deployment_id}` and gateway `{infra.gateway_id}`."
-            )
-        else:
-            client.delete_deployment(run.deployment_id)
-            _done.append(
-                f"Deleting deployment `{run.deployment_id}`; it is gone within a few minutes."
-            )
-    _prefix = f"{run.prefix}/"
-    assert _prefix.startswith("cwtrain-molab/molab-") and _prefix.count("/") == 2
-    _s3 = s3_client()
-    _deleted = 0
-    for _page in _s3.get_paginator("list_objects_v2").paginate(
-        Bucket=cfg["bucket"], Prefix=_prefix
-    ):
-        _keys = [{"Key": o["Key"]} for o in _page.get("Contents", [])]
-        if _keys:
-            _s3.delete_objects(Bucket=cfg["bucket"], Delete={"Objects": _keys, "Quiet": True})
-            _deleted += len(_keys)
-    _done.append(f"Deleted {_deleted} objects under `s3://{cfg['bucket']}/{_prefix}`.")
-    mo.callout(mo.md("\n\n".join(_done)), kind="success")
+    The laptop driver deletes the deployment and any gateway it created when it exits, including
+    on failure. Molab never creates or deletes Dedicated Inference resources. If the laptop process
+    was killed, run its `--cleanup` command using the saved local state. Uploaded run data remains
+    in CAIOS for inspection; remove that run prefix when you no longer need it. Release Molab's GPU
+    from the Compute menu when finished.
+    """)
     return
 
 

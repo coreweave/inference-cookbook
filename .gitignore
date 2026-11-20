@@ -44,3 +44,6 @@ logs/
 # directory: *.env.example -> *.env, *.example.json -> *.run.json
 *.env
 *.run.json
+
+# Local state and temporary credential cache for the notebook laptop driver
+.cwtrain-laptop/
