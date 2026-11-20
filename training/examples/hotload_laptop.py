@@ -43,6 +43,13 @@ def validate_run_id(value):
     return value
 
 
+def _run_id_argument(value):
+    try:
+        return validate_run_id(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"{exc}. For example: forge-demo-001.") from exc
+
+
 class Mailbox:
     """One prefix per run; JSON markers commit completed uploads, never partial snapshots."""
 
@@ -269,7 +276,7 @@ def parser():
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    p.add_argument("--run-id", required=True, type=validate_run_id)
+    p.add_argument("--run-id", required=True, type=_run_id_argument)
     p.add_argument("--bucket", default=os.environ.get("CWTRAIN_BUCKET"))
     p.add_argument("--zone", default=os.environ.get("AWS_REGION", "US-EAST-02A"))
     p.add_argument("--region", default=os.environ.get("CWTRAIN_REGION", "US-WEST-04A"))

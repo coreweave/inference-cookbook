@@ -68,25 +68,14 @@ weight-sync metrics between updates.
 
 ## Run both sides
 
-1. On the laptop, start the driver from the repository. It waits for Molab's ready marker:
-
-   ```bash
-   uv run training/examples/hotload_laptop.py \
-     --bucket YOUR_BUCKET --zone US-EAST-02A \
-     --run-id molab-demo-001 --steps 3 --storage-auth cwic \
-     --region US-WEST-04A --instance-type h100-2x \
-     --runtime 0.32.0+crwv.5
-   ```
-
-   Choose runtime, instance type and region that are available to your organization. The example
-   defaults mirror the original notebook; they are not an availability guarantee. The laptop
-   needs `uv`, network access to Dedicated Inference and CAIOS, and the platform token. It does
-   not load model weights or the tokenizer, and needs no GPU.
-
-2. Import `training/examples/hotload_notebook.py` into Molab and attach a GPU. The file is
-   self-contained, so uploading the rest of this repository is unnecessary.
-3. Enter the same bucket, zone, and run ID in **Set up your Dedicated Inference run**.
-   Submit the settings. Keep the CoreWeave platform key on the laptop.
+1. Import `training/examples/hotload_notebook.py` into Molab and attach a GPU.
+2. Enter your bucket and zone, choose a fresh run ID such as `forge-demo-001`, and submit
+   the settings. The run ID uses lowercase letters, digits, and hyphens.
+3. Copy the **Laptop command** in section 3. On the laptop, run it from the repository after
+   loading the CoreWeave key. It uses the submitted bucket, zone, and run ID, and waits for
+   Molab's ready marker. Follow the storage authentication instructions beside the command.
+   Set `--region`, `--instance-type`, and `--runtime` if your organization needs different
+   deployment settings from the defaults.
 4. In the model cell, set `run_id_to_load` to your run ID and run the cell. It loads Qwen3-0.6B
    and builds the weight mirror. Change `prompt_seed` in the prompt exercise to see another task.
 5. Read the upload cell, set `publish_weights = True`, and run it. Molab uploads both checkpoints

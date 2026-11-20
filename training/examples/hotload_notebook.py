@@ -255,9 +255,10 @@ def _(mo):
     `AWS_SECRET_ACCESS_KEY`; add `AWS_SESSION_TOKEN` if the credentials include one. Existing
     AWS credential providers are also supported. Credential values are never written into messages.
 
-    Use the **same fresh run ID** in the laptop command and here. Restarting the model or notebook
-    kernel requires a new run ID; optimizer state is not restored from the uploaded deltas.
-    Temporary credentials must remain valid for the entire run.
+    Enter a **fresh run ID** such as `forge-demo-001`. Start with a lowercase letter or digit,
+    then use lowercase letters, digits, or hyphens. The notebook uses this ID in the laptop
+    command below. Use a new ID after a model or kernel restart because the optimizer state
+    is lost. Temporary credentials must remain valid for the entire run.
     """)
     return
 
@@ -751,16 +752,11 @@ def _(mo):
     snapshot called the **chain root**. Every later delta refers to an exact predecessor.
     The chain is valid only when the trainer and service agree on that starting version.
 
-    Run this command in a terminal **on the laptop**, from this repository. Match the bucket,
-    zone, run ID, and step count in this notebook. `cwic` exchanges the platform key for temporary
-    S3 credentials. Use `--storage-auth aws` if you already configured S3 credentials.
-
-    ```bash
-    source ~/.profile
-    uv run training/examples/hotload_laptop.py \
-      --bucket YOUR_BUCKET --zone US-EAST-02A \
-      --run-id YOUR_FRESH_RUN_ID --steps 3 --storage-auth cwic
-    ```
+    Submit your run settings above to generate a command for your bucket, zone, and run ID.
+    Copy the command below and run it from this repository on the **laptop**.
+    Run `source ~/.profile` separately first if your CoreWeave key is set there.
+    The command uses `cwic` for temporary S3 credentials. Change to `--storage-auth aws`
+    if you already configured S3 credentials.
 
     The command waits for `ready.json`, creates a gateway and deployment, and installs the root.
     Resource creation and later hot-load calls stay on the laptop. Molab only sends rollout
@@ -772,6 +768,31 @@ def _(mo):
     Set `publish_weights = True` and run the cell. Look for the ready message. The cell writes
     `ready.json` only after both uploads finish. If an upload fails, run the same cell again.
     """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(cfg, mo):
+    import shlex
+
+    _command = shlex.join(
+        [
+            "uv",
+            "run",
+            "training/examples/hotload_laptop.py",
+            "--bucket",
+            cfg["bucket"],
+            "--zone",
+            cfg["zone"].upper(),
+            "--run-id",
+            cfg["run_id"],
+            "--steps",
+            "3",
+            "--storage-auth",
+            "cwic",
+        ]
+    )
+    mo.ui.code_editor(value=_command, language="shell", disabled=True, label="Laptop command")
     return
 
 
