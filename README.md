@@ -61,6 +61,14 @@ bucket policy.
 | [nemo-rl-grpo-nemotron-3.5-lightning-30b-a3b](training/examples/nemo-rl-grpo-nemotron-3.5-lightning-30b-a3b/README.md) | NeMo-RL, GRPO | Nemotron 3.5 Lightning 30B-A3B BF16 | DAPO-Math-17k | 1 replica, 2 H100 GPUs |
 | [axolotl-sft-qwen3-4b](training/examples/axolotl-sft-qwen3-4b/README.md) | Axolotl SFT, full or LoRA | Qwen3-4B | 2,000 rows of NuminaMath-CoT | 2 replicas, 1 GPU each |
 
+To try `cwtrain` without Kubernetes, use the [Molab training notebook](training/examples/hotload_notebook.py)
+with the [laptop driver](training/examples/hotload_laptop.py). The laptop handles Dedicated Inference
+creation, deletion and all hot-load control; Molab samples through a W&B-authenticated gateway,
+trains Qwen3-0.6B, displays native training charts, and exchanges verified delta weights through CAIOS.
+The CoreWeave API token stays on the laptop. Follow the [two-process walkthrough](training/examples/hotload-notebook.md) for setup,
+credential scope and cleanup. Set `WANDB_API_KEY` in Molab and start the notebook’s W&B run
+to record the same metrics shown in the native loss, reward, and gradient charts.
+
 ## Case studies
 
 A case study solves a real problem with Dedicated Inference: the problem, where the data comes

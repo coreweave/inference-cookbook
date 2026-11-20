@@ -1,0 +1,197 @@
+# Reinforcement Learning with Hot-Load APIs on CoreWeave Forge
+
+Run the training GPU in Molab while keeping Dedicated Inference management and all hot-load control on your laptop.
+The two processes communicate through CoreWeave AI Object Storage (CAIOS), using one fresh
+prefix per run. Molab uses S3 credentials and a W&B key for gateway rollout access and inline visualization;
+the CoreWeave platform API token stays on the laptop.
+
+| Component | Runs where | Access it needs |
+| --- | --- | --- |
+| Gateway/deployment creation, status and deletion | Laptop | CoreWeave API token |
+| Rollout sampling | Molab → W&B-authenticated Dedicated Inference gateway | W&B API key |
+| AdamW/GRPO training, bf16 mirror, XOR/zstd encoding and verification | Molab GPU | Public model download; CAIOS access |
+| Snapshot upload and control/acknowledgment exchange | Molab ↔ CAIOS ↔ laptop | S3 credentials |
+| Triggering hot-load and verifying every replica | Laptop | CoreWeave API token |
+
+The laptop creates a dedicated gateway with `weightsAndBiasesAuth` and sends only its endpoint,
+model name, step and served predecessor identity through S3. Molab samples exact token IDs and
+aligned log-probabilities directly using `WANDB_API_KEY`, trains, verifies its delta, uploads it,
+and commits a result marker. The laptop alone triggers the snapshot with `HotLoader.trigger`,
+polls its status and verifies every replica before acknowledging the step. Molab cannot sample
+its next batch before that acknowledgment, keeping the loop on-policy. Neither the CoreWeave
+key nor the W&B key is included in S3 messages.
+
+## Credentials and bucket
+
+Use a bucket that Dedicated Inference can read, in its own CAIOS zone. Bucket zone and deployment
+region are separate settings. Choose a fresh run ID, such as `molab-demo-001`; the shared prefix
+will be `cwtrain-molab/molab-demo-001/`.
+
+If the bucket policy limits inference reads to a prefix, set **S3 prefix root** inside that path.
+For example, use `cookbook/cwtrain-molab` if Dedicated Inference can read `cookbook/*`.
+The generated laptop command uses the same prefix root. The rule must cover the base model and
+the hot-load snapshots. See [Grant inference access to your bucket](https://docs.coreweave.com/products/inference/models#grant-inference-access-to-your-bucket).
+
+Molab's S3 credentials need:
+
+- `s3:GetObject` and `s3:PutObject` for objects under that prefix, including control messages,
+  step requests, base weights and snapshots.
+- `s3:ListBucket` restricted to that prefix, used by resumable snapshot uploads. Multipart-upload
+  permissions must also be available for large weight files.
+- No Dedicated Inference permissions or ability to mint credentials. Write-only credentials are
+  insufficient: the worker must read step requests and served-version acknowledgments.
+
+Set `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` in Molab Secrets. Set `AWS_SESSION_TOKEN`
+**only if the issuer supplied one**. Alternatively enter those values in the notebook's masked
+settings fields. Credentials issued with an expiry must remain valid for the whole run; this
+worker does not refresh them through the CoreWeave management API. Existing boto3 credential
+providers are supported when the form's credential fields are blank.
+
+On the laptop, source your profile and map its existing key name if needed:
+
+```bash
+source ~/.profile
+export COREWEAVE_API_TOKEN="${COREWEAVE_API_TOKEN:-$COREWEAVE_API_KEY}"
+```
+
+The driver accepts either name. Its default `--storage-auth aws` uses the laptop's usual AWS
+credential chain. With `--storage-auth cwic`, the driver uses the locally installed `cwic auth
+accesskey api-token` credential process instead. That exchange happens only on the laptop.
+Credentials are never included in the S3 messages or local resource-state JSON. The cwic cache
+is under the ignored `.cwtrain-laptop/` directory; treat it as local credential material.
+
+## Learn the system first
+
+The notebook opens with a system diagram and explanations of Dedicated Inference, gateways,
+replicas, cwtrain, snapshots, and hot-loads. Run the two visible code experiments before setting
+credentials: rebuild a small XOR delta and test a simulated serving-version barrier. They need
+no GPU or account. Edit the inputs and rerun each cell to check your predictions.
+
+The later exercises inspect a real tokenized prompt and ask you to read the training loop and
+laptop hot-load calls. The step control defaults to one so you can inspect loss, reward, and
+weight-sync metrics between updates.
+
+## Run both sides
+
+1. Import `training/examples/hotload_notebook.py` into Molab and attach a GPU.
+2. Enter your bucket and zone, choose a fresh run ID such as `forge-demo-001`, and submit
+   the settings. The run ID uses lowercase letters, digits, and hyphens.
+3. Copy the **Laptop command** in section 3. On the laptop, run it from the repository after
+   loading the CoreWeave key. It uses the submitted bucket, zone, and run ID, and waits for
+   Molab's ready marker. Follow the storage authentication instructions beside the command.
+   Set `--region`, `--instance-type`, and `--runtime` if your organization needs different
+   deployment settings from the defaults.
+   Use `--capacity-class on-demand` to restrict the deployment to on-demand capacity, or
+   `--capacity-class reserved` when you have a reservation for this run.
+4. In the model cell, set `run_id_to_load` to your run ID and run the cell. It loads Qwen3-0.6B
+   and builds the weight mirror. Change `prompt_seed` in the prompt exercise to see another task.
+5. Read the upload cell, set `publish_weights = True`, and run it. Molab uploads both checkpoints
+   and writes `ready.json` last. The laptop then creates the deployment and installs the chain root.
+6. Set `WANDB_API_KEY` in Molab through Secrets or the W&B form. In the training cell, set
+   `target_step = 1` and run it. Inspect the charts and serving version, then raise the target
+   to 2 and 3 one at a time. Use the laptop's `--steps` argument for the final target.
+7. Check the notebook's metrics and the laptop's verified served identities. By default the
+   laptop deletes the deployment and any gateway it created when it finishes or fails. Stop
+   Molab's GPU from the Compute menu when finished.
+
+Use the Run control on each code cell. Marimo may also ask you to run stale cells after a form submission.
+Both sides time out after 30 minutes per mailbox wait by default; the laptop timeout can be
+changed with `--timeout`.
+
+## Native training charts and W&B logging
+
+W&B logging runs **in the notebook**. Set `WANDB_API_KEY` in Molab Secrets or enter it in the
+masked W&B API key field. This is separate from the CoreWeave platform token, which stays on
+the laptop. The laptop driver needs no W&B key, SDK or tracking flags.
+
+After submitting the notebook's main settings:
+
+1. Under **W&B logging**, set the project and optional entity/team, and click
+   **Start or restart W&B run** before training.
+2. **Training progress** uses native notebook charts for loss, mean reward, gradient norm,
+   and trainer/engine log-probability gap. Charts work without W&B login or tracking.
+   Weight-sync sizes, timings, and the metric table are available in expandable details.
+   An optional external link opens the W&B run; no webpage is embedded in the notebook.
+3. Train normally. Molab logs reward, loss, gradient norm, log-probability gap, delta compression,
+   verified tensor counts, GPU/machine stats and stage timings. The laptop returns hot-load and
+   full-step timings in its CAIOS acknowledgments, so those are visible here too.
+4. After the last step, set `finish_wandb = True` and run the final code cell to save the
+   verified-step table. Set it back to `False` before starting another W&B run.
+
+`WANDB_PROJECT` defaults to `cwtrain-molab`; `WANDB_ENTITY` is optional. The form can override
+both. Logging begins when its form is submitted. Gateway rollout sampling still requires a W&B key
+when tracking is disabled.
+Choose **offline** in the form to record in the Molab filesystem without uploading, and sync
+that saved run before the notebook's ephemeral storage is lost.
+
+| Panel group | Metrics |
+| --- | --- |
+| `train/*` | Reward, loss, gradient norm, trainer/engine log-probability gap, optimizer-update flag |
+| `delta/*` | Changed/total/verified tensors, changed bf16 MiB, wire MiB, compression ratio |
+| `timing/*` | Sampling, training, save, encoding, checksum verification, upload, hot-load, full step |
+| `hotload/skipped` | Empty deltas that required no hot-load |
+| `charts/delta_size` | Changed bf16 tensors versus compressed delta, in MiB |
+| `charts/stage_seconds` | Seconds per pipeline stage |
+| `tables/verified_steps` | Numeric metrics for every successfully served step |
+
+Automatic W&B machine/GPU statistics now describe the Molab worker. Full-step timing includes
+CAIOS transfer and waiting. Upload timing accumulates retry attempts. The run summary records
+the completed step count and last served
+snapshot identity. Credentials, rollout text and model weights are excluded from this
+integration's logged data; automatic code/git/console capture is disabled. Logging failures do
+not interrupt training or the CAIOS acknowledgment barrier.
+
+## Ordering, retries and restarts
+
+The wire protocol uses JSON only, with a schema version, run ID, random trainer session ID,
+step number and exact predecessor identity. No pickles or executable control messages are used.
+
+```text
+cwtrain-molab/<run-id>/
+  models/base/                 # uploaded before ready.json
+  hotload/<run-id>-v000000/     # full snapshot, uploaded before ready.json
+  ready.json                   # trainer session + pinned model/revision
+  requests/000001.json          # laptop: gateway endpoint/model + served predecessor
+  hotload/<run-id>-v000001/     # Molab: verified snapshot shards and index
+  results/000001.json           # Molab: committed after snapshot upload
+  acks/000001.json              # laptop: served identity + timings, after replica verification
+  control/done.json            # laptop finished
+  control/error.json           # laptop failed; details stay in its terminal
+  control/trainer-error.json   # training/export failed; restart with a fresh run
+```
+
+For an empty delta, the laptop acknowledges the same version. If upload or acknowledgment
+waiting fails, keep the kernel alive and rerun the training cell with the same target.
+The notebook reuses the pending delta and trains each batch once. The upload
+helper checks existing files for matching content before reusing them. Retrying after a failed
+training/export is deliberately refused because optimizer/model mutation may already have
+happened.
+
+A kernel restart loses the optimizer and model state. Start both sides with a **new run ID**;
+reusing a prior ready marker is rejected. A driver restart is also a new run, after cleaning up
+any old resources. Versioned step requests are not replayed against a newly initialized model.
+
+## Cleanup and recovery
+
+The laptop saves planned resource IDs before creating them, so an interrupted creation is
+recoverable. Its local state is `.cwtrain-laptop/<run-id>/state.json`. Each run creates its own W&B-authenticated gateway. Cleanup waits until the created deployment
+is gone before deleting that gateway; recovery also preserves any unowned gateway in older state.
+
+If the laptop was killed, or you used `--keep-deployment` to retain resources for inspection:
+
+```bash
+uv run training/examples/hotload_laptop.py --run-id molab-demo-001 --cleanup
+```
+
+Preserve the local state until cleanup succeeds. CAIOS run objects are kept for inspection and
+can be deleted separately under that run's prefix. Molab never deletes deployments, gateways,
+or bucket objects. Starting or stopping the notebook alone does not stop Dedicated Inference
+billing; the laptop driver's cleanup does.
+
+## Checks without cloud resources
+
+```bash
+uv run --with pytest --with wandb --with-editable ./libs/cwtrain \
+  pytest training/examples/test_hotload_bridge.py -q
+uvx marimo check --strict training/examples/hotload_notebook.py
+```
