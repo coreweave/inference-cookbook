@@ -71,7 +71,8 @@ def _(mo):
     mo.md(r"""
     # Reinforcement Learning with Hot-Load APIs on CoreWeave Forge
 
-    **Train a model. Send its new weights to a running inference service. Repeat.**
+    **Train in Molab and hot-load each weight update into Dedicated Inference so the next
+    rollouts use the latest policy.**
 
     You may already know the RL loop: sample answers, score them, and update the policy.
     This tutorial adds one new idea: the trainer and the service that samples answers can
