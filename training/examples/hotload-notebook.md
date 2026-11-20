@@ -91,7 +91,7 @@ Marimo's lazy execution mode may require **Run stale cells** after a button or f
 Both sides time out after 30 minutes per mailbox wait by default; the laptop timeout can be
 changed with `--timeout`.
 
-## W&B visualizations inside Molab
+## Native training charts and W&B logging
 
 W&B logging runs **in the notebook**. Set `WANDB_API_KEY` in Molab Secrets or enter it in the
 masked W&B API key field. This is separate from the CoreWeave platform token, which stays on
@@ -99,11 +99,12 @@ the laptop. The laptop driver needs no W&B key, SDK or tracking flags.
 
 After submitting the notebook's main settings:
 
-1. Expand **W&B visualization**, set the project and optional entity/team, and click
+1. Under **W&B logging**, set the project and optional entity/team, and click
    **Start or restart W&B run** before training.
-2. The run's W&B dashboard is embedded directly in the notebook, with an external link too.
-   Private runs may require signing into W&B in the browser. The native live charts below
-   remain available if the browser blocks the embedded dashboard.
+2. **Training progress** uses native notebook charts for loss, mean reward, gradient norm,
+   and trainer/engine log-probability gap. Charts work without W&B login or tracking.
+   Weight-sync sizes, timings, and the metric table are available in expandable details.
+   An optional external link opens the W&B run; no webpage is embedded in the notebook.
 3. Train normally. Molab logs reward, loss, gradient norm, log-probability gap, delta compression,
    verified tensor counts, GPU/machine stats and stage timings. The laptop returns hot-load and
    full-step timings in its CAIOS acknowledgments, so those are visible here too.

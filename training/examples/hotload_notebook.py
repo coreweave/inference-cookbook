@@ -71,7 +71,7 @@ def _(mo):
     The laptop creates and deletes Dedicated Inference resources and runs **all hot-load control**:
     trigger, status polling, and replica verification. This notebook samples through a
     **W&B-authenticated gateway**, trains Qwen3-0.6B on its GPU, verifies compressed deltas,
-    uploads them to **CoreWeave AI Object Storage (CAIOS)**, and displays W&B charts.
+    uploads them to **CoreWeave AI Object Storage (CAIOS)**, and displays native training charts.
 
     | Laptop | CAIOS handoff | Molab GPU |
     | --- | --- | --- |
@@ -397,11 +397,11 @@ def _(os):
 def _(mo, os):
     wandb_settings = (
         mo.md("""
-    ## W&B visualization
+    ## W&B logging
 
     Set `WANDB_API_KEY` in **Molab Secrets** or enter it below. W&B logging runs on this GPU
-    notebook, and its live dashboard is embedded here. The laptop sends hot-load timing and
-    served-version status back through CAIOS; it needs no W&B key.
+    notebook. Native charts below show training loss, reward, and gradient norm.
+    The laptop returns hot-load timing and served-version status through CAIOS.
     This key also authenticates rollout sampling through the gateway. Start W&B before
     training, or set the key in Secrets when logging is disabled. Restarting W&B starts a new run.
 
@@ -443,21 +443,97 @@ def _(WORK, cfg, start_notebook_tracking, wandb_settings):
 @app.cell(hide_code=True)
 def _(mo, wandb_tracker):
     if wandb_tracker is None:
-        _wb_display = mo.md(
-            "_Start a W&B run above to show its dashboard here. Live charts remain below._"
-        )
+        _wb_display = mo.md("W&B logging is optional. Native training charts work without it.")
     elif wandb_tracker.run.url:
-        _wb_display = mo.vstack(
-            [
-                mo.md(f"[Open W&B run in a new tab]({wandb_tracker.run.url})"),
-                mo.Html(wandb_tracker.run.to_html(height=720)),
-            ]
-        )
+        _wb_display = mo.md(f"W&B logging is active. [Open run]({wandb_tracker.run.url}).")
     else:
-        _wb_display = mo.md(
-            "**W&B offline recording is active.** Use the live charts below; sync the run later."
-        )
+        _wb_display = mo.md("W&B offline recording is active. Sync the saved run later.")
     _wb_display
+    return
+
+
+@app.cell(hide_code=True)
+def _(get_history, mo):
+    import altair as alt
+    import pandas as pd
+
+    _h = get_history()
+    history = (
+        pd.DataFrame([{"step": s, **m} for s, m in sorted(_h.items())])
+        if _h
+        else pd.DataFrame(columns=["step", "loss", "reward"])
+    )
+    _charts = []
+    for _metric, _title in [
+        ("loss", "Training loss"),
+        ("reward", "Mean reward"),
+        ("grad_norm", "Gradient norm"),
+        ("logprob_gap", "Trainer versus engine log-probability gap"),
+    ]:
+        if _metric in history:
+            _charts.append(
+                alt.Chart(history)
+                .mark_line(point=True)
+                .encode(
+                    x=alt.X("step:Q", title="Training step", axis=alt.Axis(tickMinStep=1)),
+                    y=alt.Y(f"{_metric}:Q", title=_title, scale=alt.Scale(zero=False)),
+                    tooltip=["step:Q", alt.Tooltip(f"{_metric}:Q", title=_title)],
+                )
+                .properties(title=_title, width=560, height=180)
+            )
+    _details = []
+    if _h:
+        _details.append(
+            alt.Chart(
+                history.melt("step", ["changed_mb", "wire_mb"], var_name="size", value_name="MiB")
+            )
+            .mark_bar()
+            .encode(x="step:O", xOffset="size:N", y="MiB:Q", color="size:N")
+            .properties(title="Verified delta size", width=560, height=180)
+        )
+        _phases = [
+            k
+            for k in (
+                "sample_s",
+                "train_s",
+                "save_s",
+                "delta_s",
+                "verify_s",
+                "upload_s",
+                "hotload_s",
+            )
+            if k in history
+        ]
+        if _phases:
+            _details.append(
+                alt.Chart(history.melt("step", _phases, var_name="stage", value_name="seconds"))
+                .mark_bar()
+                .encode(x="step:O", y="seconds:Q", color="stage:N")
+                .properties(title="Seconds per stage", width=560, height=180)
+            )
+    mo.vstack(
+        [
+            mo.md("## Training progress"),
+            mo.md(
+                f"**{len(_h)} completed steps.** Metrics match those logged to W&B when enabled."
+                if _h
+                else "Run training steps below to populate these native notebook charts."
+            ),
+            *_charts,
+            *(
+                [
+                    mo.accordion(
+                        {
+                            "Weight sync and timing details": mo.vstack(_details),
+                            "Step metrics": mo.ui.table(history.round(3), selection=None),
+                        }
+                    )
+                ]
+                if _h
+                else []
+            ),
+        ]
+    )
     return
 
 
@@ -1051,60 +1127,6 @@ async def _(
                 empty=_metrics["tensors_changed"] == 0,
             )
     mo.md(f"Done: now at step {run.step}.")
-    return
-
-
-@app.cell(hide_code=True)
-def _(get_history, mo):
-    import altair as alt
-    import pandas as pd
-
-    _h = get_history()
-    mo.stop(not _h, mo.md("_Training metrics appear here._"))
-    history = pd.DataFrame([{"step": s, **m} for s, m in sorted(_h.items())])
-    _charts = [
-        alt.Chart(history)
-        .mark_line(point=True)
-        .encode(x="step:O", y=alt.Y("reward:Q", scale=alt.Scale(domain=[0, 1])))
-        .properties(title="Reward", width=560, height=180),
-        alt.Chart(
-            history.melt("step", ["changed_mb", "wire_mb"], var_name="size", value_name="MiB")
-        )
-        .mark_bar()
-        .encode(x="step:O", xOffset="size:N", y="MiB:Q", color="size:N")
-        .properties(title="Verified delta size", width=560, height=180),
-    ]
-    for _metric, _title in [
-        ("loss", "Training loss"),
-        ("grad_norm", "Gradient norm"),
-        ("logprob_gap", "Trainer versus engine log-probability gap"),
-    ]:
-        if _metric in history:
-            _charts.append(
-                alt.Chart(history)
-                .mark_line(point=True)
-                .encode(x="step:O", y=alt.Y(f"{_metric}:Q", title=_title))
-                .properties(title=_title, width=560, height=180)
-            )
-    _phases = [
-        k
-        for k in ("sample_s", "train_s", "save_s", "delta_s", "verify_s", "upload_s", "hotload_s")
-        if k in history
-    ]
-    if _phases:
-        _charts.append(
-            alt.Chart(history.melt("step", _phases, var_name="stage", value_name="seconds"))
-            .mark_bar()
-            .encode(x="step:O", y="seconds:Q", color="stage:N")
-            .properties(title="Seconds per stage", width=560, height=180)
-        )
-    mo.vstack(
-        [
-            mo.md("### Live metrics — also logged to W&B when enabled"),
-            *_charts,
-            mo.ui.table(history.round(3), selection=None),
-        ]
-    )
     return
 
 
